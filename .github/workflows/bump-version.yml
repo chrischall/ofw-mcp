@@ -35,7 +35,9 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
       - name: Bump version
-        run: npm version ${{ inputs.bump }} --message 'chore: bump version to v%s'
+        env:
+          BUMP: ${{ inputs.bump }}
+        run: npm version "$BUMP" --message 'chore: bump version to v%s'
 
       - name: Push commit and tag
         run: git push origin main --follow-tags
