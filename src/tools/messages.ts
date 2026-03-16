@@ -66,13 +66,13 @@ export async function handleTool(
         page?: number;
         size?: number;
       };
-      const path = `/pub/v3/messages?folders=${folderId}&page=${page}&size=${size}&sort=date&sortDirection=desc`;
+      const path = `/pub/v3/messages?folders=${encodeURIComponent(folderId)}&page=${page}&size=${size}&sort=date&sortDirection=desc`;
       const data = await client.request('GET', path);
       return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
     }
     case 'ofw_get_message': {
       const { messageId } = args as { messageId: string };
-      const data = await client.request('GET', `/pub/v3/messages/${messageId}`);
+      const data = await client.request('GET', `/pub/v3/messages/${encodeURIComponent(messageId)}`);
       return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
     }
     case 'ofw_send_message': {
