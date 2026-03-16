@@ -10,13 +10,14 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write  # needed to create GitHub releases
+      id-token: write  # needed for npm provenance
 
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
           cache: npm
           registry-url: https://registry.npmjs.org
 
@@ -41,11 +42,9 @@ jobs:
           print(f"Packaged {out} ({out.stat().st_size} bytes)")
           EOF
 
-      # Publish to npm
+      # Publish to npm via OIDC Trusted Publishing (no token required)
       - name: Publish to npm
-        run: npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public --provenance
 
       # Create GitHub Release and attach .skill file
       - name: Create GitHub Release
