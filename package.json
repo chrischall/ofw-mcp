@@ -1,6 +1,6 @@
 {
   "name": "ofw-mcp",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "OurFamilyWizard MCP server for Claude",
   "type": "module",
   "bin": {
@@ -21,6 +21,7 @@
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
+    "@vitest/coverage-v8": "^2.1.9",
     "typescript": "^5.0.0",
     "vitest": "^2.0.0"
   }

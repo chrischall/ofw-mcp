@@ -67,30 +67,119 @@ describe('ofw_get_message', () => {
 });
 
 describe('ofw_send_message', () => {
-  it('posts to /pub/v3/messages with subject, body, recipients', async () => {
+  it('posts to /pub/v3/messages with correct payload', async () => {
     const client = makeClient({ id: 200, status: 'sent' });
 
-    await handleTool('ofw_send_message', {
+    const result = await handleTool('ofw_send_message', {
       subject: 'Re: pickup',
       body: 'I will be there at 3pm',
-      recipients: [123],
+      recipientIds: [123],
     }, client);
 
-    expect(client.request).toHaveBeenCalledWith('POST', '/pub/v3/messages', expect.objectContaining({
+    expect(client.request).toHaveBeenCalledWith('POST', '/pub/v3/messages', {
       subject: 'Re: pickup',
       body: 'I will be there at 3pm',
-      recipients: [123],
-    }));
+      recipientIds: [123],
+      attachments: { myFileIDs: [] },
+      draft: false,
+      includeOriginal: false,
+    });
+    expect(result.content).toHaveLength(1);
+    expect(result.content[0].type).toBe('text');
+  });
+});
+
+describe('ofw_list_drafts', () => {
+  it('queries the DRAFTS folder with defaults', async () => {
+    const client = makeClient({ items: [] });
+
+    await handleTool('ofw_list_drafts', {}, client);
+
+    expect(client.request).toHaveBeenCalledWith(
+      'GET',
+      '/pub/v3/messages?folders=13471259&page=1&size=50&sort=date&sortDirection=desc'
+    );
+  });
+
+  it('passes custom page and size', async () => {
+    const client = makeClient({ items: [] });
+
+    await handleTool('ofw_list_drafts', { page: 2, size: 10 }, client);
+
+    expect(client.request).toHaveBeenCalledWith(
+      'GET',
+      '/pub/v3/messages?folders=13471259&page=2&size=10&sort=date&sortDirection=desc'
+    );
+  });
+});
+
+describe('ofw_save_draft', () => {
+  it('creates a new draft without messageId', async () => {
+    const client = makeClient({ entityId: 42 });
+
+    await handleTool('ofw_save_draft', {
+      subject: 'Draft subject',
+      body: 'Draft body',
+    }, client);
+
+    expect(client.request).toHaveBeenCalledWith('POST', '/pub/v3/messages', {
+      subject: 'Draft subject',
+      body: 'Draft body',
+      recipientIds: [],
+      attachments: { myFileIDs: [] },
+      draft: true,
+      includeOriginal: false,
+      replyToId: null,
+    });
+  });
+
+  it('updates an existing draft when messageId is provided', async () => {
+    const client = makeClient({ entityId: 99 });
+
+    await handleTool('ofw_save_draft', {
+      subject: 'Updated subject',
+      body: 'Updated body',
+      recipientIds: [3039202],
+      messageId: 99,
+      replyToId: 55,
+    }, client);
+
+    expect(client.request).toHaveBeenCalledWith('POST', '/pub/v3/messages', {
+      subject: 'Updated subject',
+      body: 'Updated body',
+      recipientIds: [3039202],
+      attachments: { myFileIDs: [] },
+      draft: true,
+      includeOriginal: false,
+      replyToId: 55,
+      messageId: 99,
+    });
+  });
+});
+
+describe('ofw_delete_draft', () => {
+  it('deletes a draft by messageId', async () => {
+    const client = makeClient({});
+
+    const result = await handleTool('ofw_delete_draft', { messageId: 42 }, client);
+
+    expect(client.request).toHaveBeenCalledWith('DELETE', '/pub/v3/messages/42');
+    expect(result.content).toHaveLength(1);
+    expect(result.content[0].type).toBe('text');
   });
 });
 
 describe('toolDefinitions', () => {
-  it('exports 4 message tools', () => {
+  it('exports 7 message tools', () => {
     const names = toolDefinitions.map((t) => t.name);
+    expect(names).toHaveLength(7);
     expect(names).toContain('ofw_list_message_folders');
     expect(names).toContain('ofw_list_messages');
     expect(names).toContain('ofw_get_message');
     expect(names).toContain('ofw_send_message');
+    expect(names).toContain('ofw_list_drafts');
+    expect(names).toContain('ofw_save_draft');
+    expect(names).toContain('ofw_delete_draft');
   });
 });
 

@@ -151,6 +151,53 @@ describe('OFWClient', () => {
     await expect(client.request('GET', '/pub/v1/test')).rejects.toThrow('OFW_USERNAME');
   });
 
+  it('throws if login POST returns non-2xx', async () => {
+    mockFetch([
+      LOGIN_INIT,
+      { status: 401, body: {}, headers: { 'content-type': 'application/json' } },
+    ]);
+
+    const client = new OFWClient();
+    await expect(client.request('GET', '/pub/v1/test')).rejects.toThrow('OFW login failed');
+  });
+
+  it('throws if login returns non-JSON (e.g. redirect to login page)', async () => {
+    // No content-type header → exercises the ?? '' fallback and the non-JSON branch
+    mockFetch([
+      LOGIN_INIT,
+      { status: 200, body: '<html>login page</html>' },
+    ]);
+
+    const client = new OFWClient();
+    await expect(client.request('GET', '/pub/v1/test')).rejects.toThrow('unexpected response');
+  });
+
+  it('proceeds without Cookie header when init response has no set-cookie', async () => {
+    const spy = mockFetch([
+      { status: 303, headers: {} }, // no set-cookie
+      LOGIN_SUCCESS,
+      { status: 200, body: { ok: true } },
+    ]);
+
+    const client = new OFWClient();
+    await client.request('GET', '/pub/v1/test');
+
+    const loginCall = spy.mock.calls[1][1] as RequestInit;
+    const headers = loginCall.headers as Record<string, string>;
+    expect(headers['Cookie']).toBeUndefined();
+  });
+
+  it('throws on non-2xx API response', async () => {
+    mockFetch([
+      LOGIN_INIT,
+      LOGIN_SUCCESS,
+      { status: 500, body: {} },
+    ]);
+
+    const client = new OFWClient();
+    await expect(client.request('GET', '/pub/v1/test')).rejects.toThrow('500');
+  });
+
   it('sends Authorization header with token', async () => {
     const spy = mockFetch([
       LOGIN_INIT,
@@ -164,6 +211,21 @@ describe('OFWClient', () => {
     const requestCall = spy.mock.calls[2];
     const init = requestCall[1] as RequestInit;
     expect((init.headers as Record<string, string>)['Authorization']).toBe(`Bearer ${MOCK_TOKEN}`);
+  });
+
+  it('sends JSON body when body is provided', async () => {
+    const spy = mockFetch([
+      LOGIN_INIT,
+      LOGIN_SUCCESS,
+      { status: 200, body: {} },
+    ]);
+
+    const client = new OFWClient();
+    await client.request('POST', '/pub/v1/test', { foo: 'bar' });
+
+    const requestCall = spy.mock.calls[2];
+    const init = requestCall[1] as RequestInit;
+    expect(init.body).toBe(JSON.stringify({ foo: 'bar' }));
   });
 
   it('sends ofw-client and ofw-version headers', async () => {

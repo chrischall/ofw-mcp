@@ -33,7 +33,7 @@ export class OFWClient {
       method,
       headers: {
         ...STATIC_HEADERS,
-        ...(this.token ? { Authorization: `Bearer ${this.token}` } : {}),
+        Authorization: `Bearer ${this.token!}`,
       },
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     });
@@ -82,7 +82,7 @@ export class OFWClient {
     });
     // Extract just the SESSION=value part (strip attributes like Path, Secure, etc.)
     const setCookie = initResponse.headers.get('set-cookie') ?? '';
-    const sessionCookie = setCookie.split(';')[0] ?? null;
+    const sessionCookie = setCookie.split(';')[0]; // split always returns a string; empty string is falsy
 
     const response = await fetch(`${BASE_URL}/ofw/login`, {
       method: 'POST',
