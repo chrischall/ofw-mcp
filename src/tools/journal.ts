@@ -36,6 +36,7 @@ export async function handleTool(
 ): Promise<CallToolResult> {
   switch (name) {
     case 'ofw_list_journal_entries': {
+      // Journal API uses 1-based offset (unlike expenses which start at 0)
       const { start = 1, max = 10 } = args as { start?: number; max?: number };
       const data = await client.request('GET', `/pub/v1/journals?start=${start}&max=${max}`);
       return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
