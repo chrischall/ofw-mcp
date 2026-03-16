@@ -68,10 +68,10 @@ export class OFWClient {
   }
 
   private async login(): Promise<void> {
-    const email = process.env.OFW_EMAIL;
+    const username = process.env.OFW_USERNAME;
     const password = process.env.OFW_PASSWORD;
-    if (!email || !password) {
-      throw new Error('OFW_EMAIL and OFW_PASSWORD must be set');
+    if (!username || !password) {
+      throw new Error('OFW_USERNAME and OFW_PASSWORD must be set');
     }
 
     // Spring Security requires a SESSION cookie before accepting the login POST.
@@ -94,7 +94,7 @@ export class OFWClient {
       body: new URLSearchParams({
         submit: 'Sign In',
         _eventId: 'submit',
-        username: email,
+        username: username,
         password,
       }).toString(),
     });

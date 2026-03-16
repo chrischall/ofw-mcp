@@ -24,8 +24,8 @@ export const toolDefinitions: Tool[] = [
   },
   {
     name: 'ofw_get_message',
-    description: 'Get a single OurFamilyWizard message by ID',
-    annotations: { readOnlyHint: true },
+    description: 'Get a single OurFamilyWizard message by ID. Note: reading an unread message marks it as read.',
+    annotations: { readOnlyHint: false },
     inputSchema: {
       type: 'object',
       properties: {

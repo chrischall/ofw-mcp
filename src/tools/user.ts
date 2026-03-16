@@ -11,8 +11,8 @@ export const toolDefinitions: Tool[] = [
   {
     name: 'ofw_get_notifications',
     description:
-      'Get OurFamilyWizard dashboard summary: unread message count, upcoming events, outstanding expenses',
-    annotations: { readOnlyHint: true },
+      'Get OurFamilyWizard dashboard summary: unread message count, upcoming events, outstanding expenses. Note: updates your last-seen status.',
+    annotations: { readOnlyHint: false },
     inputSchema: { type: 'object', properties: {}, required: [] },
   },
 ];
