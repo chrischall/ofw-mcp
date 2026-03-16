@@ -80,7 +80,7 @@ export async function handleTool(
       const variant = detailed ? 'detailed' : 'basic';
       const data = await client.request(
         'GET',
-        `/pub/v1/calendar/${variant}?startDate=${startDate}&endDate=${endDate}`
+        `/pub/v1/calendar/${variant}?startDate=${encodeURIComponent(startDate)}&endDate=${encodeURIComponent(endDate)}`
       );
       return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
     }
