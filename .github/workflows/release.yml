@@ -1,11 +1,6 @@
 name: Release
 
 on:
-  # Triggered automatically after Bump Version workflow succeeds
-  workflow_run:
-    workflows: ["Bump Version"]
-    types: [completed]
-  # Also triggered by manually pushed tags
   push:
     tags:
       - 'v*'
@@ -13,20 +8,12 @@ on:
 jobs:
   release:
     runs-on: ubuntu-latest
-    if: ${{ github.event_name == 'push' || github.event.workflow_run.conclusion == 'success' }}
     permissions:
       contents: write  # needed to create GitHub releases
       id-token: write  # needed for npm provenance
 
     steps:
       - uses: actions/checkout@v4.2.2
-        with:
-          fetch-depth: 0
-          fetch-tags: true
-
-      - name: Get latest tag
-        id: tag
-        run: echo "name=$(git describe --tags --abbrev=0)" >> $GITHUB_OUTPUT
 
       - uses: actions/setup-node@v4.4.0
         with:
@@ -61,6 +48,5 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.tag.outputs.name }}
           files: ofw-mcp.skill
           generate_release_notes: true

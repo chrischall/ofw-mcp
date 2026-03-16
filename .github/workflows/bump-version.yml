@@ -22,7 +22,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4.2.2
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          # PAT required — GITHUB_TOKEN pushes don't trigger other workflows
+          token: ${{ secrets.RELEASE_PAT }}
 
       - uses: actions/setup-node@v4.4.0
         with:
