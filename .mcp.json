@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "ofw": {
+      "command": "node",
+      "args": ["dist/index.js"],
+      "env": {
+        "OFW_EMAIL": "${OFW_EMAIL}",
+        "OFW_PASSWORD": "${OFW_PASSWORD}"
+      }
+    }
+  }
+}
