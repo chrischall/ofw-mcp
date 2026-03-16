@@ -18,7 +18,9 @@ describe('ofw_get_profile', () => {
     const result = await handleTool('ofw_get_profile', {}, client);
 
     expect(client.request).toHaveBeenCalledWith('GET', '/pub/v2/profiles');
-    expect(result.content[0].text).toContain('Chris');
+    expect(result.content).toHaveLength(1);
+    expect(result.content[0].type).toBe('text');
+    expect(JSON.parse(result.content[0].text)).toEqual(profiles);
   });
 });
 
@@ -30,7 +32,9 @@ describe('ofw_get_notifications', () => {
     const result = await handleTool('ofw_get_notifications', {}, client);
 
     expect(client.request).toHaveBeenCalledWith('GET', '/pub/v1/users/useraccountstatus');
-    expect(result.content[0].text).toContain('3');
+    expect(result.content).toHaveLength(1);
+    expect(result.content[0].type).toBe('text');
+    expect(JSON.parse(result.content[0].text)).toEqual(status);
   });
 });
 
@@ -39,5 +43,12 @@ describe('toolDefinitions', () => {
     const names = toolDefinitions.map((t) => t.name);
     expect(names).toContain('ofw_get_profile');
     expect(names).toContain('ofw_get_notifications');
+  });
+});
+
+describe('unknown tool', () => {
+  it('throws on unknown tool name', async () => {
+    const client = makeClient({});
+    await expect(handleTool('ofw_unknown', {}, client)).rejects.toThrow('Unknown tool: ofw_unknown');
   });
 });
