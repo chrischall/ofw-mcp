@@ -4,12 +4,12 @@ import type { OFWClient } from '../client.js';
 export const toolDefinitions: Tool[] = [
   {
     name: 'ofw_list_message_folders',
-    description: 'List OurFamilyWizard message folders with unread counts',
+    description: 'List OurFamilyWizard message folders (inbox, sent, etc.) and their unread counts. Returns folder IDs needed to call ofw_list_messages. Does NOT return message content.',
     inputSchema: { type: 'object', properties: {}, required: [] },
   },
   {
     name: 'ofw_list_messages',
-    description: 'List messages in an OurFamilyWizard folder',
+    description: 'List messages in an OurFamilyWizard folder. Call ofw_list_message_folders first to get folder IDs. Returns actual message content.',
     inputSchema: {
       type: 'object',
       properties: {

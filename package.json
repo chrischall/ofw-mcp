@@ -1,7 +1,14 @@
 {
   "name": "ofw-mcp",
   "version": "1.0.0",
+  "description": "OurFamilyWizard MCP server for Claude",
   "type": "module",
+  "bin": {
+    "ofw-mcp": "dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc",
     "dev": "node --env-file=.env dist/index.js",

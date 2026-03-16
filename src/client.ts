@@ -10,8 +10,8 @@ const STATIC_HEADERS = {
 } as const;
 
 interface LoginResponse {
-  token: string;
-  tokenExpiry?: string; // observed in localStorage; update from FINDINGS.md if different
+  auth: string; // Bearer token for all subsequent API calls
+  redirectUrl: string;
 }
 
 export class OFWClient {
@@ -74,23 +74,45 @@ export class OFWClient {
       throw new Error('OFW_EMAIL and OFW_PASSWORD must be set');
     }
 
-    // Endpoint and field names based on localStorage observation. Update from FINDINGS.md if needed.
-    const response = await fetch(`${BASE_URL}/pub/v1/auth/login`, {
+    // Spring Security requires a SESSION cookie before accepting the login POST.
+    // GET /ofw/login.form with redirect:manual to capture the Set-Cookie from the 303 response.
+    const initResponse = await fetch(`${BASE_URL}/ofw/login.form`, {
+      headers: { 'ofw-client': 'WebApplication', 'ofw-version': '1.0.0' },
+      redirect: 'manual',
+    });
+    // Extract just the SESSION=value part (strip attributes like Path, Secure, etc.)
+    const setCookie = initResponse.headers.get('set-cookie') ?? '';
+    const sessionCookie = setCookie.split(';')[0] ?? null;
+
+    const response = await fetch(`${BASE_URL}/ofw/login`, {
       method: 'POST',
-      headers: STATIC_HEADERS,
-      body: JSON.stringify({ username: email, password }),
+      headers: {
+        ...STATIC_HEADERS,
+        'Content-Type': 'application/x-www-form-urlencoded',
+        ...(sessionCookie ? { Cookie: sessionCookie } : {}),
+      },
+      body: new URLSearchParams({
+        submit: 'Sign In',
+        _eventId: 'submit',
+        username: email,
+        password,
+      }).toString(),
     });
 
     if (!response.ok) {
       throw new Error(`OFW login failed: ${response.status} ${response.statusText}`);
     }
 
+    const contentType = response.headers.get('content-type') ?? '';
+    if (!contentType.includes('application/json')) {
+      const body = await response.text();
+      throw new Error(`OFW login returned unexpected response (${contentType}): ${body.substring(0, 200)}`);
+    }
+
     const data = (await response.json()) as LoginResponse;
-    this.token = data.token;
-    // Default to 6h if expiry not returned; update field name after Task 1
-    this.tokenExpiry = data.tokenExpiry
-      ? new Date(data.tokenExpiry)
-      : new Date(Date.now() + 6 * 60 * 60 * 1000);
+    this.token = data.auth;
+    // Token expiry not returned by login endpoint; use 6h as a safe default
+    this.tokenExpiry = new Date(Date.now() + 6 * 60 * 60 * 1000);
   }
 
   private isTokenExpiredSoon(): boolean {
