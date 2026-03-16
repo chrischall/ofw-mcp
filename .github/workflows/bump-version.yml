@@ -14,10 +14,11 @@ on:
           - major
 
 jobs:
-  bump:
+  bump-and-release:
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: write  # needed to push commit/tag and create GitHub release
+      id-token: write  # needed for npm provenance
 
     steps:
       - uses: actions/checkout@v4
@@ -28,6 +29,11 @@ jobs:
         with:
           node-version: 24
           cache: npm
+          registry-url: https://registry.npmjs.org
+
+      - run: npm ci
+      - run: npm run build
+      - run: npm test
 
       - name: Configure git
         run: |
@@ -42,3 +48,30 @@ jobs:
 
       - name: Push commit and tag
         run: git push origin main --follow-tags
+
+      # Package the .skill file
+      - name: Package skill
+        run: |
+          python3 - <<'EOF'
+          import zipfile, pathlib
+
+          skill_name = "ofw-mcp"
+          skill_md = pathlib.Path("SKILL.md")
+          out = pathlib.Path(f"{skill_name}.skill")
+
+          with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
+              zf.write(skill_md, f"{skill_name}/SKILL.md")
+
+          print(f"Packaged {out} ({out.stat().st_size} bytes)")
+          EOF
+
+      # Publish to npm via OIDC Trusted Publishing (no token required)
+      - name: Publish to npm
+        run: npm publish --access public --provenance
+
+      # Create GitHub Release and attach .skill file
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ofw-mcp.skill
+          generate_release_notes: true
