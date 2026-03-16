@@ -37,7 +37,8 @@ jobs:
       - name: Bump version
         env:
           BUMP: ${{ inputs.bump }}
-        run: npm version "$BUMP" --message 'chore: bump version to v%s'
+        run: |
+          npm version "$BUMP" --message 'chore: bump version to v%s'
 
       - name: Push commit and tag
         run: git push origin main --follow-tags
