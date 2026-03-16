@@ -158,12 +158,14 @@ describe('ofw_save_draft', () => {
 });
 
 describe('ofw_delete_draft', () => {
-  it('deletes a draft by messageId', async () => {
+  it('deletes a draft by messageId using multipart form', async () => {
     const client = makeClient({});
 
     const result = await handleTool('ofw_delete_draft', { messageId: 42 }, client);
 
-    expect(client.request).toHaveBeenCalledWith('DELETE', '/pub/v3/messages/42');
+    expect(client.request).toHaveBeenCalledWith('DELETE', '/pub/v1/messages', expect.any(FormData));
+    const form = (client.request as ReturnType<typeof vi.fn>).mock.calls[0][2] as FormData;
+    expect(form.get('messageIds')).toBe('42');
     expect(result.content).toHaveLength(1);
     expect(result.content[0].type).toBe('text');
   });

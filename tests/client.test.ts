@@ -228,6 +228,24 @@ describe('OFWClient', () => {
     expect(init.body).toBe(JSON.stringify({ foo: 'bar' }));
   });
 
+  it('sends FormData body without Content-Type header', async () => {
+    const spy = mockFetch([
+      LOGIN_INIT,
+      LOGIN_SUCCESS,
+      { status: 200, body: {} },
+    ]);
+
+    const form = new FormData();
+    form.append('messageIds', '42');
+    const client = new OFWClient();
+    await client.request('DELETE', '/pub/v1/messages', form);
+
+    const init = spy.mock.calls[2][1] as RequestInit;
+    const h = init.headers as Record<string, string>;
+    expect(h['Content-Type']).toBeUndefined();
+    expect(init.body).toBe(form);
+  });
+
   it('sends ofw-client and ofw-version headers', async () => {
     const spy = mockFetch([
       LOGIN_INIT,

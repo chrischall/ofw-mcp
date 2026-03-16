@@ -29,13 +29,19 @@ export class OFWClient {
     body: unknown,
     isRetry: boolean
   ): Promise<T> {
+    const isFormData = body instanceof FormData;
+    const headers: Record<string, string> = {
+      'ofw-client': 'WebApplication',
+      'ofw-version': '1.0.0',
+      Accept: 'application/json',
+      Authorization: `Bearer ${this.token!}`,
+    };
+    if (!isFormData) headers['Content-Type'] = 'application/json';
+
     const response = await fetch(`${BASE_URL}${path}`, {
       method,
-      headers: {
-        ...STATIC_HEADERS,
-        Authorization: `Bearer ${this.token!}`,
-      },
-      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+      headers,
+      ...(body !== undefined ? { body: isFormData ? body : JSON.stringify(body) } : {}),
     });
 
     if (response.status === 401 && !isRetry) {

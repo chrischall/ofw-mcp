@@ -172,7 +172,9 @@ export async function handleTool(
     }
     case 'ofw_delete_draft': {
       const { messageId } = args as { messageId: number };
-      const data = await client.request('DELETE', `/pub/v3/messages/${encodeURIComponent(String(messageId))}`);
+      const form = new FormData();
+      form.append('messageIds', String(messageId));
+      const data = await client.request('DELETE', '/pub/v1/messages', form);
       return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
     }
     default:
