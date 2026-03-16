@@ -56,5 +56,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 });
 
+console.error('[ofw-mcp] This project was developed and is maintained by AI (Claude Sonnet 4.6). Use at your own discretion.');
+
 const transport = new StdioServerTransport();
 await server.connect(transport);

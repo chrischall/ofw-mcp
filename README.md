@@ -2,6 +2,9 @@
 
 A [Model Context Protocol](https://modelcontextprotocol.io) server that connects Claude to [OurFamilyWizard](https://www.ourfamilywizard.com), giving you natural-language access to your co-parenting messages, calendar, expenses, and journal.
 
+> [!WARNING]
+> **AI-developed project.** This codebase was entirely built and is actively maintained by [Claude Sonnet 4.6](https://www.anthropic.com/claude). No human has audited the implementation. Review all code and tool permissions before use.
+
 ## What you can do
 
 Ask Claude things like:
@@ -101,6 +104,9 @@ Read-only tools run automatically. Write tools ask for your confirmation first.
 | `ofw_list_messages` | Messages in a folder | Auto |
 | `ofw_get_message` | Full content of a single message | Auto |
 | `ofw_send_message` | Send a message | Confirm |
+| `ofw_list_drafts` | Draft messages | Auto |
+| `ofw_save_draft` | Create or update a draft | Confirm |
+| `ofw_delete_draft` | Delete a draft | Confirm |
 | `ofw_list_events` | Calendar events in a date range | Auto |
 | `ofw_create_event` | Create a calendar event | Confirm |
 | `ofw_update_event` | Update a calendar event | Confirm |

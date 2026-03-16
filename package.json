@@ -1,7 +1,8 @@
 {
   "name": "ofw-mcp",
   "version": "1.0.1",
-  "description": "OurFamilyWizard MCP server for Claude",
+  "description": "OurFamilyWizard MCP server for Claude — developed and maintained by AI (Claude Sonnet 4.6)",
+  "author": "Claude Sonnet 4.6 (AI) <https://www.anthropic.com/claude>",
   "type": "module",
   "bin": {
     "ofw-mcp": "dist/index.js"
@@ -16,13 +17,13 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.0",
-    "dotenv": "^16.0.0"
+    "@modelcontextprotocol/sdk": "^1.27.1",
+    "dotenv": "^17.3.1"
   },
   "devDependencies": {
-    "@types/node": "^20.0.0",
-    "@vitest/coverage-v8": "^2.1.9",
-    "typescript": "^5.0.0",
-    "vitest": "^2.0.0"
+    "@types/node": "^25.5.0",
+    "@vitest/coverage-v8": "^4.1.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.0"
   }
 }
