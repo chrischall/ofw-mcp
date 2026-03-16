@@ -36,7 +36,7 @@ export const toolDefinitions: Tool[] = [
   },
   {
     name: 'ofw_send_message',
-    description: 'Send a message via OurFamilyWizard',
+    description: 'Send a message via OurFamilyWizard. If sending from a draft, pass draftId to automatically delete the draft after sending.',
     annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
@@ -47,6 +47,10 @@ export const toolDefinitions: Tool[] = [
           type: 'array',
           items: { type: 'number' },
           description: 'Array of recipient user IDs (get from ofw_get_profile)',
+        },
+        draftId: {
+          type: 'number',
+          description: 'ID of the draft to delete after sending (omit if not sending from a draft)',
         },
       },
       required: ['subject', 'body', 'recipientIds'],
@@ -131,10 +135,11 @@ export async function handleTool(
       return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
     }
     case 'ofw_send_message': {
-      const { subject, body, recipientIds } = args as {
+      const { subject, body, recipientIds, draftId } = args as {
         subject: string;
         body: string;
         recipientIds: number[];
+        draftId?: number;
       };
       const data = await client.request('POST', '/pub/v3/messages', {
         subject, body, recipientIds,
@@ -142,6 +147,11 @@ export async function handleTool(
         draft: false,
         includeOriginal: false,
       });
+      if (draftId !== undefined) {
+        const form = new FormData();
+        form.append('messageIds', String(draftId));
+        await client.request('DELETE', '/pub/v1/messages', form);
+      }
       return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
     }
     case 'ofw_list_drafts': {

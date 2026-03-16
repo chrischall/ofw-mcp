@@ -87,6 +87,47 @@ describe('ofw_send_message', () => {
     expect(result.content).toHaveLength(1);
     expect(result.content[0].type).toBe('text');
   });
+
+  it('does not delete a draft when draftId is not provided', async () => {
+    const client = makeClient({ id: 200, status: 'sent' });
+
+    await handleTool('ofw_send_message', {
+      subject: 'Hello',
+      body: 'World',
+      recipientIds: [123],
+    }, client);
+
+    expect(client.request).toHaveBeenCalledTimes(1);
+    expect(client.request).not.toHaveBeenCalledWith('DELETE', expect.anything(), expect.anything());
+  });
+
+  it('deletes the draft after sending when draftId is provided', async () => {
+    const c = new OFWClient();
+    const spy = vi.spyOn(c, 'request')
+      .mockResolvedValueOnce({ id: 200, status: 'sent' })
+      .mockResolvedValueOnce({});
+
+    const result = await handleTool('ofw_send_message', {
+      subject: 'Hello',
+      body: 'World',
+      recipientIds: [123],
+      draftId: 42,
+    }, c);
+
+    expect(spy).toHaveBeenCalledTimes(2);
+    expect(spy).toHaveBeenNthCalledWith(1, 'POST', '/pub/v3/messages', {
+      subject: 'Hello',
+      body: 'World',
+      recipientIds: [123],
+      attachments: { myFileIDs: [] },
+      draft: false,
+      includeOriginal: false,
+    });
+    expect(spy).toHaveBeenNthCalledWith(2, 'DELETE', '/pub/v1/messages', expect.any(FormData));
+    const deleteForm = spy.mock.calls[1][2] as FormData;
+    expect(deleteForm.get('messageIds')).toBe('42');
+    expect(JSON.parse(result.content[0].text)).toEqual({ id: 200, status: 'sent' });
+  });
 });
 
 describe('ofw_list_drafts', () => {
