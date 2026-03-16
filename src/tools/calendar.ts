@@ -5,6 +5,7 @@ export const toolDefinitions: Tool[] = [
   {
     name: 'ofw_list_events',
     description: 'List OurFamilyWizard calendar events in a date range',
+    annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
       properties: {
@@ -18,6 +19,7 @@ export const toolDefinitions: Tool[] = [
   {
     name: 'ofw_create_event',
     description: 'Create a calendar event in OurFamilyWizard',
+    annotations: { destructiveHint: false },
     inputSchema: {
       type: 'object',
       properties: {
@@ -39,6 +41,7 @@ export const toolDefinitions: Tool[] = [
   {
     name: 'ofw_update_event',
     description: 'Update an existing OurFamilyWizard calendar event',
+    annotations: { destructiveHint: false },
     inputSchema: {
       type: 'object',
       properties: {
@@ -57,6 +60,7 @@ export const toolDefinitions: Tool[] = [
   {
     name: 'ofw_delete_event',
     description: 'Delete an OurFamilyWizard calendar event',
+    annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
       properties: { eventId: { type: 'string', description: 'Event ID to delete' } },

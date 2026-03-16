@@ -5,11 +5,13 @@ export const toolDefinitions: Tool[] = [
   {
     name: 'ofw_list_message_folders',
     description: 'List OurFamilyWizard message folders (inbox, sent, etc.) and their unread counts. Returns folder IDs needed to call ofw_list_messages. Does NOT return message content.',
+    annotations: { readOnlyHint: true },
     inputSchema: { type: 'object', properties: {}, required: [] },
   },
   {
     name: 'ofw_list_messages',
     description: 'List messages in an OurFamilyWizard folder. Call ofw_list_message_folders first to get folder IDs. Returns actual message content.',
+    annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
       properties: {
@@ -23,6 +25,7 @@ export const toolDefinitions: Tool[] = [
   {
     name: 'ofw_get_message',
     description: 'Get a single OurFamilyWizard message by ID',
+    annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
       properties: {
@@ -34,6 +37,7 @@ export const toolDefinitions: Tool[] = [
   {
     name: 'ofw_send_message',
     description: 'Send a message via OurFamilyWizard',
+    annotations: { destructiveHint: true },
     inputSchema: {
       type: 'object',
       properties: {

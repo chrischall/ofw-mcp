@@ -5,11 +5,13 @@ export const toolDefinitions: Tool[] = [
   {
     name: 'ofw_get_expense_totals',
     description: 'Get OurFamilyWizard expense summary totals (owed/paid)',
+    annotations: { readOnlyHint: true },
     inputSchema: { type: 'object', properties: {}, required: [] },
   },
   {
     name: 'ofw_list_expenses',
     description: 'List OurFamilyWizard expenses with pagination',
+    annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
       properties: {
@@ -22,6 +24,7 @@ export const toolDefinitions: Tool[] = [
   {
     name: 'ofw_create_expense',
     description: 'Log a new expense in OurFamilyWizard',
+    annotations: { destructiveHint: false },
     inputSchema: {
       type: 'object',
       properties: {

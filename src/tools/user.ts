@@ -5,12 +5,14 @@ export const toolDefinitions: Tool[] = [
   {
     name: 'ofw_get_profile',
     description: 'Get current user and co-parent profile information from OurFamilyWizard',
+    annotations: { readOnlyHint: true },
     inputSchema: { type: 'object', properties: {}, required: [] },
   },
   {
     name: 'ofw_get_notifications',
     description:
       'Get OurFamilyWizard dashboard summary: unread message count, upcoming events, outstanding expenses',
+    annotations: { readOnlyHint: true },
     inputSchema: { type: 'object', properties: {}, required: [] },
   },
 ];

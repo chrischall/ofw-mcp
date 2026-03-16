@@ -5,6 +5,7 @@ export const toolDefinitions: Tool[] = [
   {
     name: 'ofw_list_journal_entries',
     description: 'List OurFamilyWizard journal entries',
+    annotations: { readOnlyHint: true },
     inputSchema: {
       type: 'object',
       properties: {
@@ -17,6 +18,7 @@ export const toolDefinitions: Tool[] = [
   {
     name: 'ofw_create_journal_entry',
     description: 'Create a new journal entry in OurFamilyWizard',
+    annotations: { destructiveHint: false },
     inputSchema: {
       type: 'object',
       properties: {
