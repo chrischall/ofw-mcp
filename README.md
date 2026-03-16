@@ -120,7 +120,7 @@ In a new Claude conversation, ask: *"List my OFW message folders"*. Claude shoul
 ## Development
 
 ```bash
-git clone https://github.com/yourusername/ofw-mcp
+git clone https://github.com/chrischall/ofw-mcp
 cd ofw-mcp
 npm install
 cp .env.example .env   # add your credentials
