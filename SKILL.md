@@ -92,7 +92,7 @@ Always pass `--config ~/.mcporter/mcporter.json` unless a local `config/mcporter
 | `ofw_list_message_folders` | Get folder IDs (inbox, sent, etc.) — call this first |
 | `ofw_list_messages(folderId)` | List messages in a folder |
 | `ofw_get_message(messageId)` | Read a message. ⚠️ Marks unread messages as read. |
-| `ofw_send_message(subject, body, recipientIds[])` | Send a message. Get `recipientIds` from `ofw_get_profile`. |
+| `ofw_send_message(subject, body, recipientIds[], draftId?)` | Send a message. Pass `draftId` to auto-delete the draft after sending. |
 | `ofw_list_drafts` | List saved drafts |
 | `ofw_save_draft(subject, body, recipientIds?, messageId?, replyToId?)` | Create or update a draft |
 | `ofw_delete_draft(messageId)` | Delete a draft |
@@ -131,7 +131,7 @@ Always pass `--config ~/.mcporter/mcporter.json` unless a local `config/mcporter
 
 **Draft before sending (sensitive messages):**
 1. `ofw_save_draft(subject, body)` → review with user
-2. `ofw_send_message(...)` after approval, then `ofw_delete_draft(draftId)`
+2. `ofw_send_message(..., draftId)` after approval — draft is auto-deleted on send
 
 **Check what's coming up:**
 - `ofw_get_notifications` for a quick summary
