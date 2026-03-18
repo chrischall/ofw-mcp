@@ -3,7 +3,7 @@ import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-loadDotenv({ path: join(__dirname, '..', '.env'), override: false });
+loadDotenv({ path: join(__dirname, '..', '.env'), override: false, quiet: true });
 
 const BASE_URL = 'https://ofw.ourfamilywizard.com';
 
