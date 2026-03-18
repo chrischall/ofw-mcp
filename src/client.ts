@@ -1,4 +1,9 @@
-import 'dotenv/config';
+import { config as loadDotenv } from 'dotenv';
+import { dirname, join } from 'path';
+import { fileURLToPath } from 'url';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+loadDotenv({ path: join(__dirname, '..', '.env'), override: false });
 
 const BASE_URL = 'https://ofw.ourfamilywizard.com';
 
