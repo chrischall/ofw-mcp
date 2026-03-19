@@ -83,6 +83,7 @@ describe('ofw_send_message', () => {
       attachments: { myFileIDs: [] },
       draft: false,
       includeOriginal: false,
+      replyToId: null,
     });
     expect(result.content).toHaveLength(1);
     expect(result.content[0].type).toBe('text');
@@ -99,6 +100,27 @@ describe('ofw_send_message', () => {
 
     expect(client.request).toHaveBeenCalledTimes(1);
     expect(client.request).not.toHaveBeenCalledWith('DELETE', expect.anything(), expect.anything());
+  });
+
+  it('sends reply with replyToId and includeOriginal true to thread message history', async () => {
+    const client = makeClient({ id: 201, status: 'sent' });
+
+    await handleTool('ofw_send_message', {
+      subject: 'Re: pickup',
+      body: 'I will be there at 3pm',
+      recipientIds: [123],
+      replyToId: 55,
+    }, client);
+
+    expect(client.request).toHaveBeenCalledWith('POST', '/pub/v3/messages', {
+      subject: 'Re: pickup',
+      body: 'I will be there at 3pm',
+      recipientIds: [123],
+      attachments: { myFileIDs: [] },
+      draft: false,
+      includeOriginal: true,
+      replyToId: 55,
+    });
   });
 
   it('deletes the draft after sending when draftId is provided', async () => {
@@ -122,6 +144,7 @@ describe('ofw_send_message', () => {
       attachments: { myFileIDs: [] },
       draft: false,
       includeOriginal: false,
+      replyToId: null,
     });
     expect(spy).toHaveBeenNthCalledWith(2, 'DELETE', '/pub/v1/messages', expect.any(FormData));
     const deleteForm = spy.mock.calls[1][2] as FormData;

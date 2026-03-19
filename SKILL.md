@@ -92,7 +92,7 @@ Always pass `--config ~/.mcporter/mcporter.json` unless a local `config/mcporter
 | `ofw_list_message_folders` | Get folder IDs (inbox, sent, etc.) — call this first |
 | `ofw_list_messages(folderId)` | List messages in a folder |
 | `ofw_get_message(messageId)` | Read a message. ⚠️ Marks unread messages as read. |
-| `ofw_send_message(subject, body, recipientIds[], draftId?)` | Send a message. Pass `draftId` to auto-delete the draft after sending. |
+| `ofw_send_message(subject, body, recipientIds[], replyToId?, draftId?)` | Send a message. Pass `replyToId` to thread the original message history (like email reply). Pass `draftId` to auto-delete the draft after sending. |
 | `ofw_list_drafts` | List saved drafts |
 | `ofw_save_draft(subject, body, recipientIds?, messageId?, replyToId?)` | Create or update a draft |
 | `ofw_delete_draft(messageId)` | Delete a draft |
@@ -128,6 +128,10 @@ Always pass `--config ~/.mcporter/mcporter.json` unless a local `config/mcporter
 **Send a message:**
 1. `ofw_get_profile` → get co-parent's user ID
 2. `ofw_send_message(subject, body, [coParentId])`
+
+**Reply to a message (with thread history):**
+1. `ofw_get_message(messageId)` → read the message to reply to
+2. `ofw_send_message(subject, body, [coParentId], replyToId: messageId)` — original message is included in the thread
 
 **Draft before sending (sensitive messages):**
 1. `ofw_save_draft(subject, body)` → review with user
