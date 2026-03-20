@@ -197,6 +197,26 @@ describe('ofw_save_draft', () => {
     });
   });
 
+  it('sets includeOriginal true when replyToId is provided', async () => {
+    const client = makeClient({ entityId: 42 });
+
+    await handleTool('ofw_save_draft', {
+      subject: 'Re: pickup',
+      body: 'Draft reply body',
+      replyToId: 55,
+    }, client);
+
+    expect(client.request).toHaveBeenCalledWith('POST', '/pub/v3/messages', {
+      subject: 'Re: pickup',
+      body: 'Draft reply body',
+      recipientIds: [],
+      attachments: { myFileIDs: [] },
+      draft: true,
+      includeOriginal: true,
+      replyToId: 55,
+    });
+  });
+
   it('updates an existing draft when messageId is provided', async () => {
     const client = makeClient({ entityId: 99 });
 
@@ -214,7 +234,7 @@ describe('ofw_save_draft', () => {
       recipientIds: [3039202],
       attachments: { myFileIDs: [] },
       draft: true,
-      includeOriginal: false,
+      includeOriginal: true,
       replyToId: 55,
       messageId: 99,
     });

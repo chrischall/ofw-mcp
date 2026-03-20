@@ -179,7 +179,7 @@ export async function handleTool(
         subject, body, recipientIds,
         attachments: { myFileIDs: [] },
         draft: true,
-        includeOriginal: false,
+        includeOriginal: replyToId !== null,
         replyToId,
       };
       if (messageId !== undefined) payload.messageId = messageId;
