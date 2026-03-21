@@ -6,7 +6,7 @@
   },
   "metadata": {
     "description": "OurFamilyWizard tools for Claude Code",
-    "version": "1.1.0"
+    "version": "1.2.0"
   },
   "plugins": [
     {
@@ -14,10 +14,10 @@
       "source": {
         "source": "npm",
         "package": "ofw-mcp",
-        "version": "1.1.0"
+        "version": "1.2.0"
       },
       "description": "OurFamilyWizard co-parenting tools for Claude — messages, calendar, expenses, and journal via MCP",
-      "version": "1.1.0",
+      "version": "1.2.0",
       "author": {
         "name": "Chris Chall"
       },
