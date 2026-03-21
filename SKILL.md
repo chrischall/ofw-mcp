@@ -1,6 +1,6 @@
 ---
 name: ofw-mcp
-description: Access OurFamilyWizard (OFW) co-parenting data via MCP. Use when the user asks about OFW messages, calendar events, shared expenses, or journal entries. Triggers on phrases like "check OFW", "OurFamilyWizard inbox", "OFW calendar", "OFW expenses", "what did my co-parent say", "log an expense in OFW", or any request involving co-parenting communication or scheduling. Requires ofw-mcp installed and the ofw server registered (see Setup below).
+description: This skill should be used when the user asks about OurFamilyWizard (OFW) co-parenting data. Triggers on phrases like "check OFW", "OurFamilyWizard inbox", "OFW messages", "OFW calendar", "OFW expenses", "what did my co-parent say", "log an expense in OFW", "OFW journal", or any request involving co-parenting messages, calendar events, shared expenses, or journal entries.
 ---
 
 # ofw-mcp
