@@ -1,0 +1,15 @@
+{
+  "name": "ofw",
+  "displayName": "OurFamilyWizard",
+  "version": "1.3.0",
+  "description": "OurFamilyWizard co-parenting tools for Claude — messages, calendar, expenses, and journal via MCP",
+  "author": {
+    "name": "Chris Chall"
+  },
+  "homepage": "https://github.com/chrischall/ofw-mcp",
+  "repository": "https://github.com/chrischall/ofw-mcp",
+  "license": "MIT",
+  "keywords": ["ofw", "coparenting", "ourFamilyWizard", "mcp", "family"],
+  "skills": "./skills/",
+  "mcp": "./.mcp.json"
+}
