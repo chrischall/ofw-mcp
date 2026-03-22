@@ -12,11 +12,7 @@
     {
       "name": "ofw",
       "displayName": "OurFamilyWizard",
-      "source": {
-        "source": "github",
-        "repo": "chrischall/ofw-mcp",
-        "tag": "v1.3.0"
-      },
+      "source": "./",
       "description": "OurFamilyWizard co-parenting tools for Claude — messages, calendar, expenses, and journal via MCP",
       "version": "1.3.0",
       "author": {
