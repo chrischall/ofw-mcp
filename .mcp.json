@@ -1,8 +1,8 @@
 {
   "mcpServers": {
     "ofw": {
-      "command": "tsx",
-      "args": ["${CLAUDE_PLUGIN_ROOT}/src/index.ts"],
+      "command": "npx",
+      "args": ["-y", "ofw-mcp"],
       "env": {
         "OFW_USERNAME": "${OFW_USERNAME}",
         "OFW_PASSWORD": "${OFW_PASSWORD}"
