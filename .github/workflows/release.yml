@@ -43,13 +43,27 @@ jobs:
           print(f"Packaged {out} ({out.stat().st_size} bytes)")
           EOF
 
+      # Sync manifest.json version from package.json and build .mcpb
+      - name: Build .mcpb bundle
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          node -e "
+            const fs = require('fs');
+            const m = JSON.parse(fs.readFileSync('manifest.json', 'utf8'));
+            m.version = '$VERSION';
+            fs.writeFileSync('manifest.json', JSON.stringify(m, null, 2) + '\n');
+          "
+          npx @anthropic-ai/mcpb pack
+
       # Publish to npm via OIDC Trusted Publishing (no token required)
       - name: Publish to npm
         run: npm publish --access public --provenance
 
-      # Create GitHub Release and attach .skill file
+      # Create GitHub Release and attach .skill and .mcpb files
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: ofw-mcp.skill
+          files: |
+            ofw-mcp.skill
+            ofw-mcp.mcpb
           generate_release_notes: true
