@@ -70,7 +70,8 @@ export class OFWClient {
       );
     }
 
-    return response.json() as Promise<T>;
+    const text = await response.text();
+    return (text ? JSON.parse(text) : null) as T;
   }
 
   private async ensureAuthenticated(): Promise<void> {

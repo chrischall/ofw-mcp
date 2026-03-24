@@ -158,7 +158,7 @@ export async function handleTool(
         form.append('messageIds', String(draftId));
         await client.request('DELETE', '/pub/v1/messages', form);
       }
-      return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+      return { content: [{ type: 'text', text: data ? JSON.stringify(data, null, 2) : 'Message sent successfully.' }] };
     }
     case 'ofw_list_drafts': {
       const { page = 1, size = 50 } = args as { page?: number; size?: number };
