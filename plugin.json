@@ -1,7 +1,7 @@
 {
   "name": "ofw",
   "displayName": "OurFamilyWizard",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "description": "OurFamilyWizard co-parenting tools for Claude",
   "type": "mcp"
 }

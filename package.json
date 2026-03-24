@@ -1,6 +1,6 @@
 {
   "name": "ofw-mcp",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "description": "OurFamilyWizard MCP server for Claude — developed and maintained by AI (Claude Sonnet 4.6)",
   "author": "Claude Sonnet 4.6 (AI) <https://www.anthropic.com/claude>",
   "repository": {
@@ -18,7 +18,8 @@
     ".mcp.json"
   ],
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && npm run bundle",
+    "bundle": "esbuild src/index.ts --bundle --platform=node --format=esm --external:dotenv --outfile=dist/bundle.js",
     "dev": "node --env-file=.env dist/index.js",
     "test": "vitest run",
     "test:watch": "vitest"
@@ -30,6 +31,7 @@
   "devDependencies": {
     "@types/node": "^25.5.0",
     "@vitest/coverage-v8": "^4.1.0",
+    "esbuild": "^0.27.4",
     "typescript": "^5.9.3",
     "vitest": "^4.1.0"
   }

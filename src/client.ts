@@ -1,9 +1,14 @@
-import { config as loadDotenv } from 'dotenv';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-loadDotenv({ path: join(__dirname, '..', '.env'), override: false, quiet: true });
+// Load .env for local dev; silently skip if dotenv is unavailable (e.g. mcpb bundle)
+try {
+  const { config } = await import('dotenv');
+  const __dirname = dirname(fileURLToPath(import.meta.url));
+  config({ path: join(__dirname, '..', '.env'), override: false });
+} catch {
+  // not available — rely on process.env (mcpb sets credentials via mcp_config.env)
+}
 
 const BASE_URL = 'https://ofw.ourfamilywizard.com';
 

@@ -3,7 +3,7 @@
   "manifest_version": "0.3",
   "name": "ofw-mcp",
   "display_name": "OurFamilyWizard",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "description": "OurFamilyWizard co-parenting tools for Claude — messages, calendar, expenses, and journal",
   "author": {
     "name": "Chris Chall",
@@ -20,10 +20,10 @@
   "keywords": ["ofw", "coparenting", "ourFamilyWizard", "family", "messages", "calendar", "expenses"],
   "server": {
     "type": "node",
-    "entry_point": "dist/index.js",
+    "entry_point": "dist/bundle.js",
     "mcp_config": {
       "command": "node",
-      "args": ["${__dirname}/dist/index.js"],
+      "args": ["${__dirname}/dist/bundle.js"],
       "env": {
         "OFW_USERNAME": "${user_config.ofw_username}",
         "OFW_PASSWORD": "${user_config.ofw_password}"
