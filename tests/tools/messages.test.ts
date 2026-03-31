@@ -289,9 +289,11 @@ describe('ofw_get_unread_sent', () => {
     const result = await handleTool('ofw_get_unread_sent', {}, c);
 
     expect(spy).toHaveBeenNthCalledWith(1, 'GET', '/pub/v1/messageFolders?includeFolderCounts=true');
+    // default size=20 (smaller than ofw_list_messages' 50) because each message requires an additional detail fetch
     expect(spy).toHaveBeenNthCalledWith(2, 'GET', '/pub/v3/messages?folders=sent-folder-1&page=1&size=20&sort=date&sortDirection=desc');
     expect(spy).toHaveBeenNthCalledWith(3, 'GET', '/pub/v3/messages/101');
     expect(spy).toHaveBeenNthCalledWith(4, 'GET', '/pub/v3/messages/102');
+    expect(spy).toHaveBeenCalledTimes(4);
 
     const parsed = JSON.parse(result.content[0].text);
     expect(parsed).toHaveLength(1);
@@ -325,7 +327,7 @@ describe('ofw_get_unread_sent', () => {
     expect(parsed).toEqual({ message: 'All scanned sent messages have been read.' });
   });
 
-  it('handles messages with no items in sent folder', async () => {
+  it('returns all-read message when sent folder is empty', async () => {
     const c = new OFWClient();
     vi.spyOn(c, 'request')
       .mockResolvedValueOnce([{ id: 'sent-1', folderType: 'SENT', name: 'Sent' }])
