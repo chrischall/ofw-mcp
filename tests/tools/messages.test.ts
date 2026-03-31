@@ -255,10 +255,136 @@ describe('ofw_delete_draft', () => {
   });
 });
 
+describe('ofw_get_unread_sent', () => {
+  it('fetches sent folder id, lists sent messages, and fetches each for read status', async () => {
+    const c = new OFWClient();
+    const spy = vi.spyOn(c, 'request')
+      .mockResolvedValueOnce([
+        { id: 'sent-folder-1', folderType: 'SENT', name: 'Sent' },
+        { id: 'inbox-1', folderType: 'INBOX', name: 'Inbox' },
+      ])
+      .mockResolvedValueOnce({
+        items: [
+          { id: 101, subject: 'Pickup Tuesday' },
+          { id: 102, subject: 'School forms' },
+        ],
+      })
+      .mockResolvedValueOnce({
+        id: 101,
+        subject: 'Pickup Tuesday',
+        createdDate: '2026-03-28T14:00:00Z',
+        recipients: [
+          { userId: 999, displayName: 'Jane Smith', readAt: null },
+        ],
+      })
+      .mockResolvedValueOnce({
+        id: 102,
+        subject: 'School forms',
+        createdDate: '2026-03-27T09:00:00Z',
+        recipients: [
+          { userId: 999, displayName: 'Jane Smith', readAt: '2026-03-27T10:00:00Z' },
+        ],
+      });
+
+    const result = await handleTool('ofw_get_unread_sent', {}, c);
+
+    expect(spy).toHaveBeenNthCalledWith(1, 'GET', '/pub/v1/messageFolders?includeFolderCounts=true');
+    expect(spy).toHaveBeenNthCalledWith(2, 'GET', '/pub/v3/messages?folders=sent-folder-1&page=1&size=20&sort=date&sortDirection=desc');
+    expect(spy).toHaveBeenNthCalledWith(3, 'GET', '/pub/v3/messages/101');
+    expect(spy).toHaveBeenNthCalledWith(4, 'GET', '/pub/v3/messages/102');
+
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed).toHaveLength(1);
+    expect(parsed[0]).toEqual({
+      id: 101,
+      subject: 'Pickup Tuesday',
+      sentAt: '2026-03-28T14:00:00Z',
+      unreadBy: ['Jane Smith'],
+    });
+  });
+
+  it('returns empty array message when all sent messages have been read', async () => {
+    const c = new OFWClient();
+    vi.spyOn(c, 'request')
+      .mockResolvedValueOnce([{ id: 'sent-1', folderType: 'SENT', name: 'Sent' }])
+      .mockResolvedValueOnce({
+        items: [{ id: 200, subject: 'Done' }],
+      })
+      .mockResolvedValueOnce({
+        id: 200,
+        subject: 'Done',
+        createdDate: '2026-03-20T08:00:00Z',
+        recipients: [
+          { userId: 999, displayName: 'Jane Smith', readAt: '2026-03-20T09:00:00Z' },
+        ],
+      });
+
+    const result = await handleTool('ofw_get_unread_sent', {}, c);
+
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed).toEqual({ message: 'All scanned sent messages have been read.' });
+  });
+
+  it('handles messages with no items in sent folder', async () => {
+    const c = new OFWClient();
+    vi.spyOn(c, 'request')
+      .mockResolvedValueOnce([{ id: 'sent-1', folderType: 'SENT', name: 'Sent' }])
+      .mockResolvedValueOnce({ items: [] });
+
+    const result = await handleTool('ofw_get_unread_sent', {}, c);
+
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed).toEqual({ message: 'All scanned sent messages have been read.' });
+  });
+
+  it('passes custom page and size', async () => {
+    const c = new OFWClient();
+    const spy = vi.spyOn(c, 'request')
+      .mockResolvedValueOnce([{ id: 'sent-1', folderType: 'SENT', name: 'Sent' }])
+      .mockResolvedValueOnce({ items: [] });
+
+    await handleTool('ofw_get_unread_sent', { page: 3, size: 10 }, c);
+
+    expect(spy).toHaveBeenNthCalledWith(2, 'GET', '/pub/v3/messages?folders=sent-1&page=3&size=10&sort=date&sortDirection=desc');
+  });
+
+  it('throws if no sent folder is found', async () => {
+    const c = new OFWClient();
+    vi.spyOn(c, 'request').mockResolvedValueOnce([
+      { id: 'inbox-1', folderType: 'INBOX', name: 'Inbox' },
+    ]);
+
+    await expect(handleTool('ofw_get_unread_sent', {}, c)).rejects.toThrow('Sent folder not found');
+  });
+
+  it('includes all unread recipients when multiple recipients exist', async () => {
+    const c = new OFWClient();
+    vi.spyOn(c, 'request')
+      .mockResolvedValueOnce([{ id: 'sent-1', folderType: 'SENT', name: 'Sent' }])
+      .mockResolvedValueOnce({ items: [{ id: 300, subject: 'Group message' }] })
+      .mockResolvedValueOnce({
+        id: 300,
+        subject: 'Group message',
+        createdDate: '2026-03-29T10:00:00Z',
+        recipients: [
+          { userId: 1, displayName: 'Alice', readAt: '2026-03-29T11:00:00Z' },
+          { userId: 2, displayName: 'Bob', readAt: null },
+          { userId: 3, displayName: 'Carol', readAt: null },
+        ],
+      });
+
+    const result = await handleTool('ofw_get_unread_sent', {}, c);
+    const parsed = JSON.parse(result.content[0].text);
+
+    expect(parsed).toHaveLength(1);
+    expect(parsed[0].unreadBy).toEqual(['Bob', 'Carol']);
+  });
+});
+
 describe('toolDefinitions', () => {
-  it('exports 7 message tools', () => {
+  it('exports 8 message tools', () => {
     const names = toolDefinitions.map((t) => t.name);
-    expect(names).toHaveLength(7);
+    expect(names).toHaveLength(8);
     expect(names).toContain('ofw_list_message_folders');
     expect(names).toContain('ofw_list_messages');
     expect(names).toContain('ofw_get_message');
@@ -266,6 +392,7 @@ describe('toolDefinitions', () => {
     expect(names).toContain('ofw_list_drafts');
     expect(names).toContain('ofw_save_draft');
     expect(names).toContain('ofw_delete_draft');
+    expect(names).toContain('ofw_get_unread_sent');
   });
 });
 
