@@ -264,7 +264,7 @@ describe('ofw_get_unread_sent', () => {
         { id: 'inbox-1', folderType: 'INBOX', name: 'Inbox' },
       ])
       .mockResolvedValueOnce({
-        items: [
+        data: [
           { id: 101, subject: 'Pickup Tuesday' },
           { id: 102, subject: 'School forms' },
         ],
@@ -310,7 +310,7 @@ describe('ofw_get_unread_sent', () => {
     vi.spyOn(c, 'request')
       .mockResolvedValueOnce([{ id: 'sent-1', folderType: 'SENT_MESSAGES', name: 'Sent' }])
       .mockResolvedValueOnce({
-        items: [{ id: 200, subject: 'Done' }],
+        data: [{ id: 200, subject: 'Done' }],
       })
       .mockResolvedValueOnce({
         id: 200,
@@ -331,7 +331,7 @@ describe('ofw_get_unread_sent', () => {
     const c = new OFWClient();
     vi.spyOn(c, 'request')
       .mockResolvedValueOnce([{ id: 'sent-1', folderType: 'SENT_MESSAGES', name: 'Sent' }])
-      .mockResolvedValueOnce({ items: [] });
+      .mockResolvedValueOnce({ data: [] });
 
     const result = await handleTool('ofw_get_unread_sent', {}, c);
 
@@ -343,7 +343,7 @@ describe('ofw_get_unread_sent', () => {
     const c = new OFWClient();
     const spy = vi.spyOn(c, 'request')
       .mockResolvedValueOnce([{ id: 'sent-1', folderType: 'SENT_MESSAGES', name: 'Sent' }])
-      .mockResolvedValueOnce({ items: [] });
+      .mockResolvedValueOnce({ data: [] });
 
     await handleTool('ofw_get_unread_sent', { page: 3, size: 10 }, c);
 
@@ -363,7 +363,7 @@ describe('ofw_get_unread_sent', () => {
     const c = new OFWClient();
     vi.spyOn(c, 'request')
       .mockResolvedValueOnce([{ id: 'sent-1', folderType: 'SENT_MESSAGES', name: 'Sent' }])
-      .mockResolvedValueOnce({ items: [{ id: 300, subject: 'Group message' }] })
+      .mockResolvedValueOnce({ data: [{ id: 300, subject: 'Group message' }] })
       .mockResolvedValueOnce({
         id: 300,
         subject: 'Group message',

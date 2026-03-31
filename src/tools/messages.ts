@@ -218,8 +218,8 @@ export async function handleTool(
 
       // Step 2: list sent messages
       const listPath = `/pub/v3/messages?folders=${encodeURIComponent(sentFolder.id)}&page=${page}&size=${size}&sort=date&sortDirection=desc`;
-      const listData = await client.request<{ items: Array<{ id: number; subject: string }> }>('GET', listPath);
-      const messages = listData.items ?? [];
+      const listData = await client.request<{ data: Array<{ id: number; subject: string }> }>('GET', listPath);
+      const messages = listData.data ?? [];
 
       // Step 3: fetch each message detail and filter to unread
       const unread: Array<{ id: number; subject: string; sentAt: string; unreadBy: string[] }> = [];
