@@ -327,7 +327,7 @@ describe('ofw_get_unread_sent', () => {
     expect(parsed).toEqual({ message: 'All scanned sent messages have been read.' });
   });
 
-  it('returns all-read message when sent folder is empty', async () => {
+  it('returns all-read message when sent folder has no messages', async () => {
     const c = new OFWClient();
     vi.spyOn(c, 'request')
       .mockResolvedValueOnce([{ id: 'sent-1', folderType: 'SENT', name: 'Sent' }])
