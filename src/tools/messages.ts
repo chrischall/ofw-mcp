@@ -111,6 +111,19 @@ export const toolDefinitions: Tool[] = [
       required: ['messageId'],
     },
   },
+  {
+    name: 'ofw_get_unread_sent',
+    description: 'List sent messages that have not been read by one or more recipients. Fetches sent messages page by page and returns only those with unread recipients.',
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        page: { type: 'number', description: 'Page of sent messages to scan (default 1)' },
+        size: { type: 'number', description: 'Number of sent messages per page, max 50 (default 20)' },
+      },
+      required: [],
+    },
+  },
 ];
 
 export async function handleTool(
@@ -192,6 +205,50 @@ export async function handleTool(
       form.append('messageIds', String(messageId));
       const data = await client.request('DELETE', '/pub/v1/messages', form);
       return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+    }
+    case 'ofw_get_unread_sent': {
+      const { page = 1, size = 20 } = args as { page?: number; size?: number };
+
+      // Step 1: find the sent folder
+      const folders = await client.request<Array<{ id: string; folderType: string; name: string }>>(
+        'GET', '/pub/v1/messageFolders?includeFolderCounts=true'
+      );
+      const sentFolder = folders.find((f) => f.folderType === 'SENT');
+      if (!sentFolder) throw new Error('Sent folder not found');
+
+      // Step 2: list sent messages
+      const listPath = `/pub/v3/messages?folders=${encodeURIComponent(sentFolder.id)}&page=${page}&size=${size}&sort=date&sortDirection=desc`;
+      const listData = await client.request<{ items: Array<{ id: number; subject: string }> }>('GET', listPath);
+      const messages = listData.items ?? [];
+
+      // Step 3: fetch each message detail and filter to unread
+      const unread: Array<{ id: number; subject: string; sentAt: string; unreadBy: string[] }> = [];
+      for (const msg of messages) {
+        const detail = await client.request<{
+          id: number;
+          subject: string;
+          createdDate: string;
+          recipients: Array<{ displayName: string; readAt: string | null }>;
+        }>('GET', `/pub/v3/messages/${msg.id}`);
+
+        const unreadRecipients = (detail.recipients ?? [])
+          .filter((r) => !r.readAt)
+          .map((r) => r.displayName);
+
+        if (unreadRecipients.length > 0) {
+          unread.push({
+            id: detail.id,
+            subject: detail.subject,
+            sentAt: detail.createdDate,
+            unreadBy: unreadRecipients,
+          });
+        }
+      }
+
+      if (unread.length === 0) {
+        return { content: [{ type: 'text', text: JSON.stringify({ message: 'All scanned sent messages have been read.' }, null, 2) }] };
+      }
+      return { content: [{ type: 'text', text: JSON.stringify(unread, null, 2) }] };
     }
     default:
       throw new Error(`Unknown tool: ${name}`);
