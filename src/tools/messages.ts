@@ -227,19 +227,19 @@ export async function handleTool(
         const detail = await client.request<{
           id: number;
           subject: string;
-          createdDate: string;
-          recipients: Array<{ displayName: string; readAt: string | null }>;
+          date: { dateTime: string };
+          recipients: Array<{ user: { name: string }; viewed: unknown | null }>;
         }>('GET', `/pub/v3/messages/${msg.id}`);
 
         const unreadRecipients = (detail.recipients ?? [])
-          .filter((r) => !r.readAt)
-          .map((r) => r.displayName);
+          .filter((r) => !r.viewed)
+          .map((r) => r.user.name);
 
         if (unreadRecipients.length > 0) {
           unread.push({
             id: detail.id,
             subject: detail.subject,
-            sentAt: detail.createdDate,
+            sentAt: detail.date.dateTime,
             unreadBy: unreadRecipients,
           });
         }

@@ -272,17 +272,17 @@ describe('ofw_get_unread_sent', () => {
       .mockResolvedValueOnce({
         id: 101,
         subject: 'Pickup Tuesday',
-        createdDate: '2026-03-28T14:00:00Z',
+        date: { dateTime: '2026-03-28T14:00:00Z' },
         recipients: [
-          { userId: 999, displayName: 'Jane Smith', readAt: null },
+          { user: { name: 'Jane Smith' }, viewed: null },
         ],
       })
       .mockResolvedValueOnce({
         id: 102,
         subject: 'School forms',
-        createdDate: '2026-03-27T09:00:00Z',
+        date: { dateTime: '2026-03-27T09:00:00Z' },
         recipients: [
-          { userId: 999, displayName: 'Jane Smith', readAt: '2026-03-27T10:00:00Z' },
+          { user: { name: 'Jane Smith' }, viewed: { dateTime: '2026-03-27T10:00:00Z' } },
         ],
       });
 
@@ -315,9 +315,9 @@ describe('ofw_get_unread_sent', () => {
       .mockResolvedValueOnce({
         id: 200,
         subject: 'Done',
-        createdDate: '2026-03-20T08:00:00Z',
+        date: { dateTime: '2026-03-20T08:00:00Z' },
         recipients: [
-          { userId: 999, displayName: 'Jane Smith', readAt: '2026-03-20T09:00:00Z' },
+          { user: { name: 'Jane Smith' }, viewed: { dateTime: '2026-03-20T09:00:00Z' } },
         ],
       });
 
@@ -367,11 +367,11 @@ describe('ofw_get_unread_sent', () => {
       .mockResolvedValueOnce({
         id: 300,
         subject: 'Group message',
-        createdDate: '2026-03-29T10:00:00Z',
+        date: { dateTime: '2026-03-29T10:00:00Z' },
         recipients: [
-          { userId: 1, displayName: 'Alice', readAt: '2026-03-29T11:00:00Z' },
-          { userId: 2, displayName: 'Bob', readAt: null },
-          { userId: 3, displayName: 'Carol', readAt: null },
+          { user: { name: 'Alice' }, viewed: { dateTime: '2026-03-29T11:00:00Z' } },
+          { user: { name: 'Bob' }, viewed: null },
+          { user: { name: 'Carol' }, viewed: null },
         ],
       });
 
