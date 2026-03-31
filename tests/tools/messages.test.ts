@@ -260,7 +260,7 @@ describe('ofw_get_unread_sent', () => {
     const c = new OFWClient();
     const spy = vi.spyOn(c, 'request')
       .mockResolvedValueOnce([
-        { id: 'sent-folder-1', folderType: 'SENT', name: 'Sent' },
+        { id: 'sent-folder-1', folderType: 'SENT_MESSAGES', name: 'Sent' },
         { id: 'inbox-1', folderType: 'INBOX', name: 'Inbox' },
       ])
       .mockResolvedValueOnce({
@@ -308,7 +308,7 @@ describe('ofw_get_unread_sent', () => {
   it('returns empty array message when all sent messages have been read', async () => {
     const c = new OFWClient();
     vi.spyOn(c, 'request')
-      .mockResolvedValueOnce([{ id: 'sent-1', folderType: 'SENT', name: 'Sent' }])
+      .mockResolvedValueOnce([{ id: 'sent-1', folderType: 'SENT_MESSAGES', name: 'Sent' }])
       .mockResolvedValueOnce({
         items: [{ id: 200, subject: 'Done' }],
       })
@@ -330,7 +330,7 @@ describe('ofw_get_unread_sent', () => {
   it('returns all-read message when sent folder has no messages', async () => {
     const c = new OFWClient();
     vi.spyOn(c, 'request')
-      .mockResolvedValueOnce([{ id: 'sent-1', folderType: 'SENT', name: 'Sent' }])
+      .mockResolvedValueOnce([{ id: 'sent-1', folderType: 'SENT_MESSAGES', name: 'Sent' }])
       .mockResolvedValueOnce({ items: [] });
 
     const result = await handleTool('ofw_get_unread_sent', {}, c);
@@ -342,7 +342,7 @@ describe('ofw_get_unread_sent', () => {
   it('passes custom page and size', async () => {
     const c = new OFWClient();
     const spy = vi.spyOn(c, 'request')
-      .mockResolvedValueOnce([{ id: 'sent-1', folderType: 'SENT', name: 'Sent' }])
+      .mockResolvedValueOnce([{ id: 'sent-1', folderType: 'SENT_MESSAGES', name: 'Sent' }])
       .mockResolvedValueOnce({ items: [] });
 
     await handleTool('ofw_get_unread_sent', { page: 3, size: 10 }, c);
@@ -362,7 +362,7 @@ describe('ofw_get_unread_sent', () => {
   it('includes all unread recipients when multiple recipients exist', async () => {
     const c = new OFWClient();
     vi.spyOn(c, 'request')
-      .mockResolvedValueOnce([{ id: 'sent-1', folderType: 'SENT', name: 'Sent' }])
+      .mockResolvedValueOnce([{ id: 'sent-1', folderType: 'SENT_MESSAGES', name: 'Sent' }])
       .mockResolvedValueOnce({ items: [{ id: 300, subject: 'Group message' }] })
       .mockResolvedValueOnce({
         id: 300,
