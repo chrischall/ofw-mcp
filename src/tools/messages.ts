@@ -210,10 +210,10 @@ export async function handleTool(
       const { page = 1, size = 20 } = args as { page?: number; size?: number };
 
       // Step 1: find the sent folder
-      const folders = await client.request<Array<{ id: string; folderType: string; name: string }>>(
+      const foldersData = await client.request<{ data: Array<{ id: string; folderType: string; name: string }> }>(
         'GET', '/pub/v1/messageFolders?includeFolderCounts=true'
       );
-      const sentFolder = folders.find((f) => f.folderType === 'SENT_MESSAGES');
+      const sentFolder = (foldersData.data ?? []).find((f) => f.folderType === 'SENT_MESSAGES');
       if (!sentFolder) throw new Error('Sent folder not found');
 
       // Step 2: list sent messages

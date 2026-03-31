@@ -259,10 +259,12 @@ describe('ofw_get_unread_sent', () => {
   it('fetches sent folder id, lists sent messages, and fetches each for read status', async () => {
     const c = new OFWClient();
     const spy = vi.spyOn(c, 'request')
-      .mockResolvedValueOnce([
-        { id: 'sent-folder-1', folderType: 'SENT_MESSAGES', name: 'Sent' },
-        { id: 'inbox-1', folderType: 'INBOX', name: 'Inbox' },
-      ])
+      .mockResolvedValueOnce({
+        data: [
+          { id: 'sent-folder-1', folderType: 'SENT_MESSAGES', name: 'Sent' },
+          { id: 'inbox-1', folderType: 'INBOX', name: 'Inbox' },
+        ],
+      })
       .mockResolvedValueOnce({
         data: [
           { id: 101, subject: 'Pickup Tuesday' },
@@ -308,7 +310,7 @@ describe('ofw_get_unread_sent', () => {
   it('returns empty array message when all sent messages have been read', async () => {
     const c = new OFWClient();
     vi.spyOn(c, 'request')
-      .mockResolvedValueOnce([{ id: 'sent-1', folderType: 'SENT_MESSAGES', name: 'Sent' }])
+      .mockResolvedValueOnce({ data: [{ id: 'sent-1', folderType: 'SENT_MESSAGES', name: 'Sent' }] })
       .mockResolvedValueOnce({
         data: [{ id: 200, subject: 'Done' }],
       })
@@ -330,7 +332,7 @@ describe('ofw_get_unread_sent', () => {
   it('returns all-read message when sent folder has no messages', async () => {
     const c = new OFWClient();
     vi.spyOn(c, 'request')
-      .mockResolvedValueOnce([{ id: 'sent-1', folderType: 'SENT_MESSAGES', name: 'Sent' }])
+      .mockResolvedValueOnce({ data: [{ id: 'sent-1', folderType: 'SENT_MESSAGES', name: 'Sent' }] })
       .mockResolvedValueOnce({ data: [] });
 
     const result = await handleTool('ofw_get_unread_sent', {}, c);
@@ -342,7 +344,7 @@ describe('ofw_get_unread_sent', () => {
   it('passes custom page and size', async () => {
     const c = new OFWClient();
     const spy = vi.spyOn(c, 'request')
-      .mockResolvedValueOnce([{ id: 'sent-1', folderType: 'SENT_MESSAGES', name: 'Sent' }])
+      .mockResolvedValueOnce({ data: [{ id: 'sent-1', folderType: 'SENT_MESSAGES', name: 'Sent' }] })
       .mockResolvedValueOnce({ data: [] });
 
     await handleTool('ofw_get_unread_sent', { page: 3, size: 10 }, c);
@@ -352,9 +354,9 @@ describe('ofw_get_unread_sent', () => {
 
   it('throws if no sent folder is found', async () => {
     const c = new OFWClient();
-    vi.spyOn(c, 'request').mockResolvedValueOnce([
-      { id: 'inbox-1', folderType: 'INBOX', name: 'Inbox' },
-    ]);
+    vi.spyOn(c, 'request').mockResolvedValueOnce({
+      data: [{ id: 'inbox-1', folderType: 'INBOX', name: 'Inbox' }],
+    });
 
     await expect(handleTool('ofw_get_unread_sent', {}, c)).rejects.toThrow('Sent folder not found');
   });
@@ -362,7 +364,7 @@ describe('ofw_get_unread_sent', () => {
   it('includes all unread recipients when multiple recipients exist', async () => {
     const c = new OFWClient();
     vi.spyOn(c, 'request')
-      .mockResolvedValueOnce([{ id: 'sent-1', folderType: 'SENT_MESSAGES', name: 'Sent' }])
+      .mockResolvedValueOnce({ data: [{ id: 'sent-1', folderType: 'SENT_MESSAGES', name: 'Sent' }] })
       .mockResolvedValueOnce({ data: [{ id: 300, subject: 'Group message' }] })
       .mockResolvedValueOnce({
         id: 300,
