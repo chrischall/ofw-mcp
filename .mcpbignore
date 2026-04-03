@@ -15,6 +15,9 @@ skills/
 plugin.json
 .mcp.json
 
+# Docs/specs (dev artifacts)
+docs/
+
 # GitHub/CI
 .github/
 

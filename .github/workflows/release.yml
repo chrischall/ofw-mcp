@@ -28,6 +28,9 @@ jobs:
           cache: npm
           registry-url: https://registry.npmjs.org
 
+      # Strip always-auth from .npmrc (set by setup-node, deprecated in npm 11)
+      - run: sed -i '/always-auth/d' "$NPM_CONFIG_USERCONFIG"
+
       - run: npm ci
       - run: npm run build
 
@@ -64,12 +67,9 @@ jobs:
           npx @anthropic-ai/mcpb pack
           mv ofw-mcp.mcpb "ofw-mcp-${VERSION}.mcpb"
 
-      # Publish to npm via OIDC Trusted Publishing (no token required)
       - name: Publish to npm
         run: npm publish --access public --provenance
-        continue-on-error: true
 
-      # Create GitHub Release and attach .skill and .mcpb files
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:

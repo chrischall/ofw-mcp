@@ -5,7 +5,7 @@
   "author": "Claude Sonnet 4.6 (AI) <https://www.anthropic.com/claude>",
   "repository": {
     "type": "git",
-    "url": "https://github.com/chrischall/ofw-mcp"
+    "url": "git+https://github.com/chrischall/ofw-mcp.git"
   },
   "type": "module",
   "bin": {
