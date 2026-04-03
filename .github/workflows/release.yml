@@ -31,14 +31,20 @@ jobs:
       - run: npm ci
       - run: npm run build
 
+      - name: Extract version
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+
       # Package the .skill file
       - name: Package skill
         run: |
           python3 - <<'EOF'
-          import zipfile, pathlib
+          import zipfile, pathlib, os
 
+          version = os.environ["VERSION"]
           skill_name = "ofw-mcp"
-          out = pathlib.Path(f"{skill_name}.skill")
+          out = pathlib.Path(f"{skill_name}-{version}.skill")
 
           with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
               zf.write(pathlib.Path("SKILL.md"), f"{skill_name}/SKILL.md")
@@ -49,7 +55,6 @@ jobs:
       # Sync manifest.json version from package.json and build .mcpb
       - name: Build .mcpb bundle
         run: |
-          VERSION=$(node -p "require('./package.json').version")
           node -e "
             const fs = require('fs');
             const m = JSON.parse(fs.readFileSync('manifest.json', 'utf8'));
@@ -57,16 +62,18 @@ jobs:
             fs.writeFileSync('manifest.json', JSON.stringify(m, null, 2) + '\n');
           "
           npx @anthropic-ai/mcpb pack
+          mv ofw-mcp.mcpb "ofw-mcp-${VERSION}.mcpb"
 
       # Publish to npm via OIDC Trusted Publishing (no token required)
       - name: Publish to npm
         run: npm publish --access public --provenance
+        continue-on-error: true
 
       # Create GitHub Release and attach .skill and .mcpb files
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            ofw-mcp.skill
-            ofw-mcp.mcpb
+            ofw-mcp-${{ env.VERSION }}.skill
+            ofw-mcp-${{ env.VERSION }}.mcpb
           generate_release_notes: true
