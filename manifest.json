@@ -3,7 +3,7 @@
   "manifest_version": "0.3",
   "name": "ofw-mcp",
   "display_name": "OurFamilyWizard",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "OurFamilyWizard co-parenting tools for Claude — messages, calendar, expenses, and journal",
   "author": {
     "name": "Chris Chall",
@@ -17,13 +17,23 @@
   "homepage": "https://github.com/chrischall/ofw-mcp",
   "support": "https://github.com/chrischall/ofw-mcp/issues",
   "license": "MIT",
-  "keywords": ["ofw", "coparenting", "ourFamilyWizard", "family", "messages", "calendar", "expenses"],
+  "keywords": [
+    "ofw",
+    "coparenting",
+    "ourFamilyWizard",
+    "family",
+    "messages",
+    "calendar",
+    "expenses"
+  ],
   "server": {
     "type": "node",
     "entry_point": "dist/bundle.js",
     "mcp_config": {
       "command": "node",
-      "args": ["${__dirname}/dist/bundle.js"],
+      "args": [
+        "${__dirname}/dist/bundle.js"
+      ],
       "env": {
         "OFW_USERNAME": "${user_config.ofw_username}",
         "OFW_PASSWORD": "${user_config.ofw_password}"
@@ -46,27 +56,84 @@
     }
   },
   "tools": [
-    { "name": "ofw_get_profile", "description": "Get current user and co-parent info" },
-    { "name": "ofw_get_notifications", "description": "Get dashboard summary: unread messages, upcoming events, outstanding expenses" },
-    { "name": "ofw_list_message_folders", "description": "List message folders and unread counts" },
-    { "name": "ofw_list_messages", "description": "List messages in a folder" },
-    { "name": "ofw_get_message", "description": "Read a message by ID" },
-    { "name": "ofw_send_message", "description": "Send a message" },
-    { "name": "ofw_list_drafts", "description": "List draft messages" },
-    { "name": "ofw_save_draft", "description": "Create or update a draft" },
-    { "name": "ofw_delete_draft", "description": "Delete a draft" },
-    { "name": "ofw_list_events", "description": "List calendar events in a date range" },
-    { "name": "ofw_create_event", "description": "Create a calendar event" },
-    { "name": "ofw_update_event", "description": "Update a calendar event" },
-    { "name": "ofw_delete_event", "description": "Delete a calendar event" },
-    { "name": "ofw_get_expense_totals", "description": "Get expense summary totals" },
-    { "name": "ofw_list_expenses", "description": "List expenses" },
-    { "name": "ofw_create_expense", "description": "Log a new expense" },
-    { "name": "ofw_list_journal_entries", "description": "List journal entries" },
-    { "name": "ofw_create_journal_entry", "description": "Create a journal entry" }
+    {
+      "name": "ofw_get_profile",
+      "description": "Get current user and co-parent info"
+    },
+    {
+      "name": "ofw_get_notifications",
+      "description": "Get dashboard summary: unread messages, upcoming events, outstanding expenses"
+    },
+    {
+      "name": "ofw_list_message_folders",
+      "description": "List message folders and unread counts"
+    },
+    {
+      "name": "ofw_list_messages",
+      "description": "List messages in a folder"
+    },
+    {
+      "name": "ofw_get_message",
+      "description": "Read a message by ID"
+    },
+    {
+      "name": "ofw_send_message",
+      "description": "Send a message"
+    },
+    {
+      "name": "ofw_list_drafts",
+      "description": "List draft messages"
+    },
+    {
+      "name": "ofw_save_draft",
+      "description": "Create or update a draft"
+    },
+    {
+      "name": "ofw_delete_draft",
+      "description": "Delete a draft"
+    },
+    {
+      "name": "ofw_list_events",
+      "description": "List calendar events in a date range"
+    },
+    {
+      "name": "ofw_create_event",
+      "description": "Create a calendar event"
+    },
+    {
+      "name": "ofw_update_event",
+      "description": "Update a calendar event"
+    },
+    {
+      "name": "ofw_delete_event",
+      "description": "Delete a calendar event"
+    },
+    {
+      "name": "ofw_get_expense_totals",
+      "description": "Get expense summary totals"
+    },
+    {
+      "name": "ofw_list_expenses",
+      "description": "List expenses"
+    },
+    {
+      "name": "ofw_create_expense",
+      "description": "Log a new expense"
+    },
+    {
+      "name": "ofw_list_journal_entries",
+      "description": "List journal entries"
+    },
+    {
+      "name": "ofw_create_journal_entry",
+      "description": "Create a journal entry"
+    }
   ],
   "compatibility": {
-    "platforms": ["darwin", "win32"],
+    "platforms": [
+      "darwin",
+      "win32"
+    ],
     "runtimes": {
       "node": ">=18.0.0"
     }
