@@ -256,7 +256,7 @@ describe('ofw_delete_draft', () => {
 });
 
 describe('ofw_get_unread_sent', () => {
-  it('fetches sent folder id, lists sent messages, and fetches each for read status', async () => {
+  it('uses showNeverViewed from list data instead of fetching each message detail', async () => {
     const c = new OFWClient();
     const spy = vi.spyOn(c, 'request')
       .mockResolvedValueOnce({
@@ -268,35 +268,27 @@ describe('ofw_get_unread_sent', () => {
       })
       .mockResolvedValueOnce({
         data: [
-          { id: 101, subject: 'Pickup Tuesday' },
-          { id: 102, subject: 'School forms' },
-        ],
-      })
-      .mockResolvedValueOnce({
-        id: 101,
-        subject: 'Pickup Tuesday',
-        date: { dateTime: '2026-03-28T14:00:00Z' },
-        recipients: [
-          { user: { name: 'Jane Smith' }, viewed: null },
-        ],
-      })
-      .mockResolvedValueOnce({
-        id: 102,
-        subject: 'School forms',
-        date: { dateTime: '2026-03-27T09:00:00Z' },
-        recipients: [
-          { user: { name: 'Jane Smith' }, viewed: { dateTime: '2026-03-27T10:00:00Z' } },
+          {
+            id: 101, subject: 'Pickup Tuesday',
+            date: { dateTime: '2026-03-28T14:00:00Z' },
+            showNeverViewed: true,
+            recipients: [{ user: { name: 'Jane Smith' } }],
+          },
+          {
+            id: 102, subject: 'School forms',
+            date: { dateTime: '2026-03-27T09:00:00Z' },
+            showNeverViewed: false,
+            recipients: [{ user: { name: 'Jane Smith' }, viewed: { dateTime: '2026-03-27T10:00:00Z' } }],
+          },
         ],
       });
 
     const result = await handleTool('ofw_get_unread_sent', {}, c);
 
     expect(spy).toHaveBeenNthCalledWith(1, 'GET', '/pub/v1/messageFolders?includeFolderCounts=true');
-    // default size=20 (smaller than ofw_list_messages' 50) because each message requires an additional detail fetch
     expect(spy).toHaveBeenNthCalledWith(2, 'GET', '/pub/v3/messages?folders=sent-folder-1&page=1&size=20&sort=date&sortDirection=desc');
-    expect(spy).toHaveBeenNthCalledWith(3, 'GET', '/pub/v3/messages/101');
-    expect(spy).toHaveBeenNthCalledWith(4, 'GET', '/pub/v3/messages/102');
-    expect(spy).toHaveBeenCalledTimes(4);
+    // no detail fetches — only 2 API calls
+    expect(spy).toHaveBeenCalledTimes(2);
 
     const parsed = JSON.parse(result.content[0].text);
     expect(parsed).toHaveLength(1);
@@ -308,20 +300,35 @@ describe('ofw_get_unread_sent', () => {
     });
   });
 
+  it('treats viewed with epoch sentinel as read (not unread)', async () => {
+    const c = new OFWClient();
+    vi.spyOn(c, 'request')
+      .mockResolvedValueOnce({ systemFolders: [{ id: 'sent-1', folderType: 'SENT_MESSAGES', name: 'Sent' }], userFolders: [] })
+      .mockResolvedValueOnce({
+        data: [{
+          id: 200, subject: 'Old message',
+          date: { dateTime: '2026-03-20T08:00:00Z' },
+          showNeverViewed: false,
+          recipients: [{ user: { name: 'Jane Smith' }, viewed: { dateTime: '1970-01-01T00:00:00' } }],
+        }],
+      });
+
+    const result = await handleTool('ofw_get_unread_sent', {}, c);
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed).toEqual({ message: 'All scanned sent messages have been read.' });
+  });
+
   it('returns empty array message when all sent messages have been read', async () => {
     const c = new OFWClient();
     vi.spyOn(c, 'request')
       .mockResolvedValueOnce({ systemFolders: [{ id: 'sent-1', folderType: 'SENT_MESSAGES', name: 'Sent' }], userFolders: [] })
       .mockResolvedValueOnce({
-        data: [{ id: 200, subject: 'Done' }],
-      })
-      .mockResolvedValueOnce({
-        id: 200,
-        subject: 'Done',
-        date: { dateTime: '2026-03-20T08:00:00Z' },
-        recipients: [
-          { user: { name: 'Jane Smith' }, viewed: { dateTime: '2026-03-20T09:00:00Z' } },
-        ],
+        data: [{
+          id: 200, subject: 'Done',
+          date: { dateTime: '2026-03-20T08:00:00Z' },
+          showNeverViewed: false,
+          recipients: [{ user: { name: 'Jane Smith' }, viewed: { dateTime: '2026-03-20T09:00:00Z' } }],
+        }],
       });
 
     const result = await handleTool('ofw_get_unread_sent', {}, c);
@@ -367,16 +374,17 @@ describe('ofw_get_unread_sent', () => {
     const c = new OFWClient();
     vi.spyOn(c, 'request')
       .mockResolvedValueOnce({ systemFolders: [{ id: 'sent-1', folderType: 'SENT_MESSAGES', name: 'Sent' }], userFolders: [] })
-      .mockResolvedValueOnce({ data: [{ id: 300, subject: 'Group message' }] })
       .mockResolvedValueOnce({
-        id: 300,
-        subject: 'Group message',
-        date: { dateTime: '2026-03-29T10:00:00Z' },
-        recipients: [
-          { user: { name: 'Alice' }, viewed: { dateTime: '2026-03-29T11:00:00Z' } },
-          { user: { name: 'Bob' }, viewed: null },
-          { user: { name: 'Carol' }, viewed: null },
-        ],
+        data: [{
+          id: 300, subject: 'Group message',
+          date: { dateTime: '2026-03-29T10:00:00Z' },
+          showNeverViewed: true,
+          recipients: [
+            { user: { name: 'Alice' }, viewed: { dateTime: '2026-03-29T11:00:00Z' } },
+            { user: { name: 'Bob' } },
+            { user: { name: 'Carol' } },
+          ],
+        }],
       });
 
     const result = await handleTool('ofw_get_unread_sent', {}, c);

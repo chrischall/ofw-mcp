@@ -216,30 +216,33 @@ export async function handleTool(
       const sentFolder = (foldersData.systemFolders ?? []).find((f) => f.folderType === 'SENT_MESSAGES');
       if (!sentFolder) throw new Error('Sent folder not found');
 
-      // Step 2: list sent messages
+      // Step 2: list sent messages (the list endpoint already includes per-recipient viewed status)
       const listPath = `/pub/v3/messages?folders=${encodeURIComponent(sentFolder.id)}&page=${page}&size=${size}&sort=date&sortDirection=desc`;
-      const listData = await client.request<{ data: Array<{ id: number; subject: string }> }>('GET', listPath);
+      const listData = await client.request<{ data: Array<{
+        id: number;
+        subject: string;
+        date: { dateTime: string };
+        showNeverViewed: boolean;
+        recipients: Array<{ user: { name: string }; viewed?: { dateTime: string } }>;
+      }> }>('GET', listPath);
       const messages = listData.data ?? [];
 
-      // Step 3: fetch each message detail and filter to unread
+      // Step 3: filter to unread using showNeverViewed (avoids N+1 detail fetches
+      // and the detail endpoint's inconsistent viewed field which can return null
+      // for read messages instead of the epoch sentinel the list endpoint uses)
       const unread: Array<{ id: number; subject: string; sentAt: string; unreadBy: string[] }> = [];
       for (const msg of messages) {
-        const detail = await client.request<{
-          id: number;
-          subject: string;
-          date: { dateTime: string };
-          recipients: Array<{ user: { name: string }; viewed: unknown | null }>;
-        }>('GET', `/pub/v3/messages/${msg.id}`);
+        if (!msg.showNeverViewed) continue;
 
-        const unreadRecipients = (detail.recipients ?? [])
+        const unreadRecipients = (msg.recipients ?? [])
           .filter((r) => !r.viewed)
           .map((r) => r.user.name);
 
         if (unreadRecipients.length > 0) {
           unread.push({
-            id: detail.id,
-            subject: detail.subject,
-            sentAt: detail.date.dateTime,
+            id: msg.id,
+            subject: msg.subject,
+            sentAt: msg.date.dateTime,
             unreadBy: unreadRecipients,
           });
         }
