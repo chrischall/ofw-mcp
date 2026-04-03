@@ -66,4 +66,5 @@ jobs:
         run: |
           git add -A
           git commit -m "chore: bump version to v${NEXT_VERSION}"
-          git push origin main --follow-tags
+          git push origin main
+          git push origin "v${TAGGED_VERSION}"
