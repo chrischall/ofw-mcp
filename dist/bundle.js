@@ -21381,7 +21381,7 @@ for (const tool of toolDefinitions3) handlers[tool.name] = (n, a) => handleTool3
 for (const tool of toolDefinitions4) handlers[tool.name] = (n, a) => handleTool4(n, a, client);
 for (const tool of toolDefinitions5) handlers[tool.name] = (n, a) => handleTool5(n, a, client);
 var server = new Server(
-  { name: "ofw", version: "1.0.1" },
+  { name: "ofw", version: "1.5.3" },
   { capabilities: { tools: {} } }
 );
 server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: allTools }));

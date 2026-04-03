@@ -30,7 +30,7 @@ for (const tool of expenseTools) handlers[tool.name] = (n, a) => handleExpenses(
 for (const tool of journalTools) handlers[tool.name] = (n, a) => handleJournal(n, a, client);
 
 const server = new Server(
-  { name: 'ofw', version: '1.0.1' },
+  { name: 'ofw', version: '1.5.3' },
   { capabilities: { tools: {} } }
 );
 
