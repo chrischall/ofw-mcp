@@ -12,7 +12,7 @@ npm run test:watch   # vitest in watch mode
 
 `dist/bundle.js` is committed (it's the npm-published artifact). Always rebuild before committing.
 
-## Version Bumps
+## Versioning
 
 Version appears in THREE places — all must match:
 
@@ -20,7 +20,14 @@ Version appears in THREE places — all must match:
 2. `package-lock.json` → run `npm install --package-lock-only` after changing package.json
 3. `src/index.ts` → `Server` constructor `version` field (MCP server version reported to clients)
 
-After bumping: rebuild, commit, tag (`vX.Y.Z`), push branch + tag.
+### Release workflow
+
+Main is always one version ahead of the latest tag. When releasing:
+
+1. Tag the current commit: `git tag vX.Y.Z`
+2. Bump all three version files to the NEXT version
+3. Rebuild (`npm run build`)
+4. Commit the bump, push main + tag
 
 ## Architecture
 
