@@ -1,0 +1,69 @@
+name: Cut & Bump
+
+on:
+  workflow_dispatch:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  cut-and-bump:
+    needs: ci
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4.2.2
+        with:
+          # PAT required — GITHUB_TOKEN pushes don't trigger other workflows
+          token: ${{ secrets.RELEASE_PAT }}
+
+      - uses: actions/setup-node@v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      # Tag the current commit with the current version
+      - name: Tag current version
+        run: |
+          CURRENT=$(node -p "require('./package.json').version")
+          git tag "v${CURRENT}"
+          echo "TAGGED_VERSION=${CURRENT}" >> "$GITHUB_ENV"
+
+      # Bump patch version in all four locations
+      - name: Bump patch version
+        run: |
+          npm version patch --no-git-tag-version
+          NEXT=$(node -p "require('./package.json').version")
+          echo "NEXT_VERSION=${NEXT}" >> "$GITHUB_ENV"
+
+          # src/index.ts — MCP server version
+          sed -i "s/version: '${TAGGED_VERSION}'/version: '${NEXT}'/" src/index.ts
+
+          # manifest.json
+          node -e "
+            const fs = require('fs');
+            const m = JSON.parse(fs.readFileSync('manifest.json', 'utf8'));
+            m.version = '${NEXT}';
+            fs.writeFileSync('manifest.json', JSON.stringify(m, null, 2) + '\n');
+          "
+
+      - name: Rebuild
+        run: npm run build
+
+      - name: Commit and push
+        run: |
+          git add -A
+          git commit -m "chore: bump version to v${NEXT_VERSION}"
+          git push origin main --follow-tags

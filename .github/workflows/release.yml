@@ -9,24 +9,27 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
   release:
+    needs: ci
     runs-on: ubuntu-latest
     permissions:
-      contents: write  # needed to create GitHub releases
-      id-token: write  # needed for npm provenance
+      contents: write
+      id-token: write
 
     steps:
       - uses: actions/checkout@v4.2.2
 
       - uses: actions/setup-node@v4.4.0
         with:
-          node-version: 24
+          node-version: 22
           cache: npm
           registry-url: https://registry.npmjs.org
 
       - run: npm ci
       - run: npm run build
-      - run: npm test
 
       # Package the .skill file
       - name: Package skill

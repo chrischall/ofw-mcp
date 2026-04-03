@@ -14,20 +14,26 @@ npm run test:watch   # vitest in watch mode
 
 ## Versioning
 
-Version appears in THREE places — all must match:
+Version appears in FOUR places — all must match:
 
 1. `package.json` → `"version"`
 2. `package-lock.json` → run `npm install --package-lock-only` after changing package.json
 3. `src/index.ts` → `Server` constructor `version` field (MCP server version reported to clients)
+4. `manifest.json` → `"version"` (mcpb manifest, synced at release time too)
+
+### Important
+
+Do NOT manually bump versions or create tags unless the user explicitly asks. Versioning is handled by the **Cut & Bump** GitHub Action.
 
 ### Release workflow
 
-Main is always one version ahead of the latest tag. When releasing:
+Main is always one version ahead of the latest tag. To release, run the **Cut & Bump** GitHub Action (`cut-and-bump.yml`) which:
 
-1. Tag the current commit: `git tag vX.Y.Z`
-2. Bump all three version files to the NEXT version
-3. Rebuild (`npm run build`)
-4. Commit the bump, push main + tag
+1. Runs CI (build + test)
+2. Tags the current commit with the current version
+3. Bumps patch in all four files
+4. Rebuilds, commits, and pushes main + tag
+5. The tag push triggers the **Release** workflow (CI + npm publish + GitHub release)
 
 ## Architecture
 
