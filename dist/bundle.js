@@ -30522,7 +30522,7 @@ function registerJournalTools(server2, client2) {
 }
 
 // src/index.ts
-var server = new McpServer({ name: "ofw", version: "2.0.3" });
+var server = new McpServer({ name: "ofw", version: "2.0.4" });
 registerUserTools(server, client);
 registerMessageTools(server, client);
 registerCalendarTools(server, client);

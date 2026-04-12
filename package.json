@@ -1,6 +1,6 @@
 {
   "name": "ofw-mcp",
-  "version": "2.0.3",
+  "version": "2.0.4",
   "description": "OurFamilyWizard MCP server for Claude — developed and maintained by AI (Claude Sonnet 4.6)",
   "author": "Claude Sonnet 4.6 (AI) <https://www.anthropic.com/claude>",
   "repository": {
