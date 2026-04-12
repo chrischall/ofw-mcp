@@ -1,11 +1,26 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { OFWClient } from '../../src/client.js';
-import { handleTool, toolDefinitions } from '../../src/tools/user.js';
+import { registerUserTools } from '../../src/tools/user.js';
+
+type ToolHandler = (args: Record<string, unknown>) => Promise<{ content: Array<{ type: string; text: string }> }>;
+
+let handlers: Map<string, ToolHandler>;
 
 function makeClient(returnValue: unknown) {
   const c = new OFWClient();
   vi.spyOn(c, 'request').mockResolvedValue(returnValue);
   return c;
+}
+
+function setup(client: OFWClient) {
+  const server = new McpServer({ name: 'test', version: '0.0.0' });
+  handlers = new Map();
+  vi.spyOn(server, 'registerTool').mockImplementation((name: string, _config: unknown, cb: unknown) => {
+    handlers.set(name, cb as ToolHandler);
+    return undefined as never;
+  });
+  registerUserTools(server, client);
 }
 
 afterEach(() => vi.restoreAllMocks());
@@ -14,8 +29,9 @@ describe('ofw_get_profile', () => {
   it('calls /pub/v2/profiles', async () => {
     const profiles = { user: { id: 1, name: 'Chris' }, coParent: { id: 2, name: 'Jane' } };
     const client = makeClient(profiles);
+    setup(client);
 
-    const result = await handleTool('ofw_get_profile', {}, client);
+    const result = await handlers.get('ofw_get_profile')!({});
 
     expect(client.request).toHaveBeenCalledWith('GET', '/pub/v2/profiles');
     expect(result.content).toHaveLength(1);
@@ -28,8 +44,9 @@ describe('ofw_get_notifications', () => {
   it('calls /pub/v1/users/useraccountstatus', async () => {
     const status = { unreadMessages: 3, upcomingEvents: 1, outstandingExpenses: 2 };
     const client = makeClient(status);
+    setup(client);
 
-    const result = await handleTool('ofw_get_notifications', {}, client);
+    const result = await handlers.get('ofw_get_notifications')!({});
 
     expect(client.request).toHaveBeenCalledWith('GET', '/pub/v1/users/useraccountstatus');
     expect(result.content).toHaveLength(1);
@@ -38,17 +55,11 @@ describe('ofw_get_notifications', () => {
   });
 });
 
-describe('toolDefinitions', () => {
-  it('exports ofw_get_profile and ofw_get_notifications', () => {
-    const names = toolDefinitions.map((t) => t.name);
-    expect(names).toContain('ofw_get_profile');
-    expect(names).toContain('ofw_get_notifications');
-  });
-});
-
-describe('unknown tool', () => {
-  it('throws on unknown tool name', async () => {
+describe('registerUserTools', () => {
+  it('registers ofw_get_profile and ofw_get_notifications', () => {
     const client = makeClient({});
-    await expect(handleTool('ofw_unknown', {}, client)).rejects.toThrow('Unknown tool: ofw_unknown');
+    setup(client);
+    expect(handlers.has('ofw_get_profile')).toBe(true);
+    expect(handlers.has('ofw_get_notifications')).toBe(true);
   });
 });

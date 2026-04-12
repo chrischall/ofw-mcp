@@ -1,37 +1,21 @@
-import type { Tool, CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { OFWClient } from '../client.js';
 
-export const toolDefinitions: Tool[] = [
-  {
-    name: 'ofw_get_profile',
+export function registerUserTools(server: McpServer, client: OFWClient): void {
+  server.registerTool('ofw_get_profile', {
     description: 'Get current user and co-parent profile information from OurFamilyWizard',
     annotations: { readOnlyHint: true },
-    inputSchema: { type: 'object', properties: {}, required: [] },
-  },
-  {
-    name: 'ofw_get_notifications',
+  }, async () => {
+    const data = await client.request('GET', '/pub/v2/profiles');
+    return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+  });
+
+  server.registerTool('ofw_get_notifications', {
     description:
       'Get OurFamilyWizard dashboard summary: unread message count, upcoming events, outstanding expenses. Note: updates your last-seen status.',
     annotations: { readOnlyHint: false },
-    inputSchema: { type: 'object', properties: {}, required: [] },
-  },
-];
-
-export async function handleTool(
-  name: string,
-  _args: Record<string, unknown>,
-  client: OFWClient
-): Promise<CallToolResult> {
-  switch (name) {
-    case 'ofw_get_profile': {
-      const data = await client.request('GET', '/pub/v2/profiles');
-      return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
-    }
-    case 'ofw_get_notifications': {
-      const data = await client.request('GET', '/pub/v1/users/useraccountstatus');
-      return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
-    }
-    default:
-      throw new Error(`Unknown tool: ${name}`);
-  }
+  }, async () => {
+    const data = await client.request('GET', '/pub/v1/users/useraccountstatus');
+    return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+  });
 }

@@ -1,63 +1,39 @@
-import type { Tool, CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { z } from 'zod';
 import type { OFWClient } from '../client.js';
 
-export const toolDefinitions: Tool[] = [
-  {
-    name: 'ofw_get_expense_totals',
+export function registerExpenseTools(server: McpServer, client: OFWClient): void {
+  server.registerTool('ofw_get_expense_totals', {
     description: 'Get OurFamilyWizard expense summary totals (owed/paid)',
     annotations: { readOnlyHint: true },
-    inputSchema: { type: 'object', properties: {}, required: [] },
-  },
-  {
-    name: 'ofw_list_expenses',
+  }, async () => {
+    const data = await client.request('GET', '/pub/v2/expense/expenses/totals');
+    return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+  });
+
+  server.registerTool('ofw_list_expenses', {
     description: 'List OurFamilyWizard expenses with pagination',
     annotations: { readOnlyHint: true },
     inputSchema: {
-      type: 'object',
-      properties: {
-        start: { type: 'number', description: 'Start offset (default 0)' },
-        max: { type: 'number', description: 'Max results (default 20)' },
-      },
-      required: [],
+      start: z.number().describe('Start offset (default 0)').optional(),
+      max: z.number().describe('Max results (default 20)').optional(),
     },
-  },
-  {
-    name: 'ofw_create_expense',
+  }, async (args) => {
+    const start = args.start ?? 0;
+    const max = args.max ?? 20;
+    const data = await client.request('GET', `/pub/v2/expense/expenses?start=${start}&max=${max}`);
+    return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+  });
+
+  server.registerTool('ofw_create_expense', {
     description: 'Log a new expense in OurFamilyWizard',
     annotations: { destructiveHint: false },
     inputSchema: {
-      type: 'object',
-      properties: {
-        amount: { type: 'number', description: 'Expense amount' },
-        description: { type: 'string', description: 'Expense description' },
-        // Additional fields TBD — add after DevTools capture (see pre-task note)
-      },
-      required: ['amount', 'description'],
+      amount: z.number().describe('Expense amount'),
+      description: z.string().describe('Expense description'),
     },
-  },
-];
-
-export async function handleTool(
-  name: string,
-  args: Record<string, unknown>,
-  client: OFWClient
-): Promise<CallToolResult> {
-  switch (name) {
-    case 'ofw_get_expense_totals': {
-      const data = await client.request('GET', '/pub/v2/expense/expenses/totals');
-      return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
-    }
-    case 'ofw_list_expenses': {
-      const { start = 0, max = 20 } = args as { start?: number; max?: number };
-      const data = await client.request('GET', `/pub/v2/expense/expenses?start=${start}&max=${max}`);
-      return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
-    }
-    case 'ofw_create_expense': {
-      // Field names are best-guess; confirm via DevTools capture and update if needed (see pre-task note)
-      const data = await client.request('POST', '/pub/v2/expense/expenses', args);
-      return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
-    }
-    default:
-      throw new Error(`Unknown tool: ${name}`);
-  }
+  }, async (args) => {
+    const data = await client.request('POST', '/pub/v2/expense/expenses', args);
+    return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+  });
 }
