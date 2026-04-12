@@ -4,3 +4,4 @@ coverage/
 .env
 *.skill
 *.mcpb
+.claude/worktrees/
