@@ -1,8 +1,9 @@
 {
   "name": "ofw-mcp",
   "version": "2.0.4",
-  "description": "OurFamilyWizard MCP server for Claude — developed and maintained by AI (Claude Sonnet 4.6)",
-  "author": "Claude Sonnet 4.6 (AI) <https://www.anthropic.com/claude>",
+  "mcpName": "io.github.chrischall/ofw-mcp",
+  "description": "OurFamilyWizard MCP server for Claude — developed and maintained by AI (Claude Code)",
+  "author": "Claude Code (AI) <https://www.anthropic.com/claude>",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/chrischall/ofw-mcp.git"
@@ -15,7 +16,8 @@
     "dist",
     ".claude-plugin",
     "skills",
-    ".mcp.json"
+    ".mcp.json",
+    "server.json"
   ],
   "scripts": {
     "build": "tsc && npm run bundle",

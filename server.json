@@ -1,0 +1,35 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.chrischall/ofw-mcp",
+  "description": "OurFamilyWizard co-parenting tools for Claude \u2014 messages, calendar, expenses, and journal via natural language",
+  "repository": {
+    "url": "https://github.com/chrischall/ofw-mcp",
+    "source": "github"
+  },
+  "version": "2.0.4",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "ofw-mcp",
+      "version": "2.0.4",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "OFW_USERNAME",
+          "description": "Your OurFamilyWizard login email address",
+          "isRequired": true,
+          "format": "string"
+        },
+        {
+          "name": "OFW_PASSWORD",
+          "description": "Your OurFamilyWizard password",
+          "isRequired": true,
+          "format": "string",
+          "isSecret": true
+        }
+      ]
+    }
+  ]
+}
