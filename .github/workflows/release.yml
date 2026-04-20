@@ -36,6 +36,22 @@ jobs:
           VERSION=$(node -p "require('./package.json').version")
           echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
 
+      # Sync in-repo version files to match the tag.
+      - name: Sync version files to $VERSION
+        run: |
+          node -e "
+            const fs = require('fs');
+            for (const f of ['manifest.json', 'server.json', '.claude-plugin/plugin.json', '.claude-plugin/marketplace.json']) {
+              if (!fs.existsSync(f)) continue;
+              const o = JSON.parse(fs.readFileSync(f, 'utf8'));
+              if (o.version !== undefined) o.version = '$VERSION';
+              if (o.metadata?.version !== undefined) o.metadata.version = '$VERSION';
+              if (Array.isArray(o.packages)) o.packages.forEach(p => { if (p.version !== undefined) p.version = '$VERSION'; });
+              if (Array.isArray(o.plugins)) o.plugins.forEach(p => { if (p.version !== undefined) p.version = '$VERSION'; });
+              fs.writeFileSync(f, JSON.stringify(o, null, 2) + '\n');
+            }
+          "
+
       # Package the .skill file
       - name: Package skill
         run: |
@@ -52,20 +68,36 @@ jobs:
           print(f"Packaged {out} ({out.stat().st_size} bytes)")
           EOF
 
-      # Sync manifest.json version from package.json and build .mcpb
       - name: Build .mcpb bundle
         run: |
-          node -e "
-            const fs = require('fs');
-            const m = JSON.parse(fs.readFileSync('manifest.json', 'utf8'));
-            m.version = '$VERSION';
-            fs.writeFileSync('manifest.json', JSON.stringify(m, null, 2) + '\n');
-          "
           npx @anthropic-ai/mcpb pack
           mv ofw-mcp.mcpb "ofw-mcp-${VERSION}.mcpb"
 
       - name: Publish to npm
         run: npm publish --access public --provenance
+
+      # ─── modelcontextprotocol/registry (PulseMCP auto-ingests weekly) ───
+      - name: Install mcp-publisher
+        run: |
+          curl -L "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" | tar xz mcp-publisher
+
+      - name: Authenticate to MCP Registry (OIDC)
+        run: ./mcp-publisher login github-oidc
+
+      - name: Publish to MCP Registry
+        run: ./mcp-publisher publish
+
+      # ─── ClawHub (OpenClaw skill registry) — conditional on CLAWHUB_TOKEN ───
+      - name: Publish skill to ClawHub
+        env:
+          CLAWHUB_TOKEN: ${{ secrets.CLAWHUB_TOKEN }}
+        run: |
+          if [ -z "$CLAWHUB_TOKEN" ]; then
+            echo "CLAWHUB_TOKEN not set — skipping ClawHub publish."
+            exit 0
+          fi
+          npx --yes clawhub login --token "$CLAWHUB_TOKEN"
+          npx --yes clawhub skill publish . --version "${VERSION}"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3.0.0
