@@ -97,7 +97,7 @@ jobs:
             exit 0
           fi
           npx --yes clawhub login --token "$CLAWHUB_TOKEN"
-          npx --yes clawhub skill publish . --version "${VERSION}"
+          npx --yes clawhub publish . --version "${VERSION}"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3.0.0
