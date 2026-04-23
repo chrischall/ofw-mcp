@@ -89,6 +89,7 @@ jobs:
 
       # ─── ClawHub (OpenClaw skill registry) — conditional on CLAWHUB_TOKEN ───
       - name: Publish skill to ClawHub
+        continue-on-error: true
         env:
           CLAWHUB_TOKEN: ${{ secrets.CLAWHUB_TOKEN }}
         run: |
@@ -96,7 +97,11 @@ jobs:
             echo "CLAWHUB_TOKEN not set — skipping ClawHub publish."
             exit 0
           fi
-          npx --yes clawhub login --token "$CLAWHUB_TOKEN"
+          if [ ! -f SKILL.md ]; then
+            echo "SKILL.md not present — skipping ClawHub publish."
+            exit 0
+          fi
+          npx --yes clawhub login --token "$CLAWHUB_TOKEN" --no-browser
           npx --yes clawhub publish . --version "${VERSION}"
 
       - name: Create GitHub Release
