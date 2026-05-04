@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { OFWClient } from '../../src/client.js';
 import { registerMessageTools } from '../../src/tools/messages.js';
-import { closeCache } from '../../src/cache.js';
+import { closeCache, upsertMessage, upsertDraft } from '../../src/cache.js';
 
 type ToolHandler = (args: Record<string, unknown>) => Promise<{ content: Array<{ type: string; text: string }> }>;
 
@@ -103,6 +103,67 @@ describe('ofw_sync_messages', () => {
     expect(parsed.synced).toEqual({ inbox: 1, sent: 0, drafts: 0 });
     expect(parsed.unreadInbox).toHaveLength(1);
     expect(parsed.note).toMatch(/unread inbox/);
+  });
+});
+
+describe('ofw_list_messages (cache-backed)', () => {
+  it('returns cached messages for the inbox folder name', async () => {
+    upsertMessage({
+      id: 1, folder: 'inbox', subject: 'Hi', fromUser: 'Alice',
+      sentAt: '2026-05-04T12:00:00Z', recipients: [], body: 'b',
+      fetchedBodyAt: '2026-05-04T12:01:00Z', replyToId: null, chainRootId: null, listData: {},
+    });
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request');
+    setup(client);
+
+    const result = await handlers.get('ofw_list_messages')!({ folderId: 'inbox' });
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.messages).toHaveLength(1);
+    expect(parsed.messages[0].id).toBe(1);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('returns empty result with sync hint when cache is empty', async () => {
+    const client = new OFWClient();
+    setup(client);
+    const result = await handlers.get('ofw_list_messages')!({ folderId: 'inbox' });
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.messages).toEqual([]);
+    expect(parsed.note).toMatch(/ofw_sync_messages/);
+  });
+
+  it('rejects numeric folder ids with a helpful note', async () => {
+    const client = new OFWClient();
+    setup(client);
+    const result = await handlers.get('ofw_list_messages')!({ folderId: '42' });
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.note).toMatch(/inbox.*sent/);
+  });
+});
+
+describe('ofw_list_drafts (cache-backed)', () => {
+  it('returns cached drafts', async () => {
+    upsertDraft({
+      id: 5, subject: 'D', body: 'b', recipients: [], replyToId: null,
+      modifiedAt: '2026-05-04T12:00:00Z', listData: {},
+    });
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request');
+    setup(client);
+    const result = await handlers.get('ofw_list_drafts')!({});
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.drafts).toHaveLength(1);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('returns sync hint when empty', async () => {
+    const client = new OFWClient();
+    setup(client);
+    const result = await handlers.get('ofw_list_drafts')!({});
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.drafts).toEqual([]);
+    expect(parsed.note).toMatch(/ofw_sync_messages/);
   });
 });
 

@@ -2,6 +2,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import type { OFWClient } from '../client.js';
 import { syncAll } from '../sync.js';
+import { listMessages, listDrafts } from '../cache.js';
 
 export function registerMessageTools(server: McpServer, client: OFWClient): void {
   server.registerTool('ofw_list_message_folders', {
@@ -13,19 +14,38 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
   });
 
   server.registerTool('ofw_list_messages', {
-    description: 'List messages in an OurFamilyWizard folder. Call ofw_list_message_folders first to get folder IDs. Returns actual message content.',
+    description: 'List messages from the local OurFamilyWizard cache. folderId accepts "inbox" or "sent". Call ofw_sync_messages first if the cache is empty or stale.',
     annotations: { readOnlyHint: true },
     inputSchema: {
-      folderId: z.string().describe('Folder ID (get from ofw_list_message_folders)'),
+      folderId: z.string().describe('Folder name: "inbox" or "sent"'),
       page: z.number().describe('Page number (default 1)').optional(),
       size: z.number().describe('Messages per page (default 50)').optional(),
     },
   }, async (args) => {
     const page = args.page ?? 1;
     const size = args.size ?? 50;
-    const path = `/pub/v3/messages?folders=${encodeURIComponent(args.folderId)}&page=${page}&size=${size}&sort=date&sortDirection=desc`;
-    const data = await client.request('GET', path);
-    return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+
+    let folder: 'inbox' | 'sent' | null = null;
+    if (args.folderId === 'inbox') folder = 'inbox';
+    else if (args.folderId === 'sent') folder = 'sent';
+    else {
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify({
+            messages: [],
+            note: 'Cache is keyed by folder name. Pass folderId: "inbox" or "sent" (numeric folder IDs are not yet supported by the cache layer).',
+          }, null, 2),
+        }],
+      };
+    }
+
+    const messages = listMessages({ folder, page, size });
+    const payload = messages.length === 0
+      ? { messages: [], note: 'Cache empty for this folder. Call ofw_sync_messages to populate.' }
+      : { messages };
+
+    return { content: [{ type: 'text' as const, text: JSON.stringify(payload, null, 2) }] };
   });
 
   server.registerTool('ofw_get_message', {
@@ -69,7 +89,7 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
   });
 
   server.registerTool('ofw_list_drafts', {
-    description: 'List all draft messages in OurFamilyWizard',
+    description: 'List draft messages from the local OurFamilyWizard cache. Call ofw_sync_messages first if the cache is empty.',
     annotations: { readOnlyHint: true },
     inputSchema: {
       page: z.number().describe('Page number (default 1)').optional(),
@@ -78,10 +98,11 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
   }, async (args) => {
     const page = args.page ?? 1;
     const size = args.size ?? 50;
-    // 13471259 is the system Drafts folder (folderType: DRAFTS)
-    const path = `/pub/v3/messages?folders=13471259&page=${page}&size=${size}&sort=date&sortDirection=desc`;
-    const data = await client.request('GET', path);
-    return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+    const drafts = listDrafts({ page, size });
+    const payload = drafts.length === 0
+      ? { drafts: [], note: 'Cache empty. Call ofw_sync_messages to populate.' }
+      : { drafts };
+    return { content: [{ type: 'text' as const, text: JSON.stringify(payload, null, 2) }] };
   });
 
   server.registerTool('ofw_save_draft', {
