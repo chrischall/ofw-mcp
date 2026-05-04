@@ -1,6 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import type { OFWClient } from '../client.js';
+import { syncAll } from '../sync.js';
 
 export function registerMessageTools(server: McpServer, client: OFWClient): void {
   server.registerTool('ofw_list_message_folders', {
@@ -176,5 +177,20 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
       return { content: [{ type: 'text' as const, text: JSON.stringify({ message: 'All scanned sent messages have been read.' }, null, 2) }] };
     }
     return { content: [{ type: 'text' as const, text: JSON.stringify(unread, null, 2) }] };
+  });
+
+  server.registerTool('ofw_sync_messages', {
+    description: 'Sync messages from OurFamilyWizard into the local cache. Returns counts per folder and a list of unread inbox messages whose bodies were NOT fetched (to avoid mark-as-read on OFW). Call ofw_get_message(id) on those to read them.',
+    annotations: { readOnlyHint: false },
+    inputSchema: {
+      folders: z.array(z.enum(['inbox', 'sent', 'drafts'])).describe('Folders to sync (default: all three)').optional(),
+      fetchUnreadBodies: z.boolean().describe('If true, also fetch bodies for unread inbox messages (will mark them as read on OFW). Default false.').optional(),
+    },
+  }, async (args) => {
+    const result = await syncAll(client, {
+      folders: args.folders,
+      fetchUnreadBodies: args.fetchUnreadBodies,
+    });
+    return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
   });
 }
