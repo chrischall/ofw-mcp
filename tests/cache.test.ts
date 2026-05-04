@@ -6,6 +6,7 @@ import {
   openCache, closeCache,
   upsertMessage, getMessage, listMessages, type MessageRow,
   upsertDraft, getDraft, listDrafts, deleteDraft, listDraftIds, type DraftRow,
+  getSyncState, setSyncState, getMeta, setMeta,
 } from '../src/cache.js';
 
 let tmp: string;
@@ -173,5 +174,39 @@ describe('drafts CRUD', () => {
     upsertDraft(sampleDraft({ id: 1 }));
     upsertDraft(sampleDraft({ id: 2 }));
     expect(listDraftIds().sort()).toEqual([1, 2]);
+  });
+});
+
+describe('sync_state and meta', () => {
+  it('getSyncState returns null for unknown folder', () => {
+    openCache();
+    expect(getSyncState('inbox')).toBeNull();
+  });
+
+  it('setSyncState then getSyncState round-trips', () => {
+    openCache();
+    setSyncState('inbox', { lastSyncAt: '2026-05-04T00:00:00Z', newestId: 42 });
+    expect(getSyncState('inbox')).toEqual({
+      lastSyncAt: '2026-05-04T00:00:00Z',
+      newestId: 42,
+    });
+  });
+
+  it('setSyncState updates an existing row', () => {
+    openCache();
+    setSyncState('inbox', { lastSyncAt: '2026-05-04T00:00:00Z', newestId: 1 });
+    setSyncState('inbox', { lastSyncAt: '2026-05-05T00:00:00Z', newestId: 99 });
+    expect(getSyncState('inbox')?.newestId).toBe(99);
+  });
+
+  it('getMeta returns null for unknown key', () => {
+    openCache();
+    expect(getMeta('nope')).toBeNull();
+  });
+
+  it('setMeta then getMeta round-trips', () => {
+    openCache();
+    setMeta('drafts_folder_id', '13471259');
+    expect(getMeta('drafts_folder_id')).toBe('13471259');
   });
 });

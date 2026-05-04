@@ -256,3 +256,42 @@ export function listDraftIds(): number[] {
   const rows = db.prepare('SELECT id FROM drafts').all() as Array<{ id: number }>;
   return rows.map((r) => r.id);
 }
+
+export type FolderName = 'inbox' | 'sent' | 'drafts';
+
+export interface SyncState {
+  lastSyncAt: string;
+  newestId: number | null;
+}
+
+export function getSyncState(folder: FolderName): SyncState | null {
+  const { db } = openCache();
+  const r = db.prepare('SELECT last_sync_at, newest_id FROM sync_state WHERE folder = ?')
+    .get(folder) as { last_sync_at: string; newest_id: number | null } | undefined;
+  if (!r) return null;
+  return { lastSyncAt: r.last_sync_at, newestId: r.newest_id };
+}
+
+export function setSyncState(folder: FolderName, state: SyncState): void {
+  const { db } = openCache();
+  db.prepare(
+    `INSERT INTO sync_state (folder, last_sync_at, newest_id) VALUES (?, ?, ?)
+     ON CONFLICT(folder) DO UPDATE SET
+       last_sync_at = excluded.last_sync_at,
+       newest_id = excluded.newest_id`
+  ).run(folder, state.lastSyncAt, state.newestId);
+}
+
+export function getMeta(key: string): string | null {
+  const { db } = openCache();
+  const r = db.prepare('SELECT value FROM meta WHERE key = ?')
+    .get(key) as { value: string } | undefined;
+  return r ? r.value : null;
+}
+
+export function setMeta(key: string, value: string): void {
+  const { db } = openCache();
+  db.prepare(
+    'INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value'
+  ).run(key, value);
+}
