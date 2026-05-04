@@ -3,7 +3,7 @@ import {
   setMeta,
   upsertMessage, getMessage, setSyncState,
   upsertDraft, getDraft, deleteDraft, listDraftIds,
-  type MessageRow, type Recipient, type DraftRow,
+  type MessageRow, type Recipient, type DraftRow, type FolderName,
 } from './cache.js';
 
 export interface FolderIds {
@@ -193,4 +193,44 @@ export async function syncDrafts(client: OFWClient, draftsFolderId: string): Pro
   }
 
   return { synced };
+}
+
+export interface SyncAllOptions {
+  folders?: FolderName[];
+  fetchUnreadBodies?: boolean;
+}
+
+export interface SyncAllResult {
+  synced: Partial<Record<FolderName, number>>;
+  unreadInbox: UnreadHint[];
+  note?: string;
+}
+
+export async function syncAll(client: OFWClient, opts: SyncAllOptions): Promise<SyncAllResult> {
+  const folders = opts.folders ?? ['inbox', 'sent', 'drafts'];
+  const ids = await resolveFolderIds(client);
+  const synced: Partial<Record<FolderName, number>> = {};
+  let unreadInbox: UnreadHint[] = [];
+
+  for (const folder of folders) {
+    if (folder === 'inbox') {
+      const r = await syncMessageFolder(client, 'inbox', ids.inbox, {
+        fetchUnreadBodies: opts.fetchUnreadBodies ?? false,
+      });
+      synced.inbox = r.synced;
+      unreadInbox = r.unread;
+    } else if (folder === 'sent') {
+      const r = await syncMessageFolder(client, 'sent', ids.sent, { fetchUnreadBodies: false });
+      synced.sent = r.synced;
+    } else if (folder === 'drafts') {
+      const r = await syncDrafts(client, ids.drafts);
+      synced.drafts = r.synced;
+    }
+  }
+
+  const note = unreadInbox.length > 0
+    ? `${unreadInbox.length} unread inbox messages cached without bodies. Call ofw_get_message(id) to read them — this will mark them as read on OFW.`
+    : undefined;
+
+  return { synced, unreadInbox, ...(note ? { note } : {}) };
 }

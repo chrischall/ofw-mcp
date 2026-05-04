@@ -7,7 +7,7 @@ import {
   closeCache, getMeta, getMessage, listMessages, getSyncState, upsertMessage,
   getDraft, listDraftIds, upsertDraft,
 } from '../src/cache.js';
-import { resolveFolderIds, syncMessageFolder, syncDrafts } from '../src/sync.js';
+import { resolveFolderIds, syncMessageFolder, syncDrafts, syncAll } from '../src/sync.js';
 
 let tmp: string;
 let originalCacheDir: string | undefined;
@@ -279,5 +279,72 @@ describe('syncDrafts', () => {
 
     expect(spy).toHaveBeenCalledTimes(1);
     expect(getDraft(1)?.body).toBe('same-body');
+  });
+});
+
+function foldersResponse() {
+  return {
+    systemFolders: [
+      { id: '111', folderType: 'INBOX', name: 'Inbox' },
+      { id: '222', folderType: 'SENT_MESSAGES', name: 'Sent' },
+      { id: '333', folderType: 'DRAFTS', name: 'Drafts' },
+    ],
+  };
+}
+
+describe('syncAll', () => {
+  it('runs all three folders by default and aggregates counts', async () => {
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      // resolveFolderIds
+      .mockResolvedValueOnce(foldersResponse())
+      // inbox: page 1 with 1 read item, body, then empty
+      .mockResolvedValueOnce(listResponse([{ id: 10, unread: false }]))
+      .mockResolvedValueOnce({ body: 'inbox-10' })
+      .mockResolvedValueOnce(listResponse([]))
+      // sent: page 1 with 1 item, body, then empty
+      .mockResolvedValueOnce(listResponse([{ id: 20 }]))
+      .mockResolvedValueOnce({ body: 'sent-20' })
+      .mockResolvedValueOnce(listResponse([]))
+      // drafts: page 1 with 1 item + body
+      .mockResolvedValueOnce(draftListResponse([{ id: 30 }]))
+      .mockResolvedValueOnce({ body: 'draft-30', subject: 'Draft 30', recipientIds: [] });
+
+    const result = await syncAll(client, {});
+
+    expect(result.synced).toEqual({ inbox: 1, sent: 1, drafts: 1 });
+    expect(result.unreadInbox).toEqual([]);
+  });
+
+  it('returns unreadInbox when fetchUnreadBodies is false (default)', async () => {
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce(foldersResponse())
+      .mockResolvedValueOnce(listResponse([{ id: 10, unread: true }]))
+      .mockResolvedValueOnce(listResponse([]))
+      .mockResolvedValueOnce(listResponse([]))
+      .mockResolvedValueOnce(draftListResponse([]));
+
+    const result = await syncAll(client, {});
+
+    expect(result.unreadInbox).toEqual([
+      { id: 10, subject: 'Subject 10', from: 'Alice', sentAt: '2026-05-04T12:00:00Z' },
+    ]);
+    expect(result.note).toMatch(/unread inbox/);
+  });
+
+  it('respects an explicit folders subset', async () => {
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request')
+      .mockResolvedValueOnce(foldersResponse())
+      .mockResolvedValueOnce(draftListResponse([]));
+
+    const result = await syncAll(client, { folders: ['drafts'] });
+
+    expect(result.synced).toEqual({ drafts: 0 });
+    const inboxCalls = spy.mock.calls.filter((c) => (c[1] as string).includes('folders=111'));
+    const sentCalls = spy.mock.calls.filter((c) => (c[1] as string).includes('folders=222'));
+    expect(inboxCalls).toHaveLength(0);
+    expect(sentCalls).toHaveLength(0);
   });
 });
