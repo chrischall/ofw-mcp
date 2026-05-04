@@ -7,6 +7,7 @@ import {
   upsertMessage, getMessage, listMessages, type MessageRow,
   upsertDraft, getDraft, listDrafts, deleteDraft, listDraftIds, type DraftRow,
   getSyncState, setSyncState, getMeta, setMeta,
+  findLatestReplyTip,
 } from '../src/cache.js';
 
 let tmp: string;
@@ -208,5 +209,56 @@ describe('sync_state and meta', () => {
     openCache();
     setMeta('drafts_folder_id', '13471259');
     expect(getMeta('drafts_folder_id')).toBe('13471259');
+  });
+});
+
+describe('findLatestReplyTip', () => {
+  it('returns the input id unchanged when the parent is not in cache', () => {
+    openCache();
+    expect(findLatestReplyTip(999)).toBe(999);
+  });
+
+  it('returns the input id when the parent is an inbox message with no sent replies', () => {
+    openCache();
+    upsertMessage(sampleRow({ id: 100, folder: 'inbox' }));
+    expect(findLatestReplyTip(100)).toBe(100);
+  });
+
+  it('returns the latest sent reply when one exists for the chain', () => {
+    openCache();
+    upsertMessage(sampleRow({ id: 100, folder: 'inbox' }));
+    upsertMessage(sampleRow({
+      id: 142, folder: 'sent', replyToId: 100, chainRootId: 100,
+      sentAt: '2026-05-04T13:00:00Z',
+    }));
+    expect(findLatestReplyTip(100)).toBe(142);
+  });
+
+  it('returns the latest of multiple sent replies in the same chain', () => {
+    openCache();
+    upsertMessage(sampleRow({ id: 100, folder: 'inbox' }));
+    upsertMessage(sampleRow({
+      id: 142, folder: 'sent', replyToId: 100, chainRootId: 100,
+      sentAt: '2026-05-04T13:00:00Z',
+    }));
+    upsertMessage(sampleRow({
+      id: 200, folder: 'sent', replyToId: 142, chainRootId: 100,
+      sentAt: '2026-05-04T14:00:00Z',
+    }));
+    expect(findLatestReplyTip(100)).toBe(200);
+  });
+
+  it('walks chain when the input is itself a sent reply', () => {
+    openCache();
+    upsertMessage(sampleRow({ id: 100, folder: 'inbox' }));
+    upsertMessage(sampleRow({
+      id: 142, folder: 'sent', replyToId: 100, chainRootId: 100,
+      sentAt: '2026-05-04T13:00:00Z',
+    }));
+    upsertMessage(sampleRow({
+      id: 200, folder: 'sent', replyToId: 142, chainRootId: 100,
+      sentAt: '2026-05-04T14:00:00Z',
+    }));
+    expect(findLatestReplyTip(142)).toBe(200);
   });
 });

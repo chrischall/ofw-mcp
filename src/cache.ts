@@ -295,3 +295,18 @@ export function setMeta(key: string, value: string): void {
     'INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value'
   ).run(key, value);
 }
+
+export function findLatestReplyTip(replyToId: number): number {
+  const { db } = openCache();
+  const parent = db.prepare(
+    'SELECT id, folder, chain_root_id FROM messages WHERE id = ?'
+  ).get(replyToId) as { id: number; folder: string; chain_root_id: number | null } | undefined;
+  if (!parent) return replyToId;
+  const chainRoot = parent.chain_root_id ?? parent.id;
+  const tip = db.prepare(
+    `SELECT id FROM messages
+     WHERE folder = 'sent' AND chain_root_id = ?
+     ORDER BY id DESC LIMIT 1`
+  ).get(chainRoot) as { id: number } | undefined;
+  return tip ? tip.id : replyToId;
+}
