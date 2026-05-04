@@ -2,7 +2,10 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import type { OFWClient } from '../client.js';
 import { syncAll } from '../sync.js';
-import { listMessages, listDrafts } from '../cache.js';
+import {
+  listMessages, listDrafts, getMessage, upsertMessage,
+  type MessageRow, type Recipient,
+} from '../cache.js';
 
 export function registerMessageTools(server: McpServer, client: OFWClient): void {
   server.registerTool('ofw_list_message_folders', {
@@ -49,14 +52,44 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
   });
 
   server.registerTool('ofw_get_message', {
-    description: 'Get a single OurFamilyWizard message by ID. Note: reading an unread message marks it as read.',
+    description: 'Get a single OurFamilyWizard message by ID. Reads from local cache when available; otherwise fetches from OFW (which will mark unread inbox messages as read on OFW).',
     annotations: { readOnlyHint: false },
     inputSchema: {
       messageId: z.string().describe('Message ID'),
     },
   }, async (args) => {
-    const data = await client.request('GET', `/pub/v3/messages/${encodeURIComponent(args.messageId)}`);
-    return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+    const id = Number(args.messageId);
+    const cached = getMessage(id);
+    if (cached && cached.body !== null) {
+      return { content: [{ type: 'text' as const, text: JSON.stringify(cached, null, 2) }] };
+    }
+
+    const detail = await client.request<{
+      id: number; body?: string; subject: string; from?: { name?: string };
+      date: { dateTime: string };
+      recipients?: Array<{ user: { id: number; name: string }; viewed?: { dateTime: string } | null }>;
+    }>('GET', `/pub/v3/messages/${encodeURIComponent(args.messageId)}`);
+
+    const recipients: Recipient[] = (detail.recipients ?? []).map((r) => ({
+      userId: r.user.id, name: r.user.name, viewedAt: r.viewed?.dateTime ?? null,
+    }));
+
+    const folder: 'inbox' | 'sent' = cached?.folder ?? 'inbox';
+    const row: MessageRow = {
+      id: detail.id,
+      folder,
+      subject: detail.subject,
+      fromUser: detail.from?.name ?? '',
+      sentAt: detail.date.dateTime,
+      recipients,
+      body: detail.body ?? '',
+      fetchedBodyAt: new Date().toISOString(),
+      replyToId: cached?.replyToId ?? null,
+      chainRootId: cached?.chainRootId ?? null,
+      listData: cached?.listData ?? detail,
+    };
+    upsertMessage(row);
+    return { content: [{ type: 'text' as const, text: JSON.stringify(row, null, 2) }] };
   });
 
   server.registerTool('ofw_send_message', {

@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { OFWClient } from '../../src/client.js';
 import { registerMessageTools } from '../../src/tools/messages.js';
-import { closeCache, upsertMessage, upsertDraft } from '../../src/cache.js';
+import { closeCache, upsertMessage, upsertDraft, getMessage } from '../../src/cache.js';
 
 type ToolHandler = (args: Record<string, unknown>) => Promise<{ content: Array<{ type: string; text: string }> }>;
 
@@ -164,6 +164,55 @@ describe('ofw_list_drafts (cache-backed)', () => {
     const parsed = JSON.parse(result.content[0].text);
     expect(parsed.drafts).toEqual([]);
     expect(parsed.note).toMatch(/ofw_sync_messages/);
+  });
+});
+
+describe('ofw_get_message (cache-first)', () => {
+  it('returns cached message body without hitting OFW', async () => {
+    upsertMessage({
+      id: 42, folder: 'inbox', subject: 'Cached', fromUser: 'Alice',
+      sentAt: '2026-05-04T12:00:00Z', recipients: [], body: 'cached-body',
+      fetchedBodyAt: '2026-05-04T12:01:00Z', replyToId: null, chainRootId: null, listData: {},
+    });
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request');
+    setup(client);
+
+    const result = await handlers.get('ofw_get_message')!({ messageId: '42' });
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.body).toBe('cached-body');
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('falls through to OFW when row exists but body is NULL (lazy unread)', async () => {
+    upsertMessage({
+      id: 42, folder: 'inbox', subject: 'Unread', fromUser: 'Alice',
+      sentAt: '2026-05-04T12:00:00Z', recipients: [], body: null,
+      fetchedBodyAt: null, replyToId: null, chainRootId: null, listData: {},
+    });
+    const client = new OFWClient();
+    vi.spyOn(client, 'request').mockResolvedValueOnce({
+      id: 42, body: 'fresh-body', subject: 'Unread', date: { dateTime: '2026-05-04T12:00:00Z' },
+      from: { name: 'Alice' }, recipients: [],
+    });
+    setup(client);
+
+    const result = await handlers.get('ofw_get_message')!({ messageId: '42' });
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.body).toBe('fresh-body');
+    expect(getMessage(42)?.body).toBe('fresh-body');
+  });
+
+  it('falls through to OFW when row is missing entirely', async () => {
+    const client = new OFWClient();
+    vi.spyOn(client, 'request').mockResolvedValueOnce({
+      id: 99, body: 'fresh-body', subject: 'New', date: { dateTime: '2026-05-04T12:00:00Z' },
+      from: { name: 'Alice' }, recipients: [],
+    });
+    setup(client);
+    const result = await handlers.get('ofw_get_message')!({ messageId: '99' });
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.body).toBe('fresh-body');
   });
 });
 
