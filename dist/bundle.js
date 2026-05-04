@@ -30119,8 +30119,17 @@ import { fileURLToPath } from "url";
 try {
   const { config: config2 } = await import("dotenv");
   const __dirname = dirname(fileURLToPath(import.meta.url));
-  config2({ path: join(__dirname, "..", ".env"), override: false });
+  config2({ path: join(__dirname, "..", ".env"), override: false, quiet: true });
 } catch {
+}
+function readVar(key) {
+  const raw = process.env[key];
+  if (typeof raw !== "string") return void 0;
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) return void 0;
+  if (trimmed === "undefined" || trimmed === "null") return void 0;
+  if (/^\$\{[^}]*\}$/.test(trimmed)) return void 0;
+  return trimmed;
 }
 var BASE_URL = "https://ofw.ourfamilywizard.com";
 var STATIC_HEADERS = {
@@ -30176,8 +30185,8 @@ var OFWClient = class {
     await this.login();
   }
   async login() {
-    const username = process.env.OFW_USERNAME;
-    const password = process.env.OFW_PASSWORD;
+    const username = readVar("OFW_USERNAME");
+    const password = readVar("OFW_PASSWORD");
     if (!username || !password) {
       throw new Error("OFW_USERNAME and OFW_PASSWORD must be set");
     }
@@ -30522,7 +30531,7 @@ function registerJournalTools(server2, client2) {
 }
 
 // src/index.ts
-var server = new McpServer({ name: "ofw", version: "2.0.4" });
+var server = new McpServer({ name: "ofw", version: "2.0.5" });
 registerUserTools(server, client);
 registerMessageTools(server, client);
 registerCalendarTools(server, client);

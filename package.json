@@ -1,6 +1,6 @@
 {
   "name": "ofw-mcp",
-  "version": "2.0.4",
+  "version": "2.0.5",
   "mcpName": "io.github.chrischall/ofw-mcp",
   "description": "OurFamilyWizard MCP server for Claude — developed and maintained by AI (Claude Code)",
   "author": "Claude Code (AI) <https://www.anthropic.com/claude>",
