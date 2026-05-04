@@ -4,7 +4,8 @@ import type { OFWClient } from '../client.js';
 import { syncAll } from '../sync.js';
 import {
   listMessages, listDrafts, getMessage, upsertMessage,
-  type MessageRow, type Recipient,
+  upsertDraft, deleteDraft, findLatestReplyTip,
+  type MessageRow, type DraftRow, type Recipient,
 } from '../cache.js';
 
 export function registerMessageTools(server: McpServer, client: OFWClient): void {
@@ -93,32 +94,74 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
   });
 
   server.registerTool('ofw_send_message', {
-    description: 'Send a message via OurFamilyWizard. If sending from a draft, pass draftId to automatically delete the draft after sending.',
+    description: 'Send a message via OurFamilyWizard. If sending from a draft, pass draftId to delete the draft after sending. If replyToId is provided, the cache may rewrite it to the latest reply in the same thread (a note is included in the response when this happens).',
     annotations: { destructiveHint: true },
     inputSchema: {
       subject: z.string().describe('Message subject'),
       body: z.string().describe('Message body text'),
       recipientIds: z.array(z.number()).describe('Array of recipient user IDs (get from ofw_get_profile)'),
-      replyToId: z.number().describe('ID of the message being replied to. When provided, the original message thread is included (like a standard email reply).').optional(),
+      replyToId: z.number().describe('ID of the message being replied to').optional(),
       draftId: z.number().describe('ID of the draft to delete after sending (omit if not sending from a draft)').optional(),
     },
   }, async (args) => {
-    const replyToId = args.replyToId ?? null;
-    const data = await client.request('POST', '/pub/v3/messages', {
+    const requestedReplyTo = args.replyToId ?? null;
+    let resolvedReplyTo = requestedReplyTo;
+    let chainRootId: number | null = null;
+    let rewriteNote: string | null = null;
+
+    if (requestedReplyTo !== null) {
+      resolvedReplyTo = findLatestReplyTip(requestedReplyTo);
+      if (resolvedReplyTo !== requestedReplyTo) {
+        rewriteNote = `replyToId rewritten from ${requestedReplyTo} to ${resolvedReplyTo} (later reply in same thread found in sent cache).`;
+      }
+      const parent = getMessage(resolvedReplyTo);
+      chainRootId = parent?.chainRootId ?? parent?.id ?? requestedReplyTo;
+    }
+
+    const data = await client.request<{
+      id?: number; subject?: string; body?: string;
+      date?: { dateTime: string }; from?: { name?: string };
+      recipients?: Array<{ user: { id: number; name: string }; viewed?: { dateTime: string } | null }>;
+    }>('POST', '/pub/v3/messages', {
       subject: args.subject,
       body: args.body,
       recipientIds: args.recipientIds,
       attachments: { myFileIDs: [] },
       draft: false,
-      includeOriginal: replyToId !== null,
-      replyToId,
+      includeOriginal: resolvedReplyTo !== null,
+      replyToId: resolvedReplyTo,
     });
+
+    if (data && typeof data.id === 'number') {
+      const recipients: Recipient[] = (data.recipients ?? []).map((r) => ({
+        userId: r.user.id, name: r.user.name, viewedAt: r.viewed?.dateTime ?? null,
+      }));
+      const row: MessageRow = {
+        id: data.id,
+        folder: 'sent',
+        subject: data.subject ?? args.subject,
+        fromUser: data.from?.name ?? '',
+        sentAt: data.date?.dateTime ?? new Date().toISOString(),
+        recipients,
+        body: data.body ?? args.body,
+        fetchedBodyAt: new Date().toISOString(),
+        replyToId: resolvedReplyTo,
+        chainRootId,
+        listData: data,
+      };
+      upsertMessage(row);
+    }
+
     if (args.draftId !== undefined) {
       const form = new FormData();
       form.append('messageIds', String(args.draftId));
       await client.request('DELETE', '/pub/v1/messages', form);
+      deleteDraft(args.draftId);
     }
-    return { content: [{ type: 'text' as const, text: data ? JSON.stringify(data, null, 2) : 'Message sent successfully.' }] };
+
+    const text = data ? JSON.stringify(data, null, 2) : 'Message sent successfully.';
+    const finalText = rewriteNote ? `${rewriteNote}\n\n${text}` : text;
+    return { content: [{ type: 'text' as const, text: finalText }] };
   });
 
   server.registerTool('ofw_list_drafts', {

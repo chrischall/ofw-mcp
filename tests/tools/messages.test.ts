@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { OFWClient } from '../../src/client.js';
 import { registerMessageTools } from '../../src/tools/messages.js';
-import { closeCache, upsertMessage, upsertDraft, getMessage } from '../../src/cache.js';
+import { closeCache, upsertMessage, upsertDraft, getMessage, getDraft } from '../../src/cache.js';
 
 type ToolHandler = (args: Record<string, unknown>) => Promise<{ content: Array<{ type: string; text: string }> }>;
 
@@ -305,6 +305,108 @@ describe('ofw_send_message', () => {
     const deleteForm = spy.mock.calls[1][2] as FormData;
     expect(deleteForm.get('messageIds')).toBe('42');
     expect(result.content[0].text).toContain('"id": 200');
+  });
+});
+
+describe('ofw_send_message (thread-tip + cache write)', () => {
+  it('rewrites replyToId to the latest sent reply in the chain', async () => {
+    upsertMessage({
+      id: 100, folder: 'inbox', subject: 'Original', fromUser: 'Alice',
+      sentAt: '2026-05-01T00:00:00Z', recipients: [], body: 'orig',
+      fetchedBodyAt: '2026-05-01T00:01:00Z', replyToId: null, chainRootId: null, listData: {},
+    });
+    upsertMessage({
+      id: 142, folder: 'sent', subject: 'Re: Original', fromUser: 'Me',
+      sentAt: '2026-05-02T00:00:00Z', recipients: [], body: 'first reply',
+      fetchedBodyAt: '2026-05-02T00:01:00Z',
+      replyToId: 100, chainRootId: 100, listData: {},
+    });
+
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request').mockResolvedValueOnce({
+      id: 200, subject: 'Re: Original', body: 'second reply',
+      date: { dateTime: '2026-05-03T00:00:00Z' }, from: { name: 'Me' },
+      recipients: [{ user: { id: 1, name: 'Alice' }, viewed: null }],
+    });
+    setup(client);
+
+    const result = await handlers.get('ofw_send_message')!({
+      subject: 'Re: Original',
+      body: 'second reply',
+      recipientIds: [1],
+      replyToId: 100,
+    });
+
+    const postCall = spy.mock.calls.find((c) => c[0] === 'POST');
+    expect(postCall).toBeDefined();
+    expect((postCall![2] as { replyToId: number | null }).replyToId).toBe(142);
+    expect(result.content[0].text).toMatch(/replyToId rewritten from 100 to 142/);
+
+    const newRow = getMessage(200);
+    expect(newRow?.chainRootId).toBe(100);
+    expect(newRow?.replyToId).toBe(142);
+    expect(newRow?.folder).toBe('sent');
+  });
+
+  it('does not rewrite when replyToId is the chain tip', async () => {
+    upsertMessage({
+      id: 100, folder: 'inbox', subject: 'Original', fromUser: 'Alice',
+      sentAt: '2026-05-01T00:00:00Z', recipients: [], body: 'orig',
+      fetchedBodyAt: null, replyToId: null, chainRootId: null, listData: {},
+    });
+
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request').mockResolvedValueOnce({
+      id: 200, subject: 'Re: Original', body: 'reply',
+      date: { dateTime: '2026-05-03T00:00:00Z' }, from: { name: 'Me' }, recipients: [],
+    });
+    setup(client);
+
+    const result = await handlers.get('ofw_send_message')!({
+      subject: 'Re: Original', body: 'reply', recipientIds: [1], replyToId: 100,
+    });
+
+    const postCall = spy.mock.calls.find((c) => c[0] === 'POST');
+    expect((postCall![2] as { replyToId: number }).replyToId).toBe(100);
+    expect(result.content[0].text).not.toMatch(/rewritten/);
+  });
+
+  it('passes through replyToId unchanged when parent not in cache', async () => {
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request').mockResolvedValueOnce({
+      id: 200, subject: 'Re: Unknown', body: 'reply',
+      date: { dateTime: '2026-05-03T00:00:00Z' }, from: { name: 'Me' }, recipients: [],
+    });
+    setup(client);
+
+    await handlers.get('ofw_send_message')!({
+      subject: 'Re: Unknown', body: 'reply', recipientIds: [1], replyToId: 999,
+    });
+
+    const postCall = spy.mock.calls.find((c) => c[0] === 'POST');
+    expect((postCall![2] as { replyToId: number }).replyToId).toBe(999);
+  });
+
+  it('removes draft from cache when draftId is provided', async () => {
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce({
+        id: 200, subject: 'Re', body: 'b', date: { dateTime: '2026-05-03T00:00:00Z' },
+        from: { name: 'Me' }, recipients: [],
+      })
+      .mockResolvedValueOnce(null);
+
+    upsertDraft({
+      id: 50, subject: 'Re', body: 'b', recipients: [], replyToId: null,
+      modifiedAt: '2026-05-03T00:00:00Z', listData: {},
+    });
+    setup(client);
+
+    await handlers.get('ofw_send_message')!({
+      subject: 'Re', body: 'b', recipientIds: [1], draftId: 50,
+    });
+
+    expect(getDraft(50)).toBeNull();
   });
 });
 
