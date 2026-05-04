@@ -20,6 +20,7 @@ function readVar(key: string): string | undefined {
   if (typeof raw !== 'string') return undefined;
   const trimmed = raw.trim();
   if (trimmed.length === 0) return undefined;
+  if (trimmed === 'undefined' || trimmed === 'null') return undefined;
   if (/^\$\{[^}]*\}$/.test(trimmed)) return undefined;
   return trimmed;
 }
