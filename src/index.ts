@@ -1,4 +1,15 @@
 #!/usr/bin/env node
+const originalEmit = process.emit.bind(process);
+type EmitFn = (event: string | symbol, ...args: unknown[]) => boolean;
+(process.emit as EmitFn) = function (event: string | symbol, ...args: unknown[]): boolean {
+  if (event === 'warning') {
+    const w = args[0] as { name?: string; message?: string } | undefined;
+    if (w?.name === 'ExperimentalWarning' && /SQLite/i.test(w.message ?? '')) {
+      return false;
+    }
+  }
+  return (originalEmit as EmitFn)(event, ...args);
+};
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { client } from './client.js';
