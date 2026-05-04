@@ -30247,6 +30247,382 @@ function registerUserTools(server2, client2) {
   });
 }
 
+// src/cache.ts
+import { DatabaseSync } from "node:sqlite";
+import { mkdirSync } from "node:fs";
+import { dirname as dirname2 } from "node:path";
+
+// src/config.ts
+import { createHash } from "node:crypto";
+import { homedir } from "node:os";
+import { join as join2 } from "node:path";
+function readUsername() {
+  const raw = process.env.OFW_USERNAME;
+  if (typeof raw !== "string" || raw.trim().length === 0) {
+    throw new Error("OFW_USERNAME must be set to derive cache path");
+  }
+  return raw.trim();
+}
+function getCacheDir() {
+  const override = process.env.OFW_CACHE_DIR;
+  if (override && override.trim().length > 0) return override.trim();
+  return join2(homedir(), ".cache", "ofw-mcp");
+}
+function getCacheDbPath() {
+  const username = readUsername();
+  const hash2 = createHash("sha256").update(username).digest("hex").slice(0, 16);
+  return join2(getCacheDir(), `${hash2}.db`);
+}
+
+// src/cache.ts
+var instance = null;
+var SCHEMA_V1 = `
+CREATE TABLE IF NOT EXISTS messages (
+  id INTEGER PRIMARY KEY,
+  folder TEXT NOT NULL,
+  subject TEXT NOT NULL,
+  from_user TEXT NOT NULL,
+  sent_at TEXT NOT NULL,
+  recipients_json TEXT NOT NULL,
+  body TEXT,
+  fetched_body_at TEXT,
+  reply_to_id INTEGER,
+  chain_root_id INTEGER,
+  list_data_json TEXT NOT NULL,
+  last_seen_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_messages_folder_sent_at ON messages(folder, sent_at DESC);
+CREATE INDEX IF NOT EXISTS idx_messages_chain_root ON messages(chain_root_id);
+
+CREATE TABLE IF NOT EXISTS drafts (
+  id INTEGER PRIMARY KEY,
+  subject TEXT NOT NULL,
+  body TEXT NOT NULL,
+  recipients_json TEXT NOT NULL,
+  reply_to_id INTEGER,
+  modified_at TEXT NOT NULL,
+  list_data_json TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS sync_state (
+  folder TEXT PRIMARY KEY,
+  last_sync_at TEXT NOT NULL,
+  newest_id INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS meta (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+`;
+function migrate(db) {
+  db.exec(SCHEMA_V1);
+  db.prepare("INSERT OR IGNORE INTO meta(key, value) VALUES(?, ?)").run("schema_version", "1");
+}
+function openCache() {
+  if (instance) return instance;
+  const path = getCacheDbPath();
+  mkdirSync(dirname2(path), { recursive: true });
+  const db = new DatabaseSync(path);
+  db.exec("PRAGMA journal_mode = WAL");
+  db.exec("PRAGMA foreign_keys = ON");
+  migrate(db);
+  instance = { db };
+  return instance;
+}
+function rowFromDb(r) {
+  return {
+    id: r.id,
+    folder: r.folder,
+    subject: r.subject,
+    fromUser: r.from_user,
+    sentAt: r.sent_at,
+    recipients: JSON.parse(r.recipients_json),
+    body: r.body,
+    fetchedBodyAt: r.fetched_body_at,
+    replyToId: r.reply_to_id,
+    chainRootId: r.chain_root_id,
+    listData: JSON.parse(r.list_data_json)
+  };
+}
+function upsertMessage(row) {
+  const { db } = openCache();
+  db.prepare(
+    `INSERT INTO messages (
+       id, folder, subject, from_user, sent_at, recipients_json,
+       body, fetched_body_at, reply_to_id, chain_root_id, list_data_json, last_seen_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET
+       folder=excluded.folder,
+       subject=excluded.subject,
+       from_user=excluded.from_user,
+       sent_at=excluded.sent_at,
+       recipients_json=excluded.recipients_json,
+       body=excluded.body,
+       fetched_body_at=excluded.fetched_body_at,
+       reply_to_id=excluded.reply_to_id,
+       chain_root_id=excluded.chain_root_id,
+       list_data_json=excluded.list_data_json,
+       last_seen_at=excluded.last_seen_at`
+  ).run(
+    row.id,
+    row.folder,
+    row.subject,
+    row.fromUser,
+    row.sentAt,
+    JSON.stringify(row.recipients),
+    row.body,
+    row.fetchedBodyAt,
+    row.replyToId,
+    row.chainRootId,
+    JSON.stringify(row.listData),
+    (/* @__PURE__ */ new Date()).toISOString()
+  );
+}
+function getMessage(id) {
+  const { db } = openCache();
+  const r = db.prepare("SELECT * FROM messages WHERE id = ?").get(id);
+  return r ? rowFromDb(r) : null;
+}
+function listMessages(opts) {
+  const { db } = openCache();
+  const offset = (opts.page - 1) * opts.size;
+  const rows = db.prepare(
+    `SELECT * FROM messages WHERE folder = ?
+     ORDER BY sent_at DESC, id DESC
+     LIMIT ? OFFSET ?`
+  ).all(opts.folder, opts.size, offset);
+  return rows.map(rowFromDb);
+}
+function draftFromDb(r) {
+  return {
+    id: r.id,
+    subject: r.subject,
+    body: r.body,
+    recipients: JSON.parse(r.recipients_json),
+    replyToId: r.reply_to_id,
+    modifiedAt: r.modified_at,
+    listData: JSON.parse(r.list_data_json)
+  };
+}
+function upsertDraft(row) {
+  const { db } = openCache();
+  db.prepare(
+    `INSERT INTO drafts (id, subject, body, recipients_json, reply_to_id, modified_at, list_data_json)
+     VALUES (?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET
+       subject=excluded.subject,
+       body=excluded.body,
+       recipients_json=excluded.recipients_json,
+       reply_to_id=excluded.reply_to_id,
+       modified_at=excluded.modified_at,
+       list_data_json=excluded.list_data_json`
+  ).run(
+    row.id,
+    row.subject,
+    row.body,
+    JSON.stringify(row.recipients),
+    row.replyToId,
+    row.modifiedAt,
+    JSON.stringify(row.listData)
+  );
+}
+function getDraft(id) {
+  const { db } = openCache();
+  const r = db.prepare("SELECT * FROM drafts WHERE id = ?").get(id);
+  return r ? draftFromDb(r) : null;
+}
+function listDrafts(opts) {
+  const { db } = openCache();
+  const offset = (opts.page - 1) * opts.size;
+  const rows = db.prepare(
+    "SELECT * FROM drafts ORDER BY modified_at DESC, id DESC LIMIT ? OFFSET ?"
+  ).all(opts.size, offset);
+  return rows.map(draftFromDb);
+}
+function deleteDraft(id) {
+  const { db } = openCache();
+  db.prepare("DELETE FROM drafts WHERE id = ?").run(id);
+}
+function listDraftIds() {
+  const { db } = openCache();
+  const rows = db.prepare("SELECT id FROM drafts").all();
+  return rows.map((r) => r.id);
+}
+function setSyncState(folder, state) {
+  const { db } = openCache();
+  db.prepare(
+    `INSERT INTO sync_state (folder, last_sync_at, newest_id) VALUES (?, ?, ?)
+     ON CONFLICT(folder) DO UPDATE SET
+       last_sync_at = excluded.last_sync_at,
+       newest_id = excluded.newest_id`
+  ).run(folder, state.lastSyncAt, state.newestId);
+}
+function setMeta(key, value) {
+  const { db } = openCache();
+  db.prepare(
+    "INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value"
+  ).run(key, value);
+}
+function findLatestReplyTip(replyToId) {
+  const { db } = openCache();
+  const parent = db.prepare(
+    "SELECT id, folder, chain_root_id FROM messages WHERE id = ?"
+  ).get(replyToId);
+  if (!parent) return replyToId;
+  const chainRoot = parent.chain_root_id ?? parent.id;
+  const tip = db.prepare(
+    `SELECT id FROM messages
+     WHERE folder = 'sent' AND chain_root_id = ?
+     ORDER BY id DESC LIMIT 1`
+  ).get(chainRoot);
+  return tip ? tip.id : replyToId;
+}
+
+// src/sync.ts
+async function resolveFolderIds(client2) {
+  const data = await client2.request(
+    "GET",
+    "/pub/v1/messageFolders?includeFolderCounts=true"
+  );
+  const sys = data.systemFolders ?? [];
+  const find = (type) => {
+    const f = sys.find((x) => x.folderType === type);
+    if (!f) throw new Error(`OFW system folder not found: ${type}`);
+    return f.id;
+  };
+  const ids = {
+    inbox: find("INBOX"),
+    sent: find("SENT_MESSAGES"),
+    drafts: find("DRAFTS")
+  };
+  setMeta("drafts_folder_id", ids.drafts);
+  return ids;
+}
+function recipientsFromList(item) {
+  return (item.recipients ?? []).map((r) => ({
+    userId: r.user.id,
+    name: r.user.name,
+    viewedAt: r.viewed?.dateTime ?? null
+  }));
+}
+async function syncMessageFolder(client2, folder, folderId, opts) {
+  let page = 1;
+  let synced = 0;
+  let newestId = null;
+  const unread = [];
+  while (true) {
+    const path = `/pub/v3/messages?folders=${encodeURIComponent(folderId)}&page=${page}&size=50&sort=date&sortDirection=desc`;
+    const list = await client2.request("GET", path);
+    const items = list.data ?? [];
+    if (items.length === 0) break;
+    let pageSawKnownItem = false;
+    for (const item of items) {
+      if (newestId === null || item.id > newestId) newestId = item.id;
+      const existing = getMessage(item.id);
+      if (existing) {
+        pageSawKnownItem = true;
+        continue;
+      }
+      const isInboxUnread = folder === "inbox" && item.showNeverViewed === true;
+      const shouldFetchBody = !isInboxUnread || opts.fetchUnreadBodies;
+      let body = null;
+      let fetchedBodyAt = null;
+      if (shouldFetchBody) {
+        const detail = await client2.request("GET", `/pub/v3/messages/${item.id}`);
+        body = detail.body ?? "";
+        fetchedBodyAt = (/* @__PURE__ */ new Date()).toISOString();
+      } else {
+        unread.push({
+          id: item.id,
+          subject: item.subject,
+          from: item.from?.name ?? "",
+          sentAt: item.date.dateTime
+        });
+      }
+      const row = {
+        id: item.id,
+        folder,
+        subject: item.subject,
+        fromUser: item.from?.name ?? "",
+        sentAt: item.date.dateTime,
+        recipients: recipientsFromList(item),
+        body,
+        fetchedBodyAt,
+        replyToId: null,
+        chainRootId: null,
+        listData: item
+      };
+      upsertMessage(row);
+      synced++;
+    }
+    if (pageSawKnownItem) break;
+    page++;
+  }
+  setSyncState(folder, {
+    lastSyncAt: (/* @__PURE__ */ new Date()).toISOString(),
+    newestId
+  });
+  return { synced, unread };
+}
+async function syncDrafts(client2, draftsFolderId) {
+  const path = `/pub/v3/messages?folders=${encodeURIComponent(draftsFolderId)}&page=1&size=50&sort=date&sortDirection=desc`;
+  const list = await client2.request("GET", path);
+  const items = list.data ?? [];
+  const seenIds = /* @__PURE__ */ new Set();
+  let synced = 0;
+  for (const item of items) {
+    seenIds.add(item.id);
+    const existing = getDraft(item.id);
+    if (existing && existing.modifiedAt === item.date.dateTime) {
+      continue;
+    }
+    const detail = await client2.request("GET", `/pub/v3/messages/${item.id}`);
+    const row = {
+      id: item.id,
+      subject: detail.subject ?? item.subject,
+      body: detail.body ?? "",
+      recipients: (item.recipients ?? []).map((r) => ({
+        userId: r.user.id,
+        name: r.user.name,
+        viewedAt: r.viewed?.dateTime ?? null
+      })),
+      replyToId: item.replyToId,
+      modifiedAt: item.date.dateTime,
+      listData: item
+    };
+    upsertDraft(row);
+    synced++;
+  }
+  for (const id of listDraftIds()) {
+    if (!seenIds.has(id)) deleteDraft(id);
+  }
+  return { synced };
+}
+async function syncAll(client2, opts) {
+  const folders = opts.folders ?? ["inbox", "sent", "drafts"];
+  const ids = await resolveFolderIds(client2);
+  const synced = {};
+  let unreadInbox = [];
+  for (const folder of folders) {
+    if (folder === "inbox") {
+      const r = await syncMessageFolder(client2, "inbox", ids.inbox, {
+        fetchUnreadBodies: opts.fetchUnreadBodies ?? false
+      });
+      synced.inbox = r.synced;
+      unreadInbox = r.unread;
+    } else if (folder === "sent") {
+      const r = await syncMessageFolder(client2, "sent", ids.sent, { fetchUnreadBodies: false });
+      synced.sent = r.synced;
+    } else if (folder === "drafts") {
+      const r = await syncDrafts(client2, ids.drafts);
+      synced.drafts = r.synced;
+    }
+  }
+  const note = unreadInbox.length > 0 ? `${unreadInbox.length} unread inbox messages cached without bodies. Call ofw_get_message(id) to read them \u2014 this will mark them as read on OFW.` : void 0;
+  return { synced, unreadInbox, ...note ? { note } : {} };
+}
+
 // src/tools/messages.ts
 function registerMessageTools(server2, client2) {
   server2.registerTool("ofw_list_message_folders", {
@@ -30257,60 +30633,136 @@ function registerMessageTools(server2, client2) {
     return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
   });
   server2.registerTool("ofw_list_messages", {
-    description: "List messages in an OurFamilyWizard folder. Call ofw_list_message_folders first to get folder IDs. Returns actual message content.",
+    description: 'List messages from the local OurFamilyWizard cache. folderId accepts "inbox" or "sent". Call ofw_sync_messages first if the cache is empty or stale.',
     annotations: { readOnlyHint: true },
     inputSchema: {
-      folderId: external_exports3.string().describe("Folder ID (get from ofw_list_message_folders)"),
+      folderId: external_exports3.string().describe('Folder name: "inbox" or "sent"'),
       page: external_exports3.number().describe("Page number (default 1)").optional(),
       size: external_exports3.number().describe("Messages per page (default 50)").optional()
     }
   }, async (args) => {
     const page = args.page ?? 1;
     const size = args.size ?? 50;
-    const path = `/pub/v3/messages?folders=${encodeURIComponent(args.folderId)}&page=${page}&size=${size}&sort=date&sortDirection=desc`;
-    const data = await client2.request("GET", path);
-    return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+    let folder = null;
+    if (args.folderId === "inbox") folder = "inbox";
+    else if (args.folderId === "sent") folder = "sent";
+    else {
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            messages: [],
+            note: 'Cache is keyed by folder name. Pass folderId: "inbox" or "sent" (numeric folder IDs are not yet supported by the cache layer).'
+          }, null, 2)
+        }]
+      };
+    }
+    const messages = listMessages({ folder, page, size });
+    const payload = messages.length === 0 ? { messages: [], note: "Cache empty for this folder. Call ofw_sync_messages to populate." } : { messages };
+    return { content: [{ type: "text", text: JSON.stringify(payload, null, 2) }] };
   });
   server2.registerTool("ofw_get_message", {
-    description: "Get a single OurFamilyWizard message by ID. Note: reading an unread message marks it as read.",
+    description: "Get a single OurFamilyWizard message by ID. Reads from local cache when available; otherwise fetches from OFW (which will mark unread inbox messages as read on OFW).",
     annotations: { readOnlyHint: false },
     inputSchema: {
       messageId: external_exports3.string().describe("Message ID")
     }
   }, async (args) => {
-    const data = await client2.request("GET", `/pub/v3/messages/${encodeURIComponent(args.messageId)}`);
-    return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+    const id = Number(args.messageId);
+    const cached2 = getMessage(id);
+    if (cached2 && cached2.body !== null) {
+      return { content: [{ type: "text", text: JSON.stringify(cached2, null, 2) }] };
+    }
+    const detail = await client2.request("GET", `/pub/v3/messages/${encodeURIComponent(args.messageId)}`);
+    const recipients = (detail.recipients ?? []).map((r) => ({
+      userId: r.user.id,
+      name: r.user.name,
+      viewedAt: r.viewed?.dateTime ?? null
+    }));
+    const folder = cached2?.folder ?? "inbox";
+    const row = {
+      id: detail.id,
+      folder,
+      subject: detail.subject,
+      fromUser: detail.from?.name ?? "",
+      sentAt: detail.date.dateTime,
+      recipients,
+      body: detail.body ?? "",
+      fetchedBodyAt: (/* @__PURE__ */ new Date()).toISOString(),
+      replyToId: cached2?.replyToId ?? null,
+      chainRootId: cached2?.chainRootId ?? null,
+      listData: cached2?.listData ?? detail
+    };
+    upsertMessage(row);
+    return { content: [{ type: "text", text: JSON.stringify(row, null, 2) }] };
   });
   server2.registerTool("ofw_send_message", {
-    description: "Send a message via OurFamilyWizard. If sending from a draft, pass draftId to automatically delete the draft after sending.",
+    description: "Send a message via OurFamilyWizard. If sending from a draft, pass draftId to delete the draft after sending. If replyToId is provided, the cache may rewrite it to the latest reply in the same thread (a note is included in the response when this happens).",
     annotations: { destructiveHint: true },
     inputSchema: {
       subject: external_exports3.string().describe("Message subject"),
       body: external_exports3.string().describe("Message body text"),
       recipientIds: external_exports3.array(external_exports3.number()).describe("Array of recipient user IDs (get from ofw_get_profile)"),
-      replyToId: external_exports3.number().describe("ID of the message being replied to. When provided, the original message thread is included (like a standard email reply).").optional(),
+      replyToId: external_exports3.number().describe("ID of the message being replied to").optional(),
       draftId: external_exports3.number().describe("ID of the draft to delete after sending (omit if not sending from a draft)").optional()
     }
   }, async (args) => {
-    const replyToId = args.replyToId ?? null;
+    const requestedReplyTo = args.replyToId ?? null;
+    let resolvedReplyTo = requestedReplyTo;
+    let chainRootId = null;
+    let rewriteNote = null;
+    if (requestedReplyTo !== null) {
+      resolvedReplyTo = findLatestReplyTip(requestedReplyTo);
+      if (resolvedReplyTo !== requestedReplyTo) {
+        rewriteNote = `replyToId rewritten from ${requestedReplyTo} to ${resolvedReplyTo} (later reply in same thread found in sent cache).`;
+      }
+      const parent = getMessage(resolvedReplyTo);
+      chainRootId = parent?.chainRootId ?? parent?.id ?? requestedReplyTo;
+    }
     const data = await client2.request("POST", "/pub/v3/messages", {
       subject: args.subject,
       body: args.body,
       recipientIds: args.recipientIds,
       attachments: { myFileIDs: [] },
       draft: false,
-      includeOriginal: replyToId !== null,
-      replyToId
+      includeOriginal: resolvedReplyTo !== null,
+      replyToId: resolvedReplyTo
     });
+    if (data && typeof data.id === "number") {
+      const recipients = (data.recipients ?? []).map((r) => ({
+        userId: r.user.id,
+        name: r.user.name,
+        viewedAt: r.viewed?.dateTime ?? null
+      }));
+      const row = {
+        id: data.id,
+        folder: "sent",
+        subject: data.subject ?? args.subject,
+        fromUser: data.from?.name ?? "",
+        sentAt: data.date?.dateTime ?? (/* @__PURE__ */ new Date()).toISOString(),
+        recipients,
+        body: data.body ?? args.body,
+        fetchedBodyAt: (/* @__PURE__ */ new Date()).toISOString(),
+        replyToId: resolvedReplyTo,
+        chainRootId,
+        listData: data
+      };
+      upsertMessage(row);
+    }
     if (args.draftId !== void 0) {
       const form = new FormData();
       form.append("messageIds", String(args.draftId));
       await client2.request("DELETE", "/pub/v1/messages", form);
+      deleteDraft(args.draftId);
     }
-    return { content: [{ type: "text", text: data ? JSON.stringify(data, null, 2) : "Message sent successfully." }] };
+    const text = data ? JSON.stringify(data, null, 2) : "Message sent successfully.";
+    const finalText = rewriteNote ? `${rewriteNote}
+
+${text}` : text;
+    return { content: [{ type: "text", text: finalText }] };
   });
   server2.registerTool("ofw_list_drafts", {
-    description: "List all draft messages in OurFamilyWizard",
+    description: "List draft messages from the local OurFamilyWizard cache. Call ofw_sync_messages first if the cache is empty.",
     annotations: { readOnlyHint: true },
     inputSchema: {
       page: external_exports3.number().describe("Page number (default 1)").optional(),
@@ -30319,37 +30771,65 @@ function registerMessageTools(server2, client2) {
   }, async (args) => {
     const page = args.page ?? 1;
     const size = args.size ?? 50;
-    const path = `/pub/v3/messages?folders=13471259&page=${page}&size=${size}&sort=date&sortDirection=desc`;
-    const data = await client2.request("GET", path);
-    return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+    const drafts = listDrafts({ page, size });
+    const payload = drafts.length === 0 ? { drafts: [], note: "Cache empty. Call ofw_sync_messages to populate." } : { drafts };
+    return { content: [{ type: "text", text: JSON.stringify(payload, null, 2) }] };
   });
   server2.registerTool("ofw_save_draft", {
-    description: "Save a message as a draft in OurFamilyWizard. Recipients are optional \u2014 a draft can be saved without them. To update an existing draft, provide its messageId.",
+    description: "Save a message as a draft in OurFamilyWizard. Recipients are optional. To update an existing draft, provide its messageId. If replyToId is provided, the cache may rewrite it to the latest reply in the thread (note included in response).",
     annotations: { readOnlyHint: false },
     inputSchema: {
       subject: external_exports3.string().describe("Message subject"),
       body: external_exports3.string().describe("Message body text"),
       recipientIds: external_exports3.array(external_exports3.number()).describe("Array of recipient user IDs (optional for drafts)").optional(),
       messageId: external_exports3.number().describe("ID of an existing draft to update (omit to create a new draft)").optional(),
-      replyToId: external_exports3.number().describe("ID of the message this draft is replying to (omit for new messages)").optional()
+      replyToId: external_exports3.number().describe("ID of the message this draft replies to").optional()
     }
   }, async (args) => {
-    const replyToId = args.replyToId ?? null;
+    const requestedReplyTo = args.replyToId ?? null;
+    let resolvedReplyTo = requestedReplyTo;
+    let rewriteNote = null;
+    if (requestedReplyTo !== null) {
+      resolvedReplyTo = findLatestReplyTip(requestedReplyTo);
+      if (resolvedReplyTo !== requestedReplyTo) {
+        rewriteNote = `replyToId rewritten from ${requestedReplyTo} to ${resolvedReplyTo} (later reply in same thread found in sent cache).`;
+      }
+    }
     const payload = {
       subject: args.subject,
       body: args.body,
       recipientIds: args.recipientIds ?? [],
       attachments: { myFileIDs: [] },
       draft: true,
-      includeOriginal: replyToId !== null,
-      replyToId
+      includeOriginal: resolvedReplyTo !== null,
+      replyToId: resolvedReplyTo
     };
     if (args.messageId !== void 0) payload.messageId = args.messageId;
     const data = await client2.request("POST", "/pub/v3/messages", payload);
-    return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+    if (data && typeof data.id === "number") {
+      const draft = {
+        id: data.id,
+        subject: data.subject ?? args.subject,
+        body: data.body ?? args.body,
+        recipients: (data.recipients ?? []).map((r) => ({
+          userId: r.user.id,
+          name: r.user.name,
+          viewedAt: r.viewed?.dateTime ?? null
+        })),
+        replyToId: data.replyToId ?? resolvedReplyTo,
+        modifiedAt: data.date?.dateTime ?? (/* @__PURE__ */ new Date()).toISOString(),
+        listData: data
+      };
+      upsertDraft(draft);
+    }
+    const text = data ? JSON.stringify(data, null, 2) : "Draft saved.";
+    const finalText = rewriteNote ? `${rewriteNote}
+
+${text}` : text;
+    return { content: [{ type: "text", text: finalText }] };
   });
   server2.registerTool("ofw_delete_draft", {
-    description: "Delete a draft message from OurFamilyWizard",
+    description: "Delete a draft message from OurFamilyWizard. Also removes the draft from the local cache.",
     annotations: { destructiveHint: true },
     inputSchema: {
       messageId: external_exports3.number().describe("Draft message ID to delete")
@@ -30358,44 +30838,52 @@ function registerMessageTools(server2, client2) {
     const form = new FormData();
     form.append("messageIds", String(args.messageId));
     const data = await client2.request("DELETE", "/pub/v1/messages", form);
-    return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+    deleteDraft(args.messageId);
+    return { content: [{ type: "text", text: data ? JSON.stringify(data, null, 2) : "Draft deleted." }] };
   });
   server2.registerTool("ofw_get_unread_sent", {
-    description: "List sent messages that have not been read by one or more recipients. Fetches sent messages page by page and returns only those with unread recipients.",
+    description: "List sent messages that have not been read by one or more recipients. Reads from local cache; call ofw_sync_messages first if cache is stale.",
     annotations: { readOnlyHint: true },
     inputSchema: {
-      page: external_exports3.number().describe("Page of sent messages to scan (default 1)").optional(),
-      size: external_exports3.number().describe("Number of sent messages per page, max 50 (default 20)").optional()
+      page: external_exports3.number().describe("Page (default 1)").optional(),
+      size: external_exports3.number().describe("Per page (default 50)").optional()
     }
   }, async (args) => {
     const page = args.page ?? 1;
-    const size = args.size ?? 20;
-    const foldersData = await client2.request(
-      "GET",
-      "/pub/v1/messageFolders?includeFolderCounts=true"
-    );
-    const sentFolder = (foldersData.systemFolders ?? []).find((f) => f.folderType === "SENT_MESSAGES");
-    if (!sentFolder) throw new Error("Sent folder not found");
-    const listPath = `/pub/v3/messages?folders=${encodeURIComponent(sentFolder.id)}&page=${page}&size=${size}&sort=date&sortDirection=desc`;
-    const listData = await client2.request("GET", listPath);
-    const messages = listData.data ?? [];
+    const size = args.size ?? 50;
+    const sent = listMessages({ folder: "sent", page, size });
+    if (sent.length === 0) {
+      return { content: [{ type: "text", text: JSON.stringify({
+        note: "Sent cache is empty. Call ofw_sync_messages to populate."
+      }, null, 2) }] };
+    }
     const unread = [];
-    for (const msg of messages) {
-      if (!msg.showNeverViewed) continue;
-      const unreadRecipients = (msg.recipients ?? []).filter((r) => !r.viewed).map((r) => r.user.name);
-      if (unreadRecipients.length > 0) {
-        unread.push({
-          id: msg.id,
-          subject: msg.subject,
-          sentAt: msg.date.dateTime,
-          unreadBy: unreadRecipients
-        });
+    for (const msg of sent) {
+      const unreadBy = msg.recipients.filter((r) => r.viewedAt === null).map((r) => r.name);
+      if (unreadBy.length > 0) {
+        unread.push({ id: msg.id, subject: msg.subject, sentAt: msg.sentAt, unreadBy });
       }
     }
     if (unread.length === 0) {
-      return { content: [{ type: "text", text: JSON.stringify({ message: "All scanned sent messages have been read." }, null, 2) }] };
+      return { content: [{ type: "text", text: JSON.stringify({
+        message: "All scanned sent messages have been read."
+      }, null, 2) }] };
     }
     return { content: [{ type: "text", text: JSON.stringify(unread, null, 2) }] };
+  });
+  server2.registerTool("ofw_sync_messages", {
+    description: "Sync messages from OurFamilyWizard into the local cache. Returns counts per folder and a list of unread inbox messages whose bodies were NOT fetched (to avoid mark-as-read on OFW). Call ofw_get_message(id) on those to read them.",
+    annotations: { readOnlyHint: false },
+    inputSchema: {
+      folders: external_exports3.array(external_exports3.enum(["inbox", "sent", "drafts"])).describe("Folders to sync (default: all three)").optional(),
+      fetchUnreadBodies: external_exports3.boolean().describe("If true, also fetch bodies for unread inbox messages (will mark them as read on OFW). Default false.").optional()
+    }
+  }, async (args) => {
+    const result = await syncAll(client2, {
+      folders: args.folders,
+      fetchUnreadBodies: args.fetchUnreadBodies
+    });
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   });
 }
 
@@ -30531,6 +31019,16 @@ function registerJournalTools(server2, client2) {
 }
 
 // src/index.ts
+var originalEmit = process.emit.bind(process);
+process.emit = function(event, ...args) {
+  if (event === "warning") {
+    const w = args[0];
+    if (w?.name === "ExperimentalWarning" && /SQLite/i.test(w.message ?? "")) {
+      return false;
+    }
+  }
+  return originalEmit(event, ...args);
+};
 var server = new McpServer({ name: "ofw", version: "2.0.5" });
 registerUserTools(server, client);
 registerMessageTools(server, client);
