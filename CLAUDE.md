@@ -39,8 +39,18 @@ Main is always one version ahead of the latest tag. To release, run the **Cut & 
 
 - `src/index.ts` — MCP server setup, tool routing
 - `src/client.ts` — OFW API client (auth, request/retry logic). `ofw-version` header is the OFW API protocol version (not our version)
-- `src/tools/` — one file per domain (messages, calendar, expenses, journal, user). Each exports `toolDefinitions` and `handleTool`
-- `tests/tools/` — mirrors `src/tools/`, mocks `OFWClient.request` via `vi.spyOn`
+- `src/config.ts` — env-driven cache directory + per-username DB path
+- `src/cache.ts` — `node:sqlite` cache (messages, drafts, sync_state, meta) with typed CRUD + `findLatestReplyTip`
+- `src/sync.ts` — folder ID resolution + `syncMessageFolder` / `syncDrafts` / `syncAll`
+- `src/tools/` — one file per domain (messages, calendar, expenses, journal, user). Each exports `toolDefinitions` and `handleTool`. Message tools are cache-backed (see Message Cache section below)
+- `tests/tools/` — mirrors `src/tools/`, mocks `OFWClient.request` via `vi.spyOn`. Cache-aware tests use `OFW_CACHE_DIR` env override + a per-test temp dir
+
+## Message Cache
+
+- Local SQLite at `~/.cache/ofw-mcp/<sha256(OFW_USERNAME)/16>.db`. `OFW_CACHE_DIR` env overrides the directory (used in tests). Requires Node ≥22.5 for `node:sqlite`
+- All message reads (`ofw_list_messages`, `ofw_get_message`, `ofw_list_drafts`, `ofw_get_unread_sent`) are served from the cache. `ofw_sync_messages` is the only path that walks OFW for new content
+- `ofw_send_message` and `ofw_save_draft` resolve `replyToId` to the latest sent reply in the same chain via the cache (transparency note included in the response when rewritten); they write the new sent/draft row through to the cache after the OFW POST succeeds
+- The drafts folder ID is no longer hardcoded — `resolveFolderIds` looks it up via `/pub/v1/messageFolders` and persists it in the `meta` table
 
 ## OFW API Notes
 
@@ -48,4 +58,3 @@ Main is always one version ahead of the latest tag. To release, run the **Cut & 
 - `showNeverViewed` (boolean on message list items) is the reliable indicator for unread sent messages. The detail endpoint's `viewed` field is inconsistent (returns `null` for read messages instead of the epoch sentinel the list endpoint uses)
 - `ofw-version: 1.0.0` header is required on all API requests — this is the OFW protocol version, not our package version
 - Auth uses Spring Security session cookie + login POST, tokens expire ~6h
-- Drafts folder ID is hardcoded (`13471259`) in `ofw_list_drafts` — this is the system folder ID for the authenticated account

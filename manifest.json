@@ -93,6 +93,10 @@
       "description": "Delete a draft"
     },
     {
+      "name": "ofw_sync_messages",
+      "description": "Sync messages from OFW into local cache"
+    },
+    {
       "name": "ofw_list_events",
       "description": "List calendar events in a date range"
     },

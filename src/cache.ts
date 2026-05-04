@@ -172,7 +172,7 @@ export function listMessages(opts: { folder: 'inbox' | 'sent'; page: number; siz
     `SELECT * FROM messages WHERE folder = ?
      ORDER BY sent_at DESC, id DESC
      LIMIT ? OFFSET ?`
-  ).all(opts.folder, opts.size, offset) as MessageDbRow[];
+  ).all(opts.folder, opts.size, offset) as unknown as MessageDbRow[];
   return rows.map(rowFromDb);
 }
 
@@ -242,7 +242,7 @@ export function listDrafts(opts: { page: number; size: number }): DraftRow[] {
   const offset = (opts.page - 1) * opts.size;
   const rows = db.prepare(
     'SELECT * FROM drafts ORDER BY modified_at DESC, id DESC LIMIT ? OFFSET ?'
-  ).all(opts.size, offset) as DraftDbRow[];
+  ).all(opts.size, offset) as unknown as DraftDbRow[];
   return rows.map(draftFromDb);
 }
 
