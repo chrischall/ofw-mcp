@@ -72,3 +72,106 @@ export function closeCache(): void {
     instance = null;
   }
 }
+
+export interface Recipient {
+  userId: number;
+  name: string;
+  viewedAt: string | null;
+}
+
+export interface MessageRow {
+  id: number;
+  folder: 'inbox' | 'sent';
+  subject: string;
+  fromUser: string;
+  sentAt: string;
+  recipients: Recipient[];
+  body: string | null;
+  fetchedBodyAt: string | null;
+  replyToId: number | null;
+  chainRootId: number | null;
+  listData: unknown;
+}
+
+interface MessageDbRow {
+  id: number;
+  folder: string;
+  subject: string;
+  from_user: string;
+  sent_at: string;
+  recipients_json: string;
+  body: string | null;
+  fetched_body_at: string | null;
+  reply_to_id: number | null;
+  chain_root_id: number | null;
+  list_data_json: string;
+  last_seen_at: string;
+}
+
+function rowFromDb(r: MessageDbRow): MessageRow {
+  return {
+    id: r.id,
+    folder: r.folder as 'inbox' | 'sent',
+    subject: r.subject,
+    fromUser: r.from_user,
+    sentAt: r.sent_at,
+    recipients: JSON.parse(r.recipients_json) as Recipient[],
+    body: r.body,
+    fetchedBodyAt: r.fetched_body_at,
+    replyToId: r.reply_to_id,
+    chainRootId: r.chain_root_id,
+    listData: JSON.parse(r.list_data_json),
+  };
+}
+
+export function upsertMessage(row: MessageRow): void {
+  const { db } = openCache();
+  db.prepare(
+    `INSERT INTO messages (
+       id, folder, subject, from_user, sent_at, recipients_json,
+       body, fetched_body_at, reply_to_id, chain_root_id, list_data_json, last_seen_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET
+       folder=excluded.folder,
+       subject=excluded.subject,
+       from_user=excluded.from_user,
+       sent_at=excluded.sent_at,
+       recipients_json=excluded.recipients_json,
+       body=excluded.body,
+       fetched_body_at=excluded.fetched_body_at,
+       reply_to_id=excluded.reply_to_id,
+       chain_root_id=excluded.chain_root_id,
+       list_data_json=excluded.list_data_json,
+       last_seen_at=excluded.last_seen_at`
+  ).run(
+    row.id,
+    row.folder,
+    row.subject,
+    row.fromUser,
+    row.sentAt,
+    JSON.stringify(row.recipients),
+    row.body,
+    row.fetchedBodyAt,
+    row.replyToId,
+    row.chainRootId,
+    JSON.stringify(row.listData),
+    new Date().toISOString()
+  );
+}
+
+export function getMessage(id: number): MessageRow | null {
+  const { db } = openCache();
+  const r = db.prepare('SELECT * FROM messages WHERE id = ?').get(id) as MessageDbRow | undefined;
+  return r ? rowFromDb(r) : null;
+}
+
+export function listMessages(opts: { folder: 'inbox' | 'sent'; page: number; size: number }): MessageRow[] {
+  const { db } = openCache();
+  const offset = (opts.page - 1) * opts.size;
+  const rows = db.prepare(
+    `SELECT * FROM messages WHERE folder = ?
+     ORDER BY sent_at DESC, id DESC
+     LIMIT ? OFFSET ?`
+  ).all(opts.folder, opts.size, offset) as MessageDbRow[];
+  return rows.map(rowFromDb);
+}
