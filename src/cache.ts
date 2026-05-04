@@ -175,3 +175,84 @@ export function listMessages(opts: { folder: 'inbox' | 'sent'; page: number; siz
   ).all(opts.folder, opts.size, offset) as MessageDbRow[];
   return rows.map(rowFromDb);
 }
+
+export interface DraftRow {
+  id: number;
+  subject: string;
+  body: string;
+  recipients: Recipient[];
+  replyToId: number | null;
+  modifiedAt: string;
+  listData: unknown;
+}
+
+interface DraftDbRow {
+  id: number;
+  subject: string;
+  body: string;
+  recipients_json: string;
+  reply_to_id: number | null;
+  modified_at: string;
+  list_data_json: string;
+}
+
+function draftFromDb(r: DraftDbRow): DraftRow {
+  return {
+    id: r.id,
+    subject: r.subject,
+    body: r.body,
+    recipients: JSON.parse(r.recipients_json) as Recipient[],
+    replyToId: r.reply_to_id,
+    modifiedAt: r.modified_at,
+    listData: JSON.parse(r.list_data_json),
+  };
+}
+
+export function upsertDraft(row: DraftRow): void {
+  const { db } = openCache();
+  db.prepare(
+    `INSERT INTO drafts (id, subject, body, recipients_json, reply_to_id, modified_at, list_data_json)
+     VALUES (?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET
+       subject=excluded.subject,
+       body=excluded.body,
+       recipients_json=excluded.recipients_json,
+       reply_to_id=excluded.reply_to_id,
+       modified_at=excluded.modified_at,
+       list_data_json=excluded.list_data_json`
+  ).run(
+    row.id,
+    row.subject,
+    row.body,
+    JSON.stringify(row.recipients),
+    row.replyToId,
+    row.modifiedAt,
+    JSON.stringify(row.listData)
+  );
+}
+
+export function getDraft(id: number): DraftRow | null {
+  const { db } = openCache();
+  const r = db.prepare('SELECT * FROM drafts WHERE id = ?').get(id) as DraftDbRow | undefined;
+  return r ? draftFromDb(r) : null;
+}
+
+export function listDrafts(opts: { page: number; size: number }): DraftRow[] {
+  const { db } = openCache();
+  const offset = (opts.page - 1) * opts.size;
+  const rows = db.prepare(
+    'SELECT * FROM drafts ORDER BY modified_at DESC, id DESC LIMIT ? OFFSET ?'
+  ).all(opts.size, offset) as DraftDbRow[];
+  return rows.map(draftFromDb);
+}
+
+export function deleteDraft(id: number): void {
+  const { db } = openCache();
+  db.prepare('DELETE FROM drafts WHERE id = ?').run(id);
+}
+
+export function listDraftIds(): number[] {
+  const { db } = openCache();
+  const rows = db.prepare('SELECT id FROM drafts').all() as Array<{ id: number }>;
+  return rows.map((r) => r.id);
+}

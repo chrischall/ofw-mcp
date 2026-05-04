@@ -2,7 +2,11 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { openCache, closeCache, upsertMessage, getMessage, listMessages, type MessageRow } from '../src/cache.js';
+import {
+  openCache, closeCache,
+  upsertMessage, getMessage, listMessages, type MessageRow,
+  upsertDraft, getDraft, listDrafts, deleteDraft, listDraftIds, type DraftRow,
+} from '../src/cache.js';
 
 let tmp: string;
 let originalCacheDir: string | undefined;
@@ -120,5 +124,54 @@ describe('messages CRUD', () => {
     const page2 = listMessages({ folder: 'inbox', page: 2, size: 2 });
     expect(page1.map((m) => m.id)).toEqual([5, 4]);
     expect(page2.map((m) => m.id)).toEqual([3, 2]);
+  });
+});
+
+function sampleDraft(overrides: Partial<DraftRow> = {}): DraftRow {
+  return {
+    id: 200,
+    subject: 'Draft subject',
+    body: 'Draft body',
+    recipients: [{ userId: 1, name: 'Bob', viewedAt: null }],
+    replyToId: null,
+    modifiedAt: '2026-05-04T12:00:00Z',
+    listData: { id: 200 },
+    ...overrides,
+  };
+}
+
+describe('drafts CRUD', () => {
+  it('upsertDraft + getDraft round-trips', () => {
+    openCache();
+    upsertDraft(sampleDraft());
+    expect(getDraft(200)).toEqual(sampleDraft());
+  });
+
+  it('listDrafts returns drafts sorted by modifiedAt desc', () => {
+    openCache();
+    upsertDraft(sampleDraft({ id: 1, modifiedAt: '2026-05-01T00:00:00Z' }));
+    upsertDraft(sampleDraft({ id: 2, modifiedAt: '2026-05-03T00:00:00Z' }));
+    upsertDraft(sampleDraft({ id: 3, modifiedAt: '2026-05-02T00:00:00Z' }));
+    const drafts = listDrafts({ page: 1, size: 50 });
+    expect(drafts.map((d) => d.id)).toEqual([2, 3, 1]);
+  });
+
+  it('deleteDraft removes the row', () => {
+    openCache();
+    upsertDraft(sampleDraft());
+    deleteDraft(200);
+    expect(getDraft(200)).toBeNull();
+  });
+
+  it('deleteDraft is a no-op for unknown id', () => {
+    openCache();
+    expect(() => deleteDraft(999)).not.toThrow();
+  });
+
+  it('listDraftIds returns all draft ids', () => {
+    openCache();
+    upsertDraft(sampleDraft({ id: 1 }));
+    upsertDraft(sampleDraft({ id: 2 }));
+    expect(listDraftIds().sort()).toEqual([1, 2]);
   });
 });
