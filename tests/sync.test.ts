@@ -3,8 +3,11 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { OFWClient } from '../src/client.js';
-import { closeCache, getMeta, getMessage, listMessages, getSyncState, upsertMessage } from '../src/cache.js';
-import { resolveFolderIds, syncMessageFolder } from '../src/sync.js';
+import {
+  closeCache, getMeta, getMessage, listMessages, getSyncState, upsertMessage,
+  getDraft, listDraftIds, upsertDraft,
+} from '../src/cache.js';
+import { resolveFolderIds, syncMessageFolder, syncDrafts } from '../src/sync.js';
 
 let tmp: string;
 let originalCacheDir: string | undefined;
@@ -193,5 +196,88 @@ describe('syncMessageFolder', () => {
     const state = getSyncState('sent');
     expect(state?.newestId).toBe(5);
     expect(state?.lastSyncAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+  });
+});
+
+function draftListResponse(items: Array<{ id: number; subject?: string; modifiedAt?: string; replyToId?: number | null }>): unknown {
+  return {
+    data: items.map((it) => ({
+      id: it.id,
+      subject: it.subject ?? `Draft ${it.id}`,
+      date: { dateTime: it.modifiedAt ?? '2026-05-04T12:00:00Z' },
+      replyToId: it.replyToId ?? null,
+      recipients: [],
+    })),
+  };
+}
+
+describe('syncDrafts', () => {
+  it('inserts new drafts with bodies', async () => {
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce(draftListResponse([{ id: 1 }, { id: 2 }]))
+      .mockResolvedValueOnce({ body: 'draft-1', subject: 'Draft 1', recipientIds: [] })
+      .mockResolvedValueOnce({ body: 'draft-2', subject: 'Draft 2', recipientIds: [] });
+
+    const result = await syncDrafts(client, '333');
+
+    expect(result.synced).toBe(2);
+    expect(getDraft(1)?.body).toBe('draft-1');
+    expect(getDraft(2)?.body).toBe('draft-2');
+  });
+
+  it('deletes cached drafts no longer present in OFW', async () => {
+    upsertDraft({
+      id: 99, subject: 'Stale', body: 'gone',
+      recipients: [], replyToId: null,
+      modifiedAt: '2026-05-01T00:00:00Z', listData: {},
+    });
+
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce(draftListResponse([{ id: 1 }]))
+      .mockResolvedValueOnce({ body: 'draft-1', subject: 'Draft 1', recipientIds: [] });
+
+    await syncDrafts(client, '333');
+
+    expect(getDraft(99)).toBeNull();
+    expect(listDraftIds()).toEqual([1]);
+  });
+
+  it('updates a changed draft (different modifiedAt)', async () => {
+    upsertDraft({
+      id: 1, subject: 'Old', body: 'old-body',
+      recipients: [], replyToId: null,
+      modifiedAt: '2026-05-01T00:00:00Z', listData: {},
+    });
+
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce(draftListResponse([{ id: 1, subject: 'New', modifiedAt: '2026-05-04T00:00:00Z' }]))
+      .mockResolvedValueOnce({ body: 'new-body', subject: 'New', recipientIds: [] });
+
+    await syncDrafts(client, '333');
+
+    const got = getDraft(1);
+    expect(got?.subject).toBe('New');
+    expect(got?.body).toBe('new-body');
+    expect(got?.modifiedAt).toBe('2026-05-04T00:00:00Z');
+  });
+
+  it('skips refetching a draft whose modifiedAt is unchanged', async () => {
+    upsertDraft({
+      id: 1, subject: 'Same', body: 'same-body',
+      recipients: [], replyToId: null,
+      modifiedAt: '2026-05-04T00:00:00Z', listData: {},
+    });
+
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request')
+      .mockResolvedValueOnce(draftListResponse([{ id: 1, subject: 'Same', modifiedAt: '2026-05-04T00:00:00Z' }]));
+
+    await syncDrafts(client, '333');
+
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(getDraft(1)?.body).toBe('same-body');
   });
 });

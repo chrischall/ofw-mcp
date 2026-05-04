@@ -2,7 +2,8 @@ import type { OFWClient } from './client.js';
 import {
   setMeta,
   upsertMessage, getMessage, setSyncState,
-  type MessageRow, type Recipient,
+  upsertDraft, getDraft, deleteDraft, listDraftIds,
+  type MessageRow, type Recipient, type DraftRow,
 } from './cache.js';
 
 export interface FolderIds {
@@ -140,4 +141,56 @@ export async function syncMessageFolder(
   });
 
   return { synced, unread };
+}
+
+interface DraftListItem {
+  id: number;
+  subject: string;
+  date: { dateTime: string };
+  replyToId: number | null;
+  recipients?: Array<{ user: { id: number; name: string }; viewed?: { dateTime: string } | null }>;
+}
+interface DraftListResponse { data?: DraftListItem[] }
+interface DraftDetailResponse {
+  body?: string;
+  subject?: string;
+  recipientIds?: number[];
+}
+
+export interface DraftSyncResult { synced: number }
+
+export async function syncDrafts(client: OFWClient, draftsFolderId: string): Promise<DraftSyncResult> {
+  const path = `/pub/v3/messages?folders=${encodeURIComponent(draftsFolderId)}&page=1&size=50&sort=date&sortDirection=desc`;
+  const list = await client.request<DraftListResponse>('GET', path);
+  const items = list.data ?? [];
+  const seenIds = new Set<number>();
+  let synced = 0;
+
+  for (const item of items) {
+    seenIds.add(item.id);
+    const existing = getDraft(item.id);
+    if (existing && existing.modifiedAt === item.date.dateTime) {
+      continue;
+    }
+    const detail = await client.request<DraftDetailResponse>('GET', `/pub/v3/messages/${item.id}`);
+    const row: DraftRow = {
+      id: item.id,
+      subject: detail.subject ?? item.subject,
+      body: detail.body ?? '',
+      recipients: (item.recipients ?? []).map((r) => ({
+        userId: r.user.id, name: r.user.name, viewedAt: r.viewed?.dateTime ?? null,
+      })),
+      replyToId: item.replyToId,
+      modifiedAt: item.date.dateTime,
+      listData: item,
+    };
+    upsertDraft(row);
+    synced++;
+  }
+
+  for (const id of listDraftIds()) {
+    if (!seenIds.has(id)) deleteDraft(id);
+  }
+
+  return { synced };
 }
