@@ -242,7 +242,7 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
   });
 
   server.registerTool('ofw_delete_draft', {
-    description: 'Delete a draft message from OurFamilyWizard',
+    description: 'Delete a draft message from OurFamilyWizard. Also removes the draft from the local cache.',
     annotations: { destructiveHint: true },
     inputSchema: {
       messageId: z.number().describe('Draft message ID to delete'),
@@ -251,61 +251,40 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
     const form = new FormData();
     form.append('messageIds', String(args.messageId));
     const data = await client.request('DELETE', '/pub/v1/messages', form);
-    return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+    deleteDraft(args.messageId);
+    return { content: [{ type: 'text' as const, text: data ? JSON.stringify(data, null, 2) : 'Draft deleted.' }] };
   });
 
   server.registerTool('ofw_get_unread_sent', {
-    description: 'List sent messages that have not been read by one or more recipients. Fetches sent messages page by page and returns only those with unread recipients.',
+    description: 'List sent messages that have not been read by one or more recipients. Reads from local cache; call ofw_sync_messages first if cache is stale.',
     annotations: { readOnlyHint: true },
     inputSchema: {
-      page: z.number().describe('Page of sent messages to scan (default 1)').optional(),
-      size: z.number().describe('Number of sent messages per page, max 50 (default 20)').optional(),
+      page: z.number().describe('Page (default 1)').optional(),
+      size: z.number().describe('Per page (default 50)').optional(),
     },
   }, async (args) => {
     const page = args.page ?? 1;
-    const size = args.size ?? 20;
+    const size = args.size ?? 50;
+    const sent = listMessages({ folder: 'sent', page, size });
 
-    // Step 1: find the sent folder
-    const foldersData = await client.request<{ systemFolders: Array<{ id: string; folderType: string; name: string }>; userFolders: Array<{ id: string; folderType: string; name: string }> }>(
-      'GET', '/pub/v1/messageFolders?includeFolderCounts=true'
-    );
-    const sentFolder = (foldersData.systemFolders ?? []).find((f) => f.folderType === 'SENT_MESSAGES');
-    if (!sentFolder) throw new Error('Sent folder not found');
+    if (sent.length === 0) {
+      return { content: [{ type: 'text' as const, text: JSON.stringify({
+        note: 'Sent cache is empty. Call ofw_sync_messages to populate.',
+      }, null, 2) }] };
+    }
 
-    // Step 2: list sent messages (the list endpoint already includes per-recipient viewed status)
-    const listPath = `/pub/v3/messages?folders=${encodeURIComponent(sentFolder.id)}&page=${page}&size=${size}&sort=date&sortDirection=desc`;
-    const listData = await client.request<{ data: Array<{
-      id: number;
-      subject: string;
-      date: { dateTime: string };
-      showNeverViewed: boolean;
-      recipients: Array<{ user: { name: string }; viewed?: { dateTime: string } }>;
-    }> }>('GET', listPath);
-    const messages = listData.data ?? [];
-
-    // Step 3: filter to unread using showNeverViewed (avoids N+1 detail fetches
-    // and the detail endpoint's inconsistent viewed field which can return null
-    // for read messages instead of the epoch sentinel the list endpoint uses)
     const unread: Array<{ id: number; subject: string; sentAt: string; unreadBy: string[] }> = [];
-    for (const msg of messages) {
-      if (!msg.showNeverViewed) continue;
-
-      const unreadRecipients = (msg.recipients ?? [])
-        .filter((r) => !r.viewed)
-        .map((r) => r.user.name);
-
-      if (unreadRecipients.length > 0) {
-        unread.push({
-          id: msg.id,
-          subject: msg.subject,
-          sentAt: msg.date.dateTime,
-          unreadBy: unreadRecipients,
-        });
+    for (const msg of sent) {
+      const unreadBy = msg.recipients.filter((r) => r.viewedAt === null).map((r) => r.name);
+      if (unreadBy.length > 0) {
+        unread.push({ id: msg.id, subject: msg.subject, sentAt: msg.sentAt, unreadBy });
       }
     }
 
     if (unread.length === 0) {
-      return { content: [{ type: 'text' as const, text: JSON.stringify({ message: 'All scanned sent messages have been read.' }, null, 2) }] };
+      return { content: [{ type: 'text' as const, text: JSON.stringify({
+        message: 'All scanned sent messages have been read.',
+      }, null, 2) }] };
     }
     return { content: [{ type: 'text' as const, text: JSON.stringify(unread, null, 2) }] };
   });

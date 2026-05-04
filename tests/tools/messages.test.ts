@@ -539,6 +539,75 @@ describe('ofw_delete_draft', () => {
     expect(result.content).toHaveLength(1);
     expect(result.content[0].type).toBe('text');
   });
+
+  it('removes the draft from cache after OFW delete', async () => {
+    upsertDraft({
+      id: 50, subject: 'D', body: 'b', recipients: [], replyToId: null,
+      modifiedAt: '2026-05-04T00:00:00Z', listData: {},
+    });
+    const client = new OFWClient();
+    vi.spyOn(client, 'request').mockResolvedValueOnce(null);
+    setup(client);
+
+    await handlers.get('ofw_delete_draft')!({ messageId: 50 });
+    expect(getDraft(50)).toBeNull();
+  });
+});
+
+describe('ofw_get_unread_sent (cache-backed)', () => {
+  it('returns sent messages with at least one unread recipient from cache', async () => {
+    upsertMessage({
+      id: 1, folder: 'sent', subject: 'Schedule',
+      fromUser: 'Me', sentAt: '2026-05-04T12:00:00Z',
+      recipients: [
+        { userId: 2, name: 'Alice', viewedAt: null },
+        { userId: 3, name: 'Bob', viewedAt: '2026-05-04T13:00:00Z' },
+      ],
+      body: 'b', fetchedBodyAt: '2026-05-04T12:01:00Z',
+      replyToId: null, chainRootId: null, listData: {},
+    });
+    upsertMessage({
+      id: 2, folder: 'sent', subject: 'Read by all',
+      fromUser: 'Me', sentAt: '2026-05-04T11:00:00Z',
+      recipients: [{ userId: 2, name: 'Alice', viewedAt: '2026-05-04T11:30:00Z' }],
+      body: 'b', fetchedBodyAt: '2026-05-04T11:01:00Z',
+      replyToId: null, chainRootId: null, listData: {},
+    });
+
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request');
+    setup(client);
+
+    const result = await handlers.get('ofw_get_unread_sent')!({});
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed).toEqual([
+      { id: 1, subject: 'Schedule', sentAt: '2026-05-04T12:00:00Z', unreadBy: ['Alice'] },
+    ]);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('returns sync hint when sent cache is empty', async () => {
+    const client = new OFWClient();
+    setup(client);
+    const result = await handlers.get('ofw_get_unread_sent')!({});
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.note).toMatch(/ofw_sync_messages/);
+  });
+
+  it('returns all-read message when all recipients have viewedAt', async () => {
+    upsertMessage({
+      id: 1, folder: 'sent', subject: 'Done',
+      fromUser: 'Me', sentAt: '2026-05-04T12:00:00Z',
+      recipients: [{ userId: 2, name: 'Alice', viewedAt: '2026-05-04T12:30:00Z' }],
+      body: 'b', fetchedBodyAt: null,
+      replyToId: null, chainRootId: null, listData: {},
+    });
+    const client = new OFWClient();
+    setup(client);
+    const result = await handlers.get('ofw_get_unread_sent')!({});
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed).toEqual({ message: 'All scanned sent messages have been read.' });
+  });
 });
 
 describe('registerMessageTools', () => {
