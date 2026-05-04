@@ -477,6 +477,55 @@ describe('ofw_save_draft', () => {
   });
 });
 
+describe('ofw_save_draft (thread-tip + cache upsert)', () => {
+  it('rewrites replyToId to the chain tip and upserts cache', async () => {
+    upsertMessage({
+      id: 100, folder: 'inbox', subject: 'Original', fromUser: 'Alice',
+      sentAt: '2026-05-01T00:00:00Z', recipients: [], body: 'orig',
+      fetchedBodyAt: null, replyToId: null, chainRootId: null, listData: {},
+    });
+    upsertMessage({
+      id: 142, folder: 'sent', subject: 'Re: Original', fromUser: 'Me',
+      sentAt: '2026-05-02T00:00:00Z', recipients: [], body: 'first',
+      fetchedBodyAt: null, replyToId: 100, chainRootId: 100, listData: {},
+    });
+
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request').mockResolvedValueOnce({
+      id: 50, subject: 'Re: Original', body: 'draft body',
+      date: { dateTime: '2026-05-04T00:00:00Z' },
+      replyToId: 142,
+    });
+    setup(client);
+
+    const result = await handlers.get('ofw_save_draft')!({
+      subject: 'Re: Original',
+      body: 'draft body',
+      replyToId: 100,
+    });
+
+    const postCall = spy.mock.calls.find((c) => c[0] === 'POST');
+    expect((postCall![2] as { replyToId: number | null }).replyToId).toBe(142);
+    expect(result.content[0].text).toMatch(/replyToId rewritten from 100 to 142/);
+
+    expect(getDraft(50)?.body).toBe('draft body');
+    expect(getDraft(50)?.replyToId).toBe(142);
+  });
+
+  it('passes through replyToId unchanged when nothing to rewrite', async () => {
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request').mockResolvedValueOnce({
+      id: 50, subject: 'New', body: 'b',
+      date: { dateTime: '2026-05-04T00:00:00Z' },
+    });
+    setup(client);
+    await handlers.get('ofw_save_draft')!({ subject: 'New', body: 'b' });
+    const postCall = spy.mock.calls.find((c) => c[0] === 'POST');
+    expect((postCall![2] as { replyToId: number | null }).replyToId).toBeNull();
+    expect(getDraft(50)?.body).toBe('b');
+  });
+});
+
 describe('ofw_delete_draft', () => {
   it('deletes a draft by messageId using multipart form', async () => {
     const client = makeClient({});

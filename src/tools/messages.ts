@@ -182,29 +182,63 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
   });
 
   server.registerTool('ofw_save_draft', {
-    description: 'Save a message as a draft in OurFamilyWizard. Recipients are optional — a draft can be saved without them. To update an existing draft, provide its messageId.',
+    description: 'Save a message as a draft in OurFamilyWizard. Recipients are optional. To update an existing draft, provide its messageId. If replyToId is provided, the cache may rewrite it to the latest reply in the thread (note included in response).',
     annotations: { readOnlyHint: false },
     inputSchema: {
       subject: z.string().describe('Message subject'),
       body: z.string().describe('Message body text'),
       recipientIds: z.array(z.number()).describe('Array of recipient user IDs (optional for drafts)').optional(),
       messageId: z.number().describe('ID of an existing draft to update (omit to create a new draft)').optional(),
-      replyToId: z.number().describe('ID of the message this draft is replying to (omit for new messages)').optional(),
+      replyToId: z.number().describe('ID of the message this draft replies to').optional(),
     },
   }, async (args) => {
-    const replyToId = args.replyToId ?? null;
+    const requestedReplyTo = args.replyToId ?? null;
+    let resolvedReplyTo = requestedReplyTo;
+    let rewriteNote: string | null = null;
+
+    if (requestedReplyTo !== null) {
+      resolvedReplyTo = findLatestReplyTip(requestedReplyTo);
+      if (resolvedReplyTo !== requestedReplyTo) {
+        rewriteNote = `replyToId rewritten from ${requestedReplyTo} to ${resolvedReplyTo} (later reply in same thread found in sent cache).`;
+      }
+    }
+
     const payload: Record<string, unknown> = {
       subject: args.subject,
       body: args.body,
       recipientIds: args.recipientIds ?? [],
       attachments: { myFileIDs: [] },
       draft: true,
-      includeOriginal: replyToId !== null,
-      replyToId,
+      includeOriginal: resolvedReplyTo !== null,
+      replyToId: resolvedReplyTo,
     };
     if (args.messageId !== undefined) payload.messageId = args.messageId;
-    const data = await client.request('POST', '/pub/v3/messages', payload);
-    return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+
+    const data = await client.request<{
+      id?: number; subject?: string; body?: string;
+      date?: { dateTime: string };
+      replyToId?: number | null;
+      recipients?: Array<{ user: { id: number; name: string }; viewed?: { dateTime: string } | null }>;
+    }>('POST', '/pub/v3/messages', payload);
+
+    if (data && typeof data.id === 'number') {
+      const draft: DraftRow = {
+        id: data.id,
+        subject: data.subject ?? args.subject,
+        body: data.body ?? args.body,
+        recipients: (data.recipients ?? []).map((r) => ({
+          userId: r.user.id, name: r.user.name, viewedAt: r.viewed?.dateTime ?? null,
+        })),
+        replyToId: data.replyToId ?? resolvedReplyTo,
+        modifiedAt: data.date?.dateTime ?? new Date().toISOString(),
+        listData: data,
+      };
+      upsertDraft(draft);
+    }
+
+    const text = data ? JSON.stringify(data, null, 2) : 'Draft saved.';
+    const finalText = rewriteNote ? `${rewriteNote}\n\n${text}` : text;
+    return { content: [{ type: 'text' as const, text: finalText }] };
   });
 
   server.registerTool('ofw_delete_draft', {
