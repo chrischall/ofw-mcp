@@ -102,7 +102,10 @@ jobs:
             exit 0
           fi
           npx --yes clawhub login --token "$CLAWHUB_TOKEN" --no-browser
-          npx --yes clawhub publish . --version "${VERSION}"
+          # ofw-mcp is a plugin (.claude-plugin/plugin.json present), so use
+          # `package publish`. The plain `publish` subcommand is for standalone
+          # skill repos and refuses plugins.
+          npx --yes clawhub package publish . --version "${VERSION}"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3.0.0
