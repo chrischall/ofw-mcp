@@ -19,7 +19,7 @@ import { registerCalendarTools } from './tools/calendar.js';
 import { registerExpenseTools } from './tools/expenses.js';
 import { registerJournalTools } from './tools/journal.js';
 
-const server = new McpServer({ name: 'ofw', version: '2.0.5' });
+const server = new McpServer({ name: 'ofw', version: '2.0.6' });
 
 registerUserTools(server, client);
 registerMessageTools(server, client);
