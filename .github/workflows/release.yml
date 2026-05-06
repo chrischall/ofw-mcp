@@ -102,10 +102,13 @@ jobs:
             exit 0
           fi
           npx --yes clawhub login --token "$CLAWHUB_TOKEN" --no-browser
-          # ofw-mcp is a plugin (.claude-plugin/plugin.json present), so use
-          # `package publish`. The plain `publish` subcommand is for standalone
-          # skill repos and refuses plugins.
-          npx --yes clawhub package publish . --version "${VERSION}"
+          # ClawHub's `publish` rejects folders that look like a plugin
+          # (.claude-plugin/plugin.json present), and `package publish`
+          # requires an openclaw.plugin.json we don't have. Workaround: copy
+          # SKILL.md to a clean temp dir and publish that as a standalone skill.
+          SKILL_DIR=$(mktemp -d)
+          cp SKILL.md "$SKILL_DIR/"
+          npx --yes clawhub publish "$SKILL_DIR" --version "${VERSION}" --slug ofw-mcp
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3.0.0
