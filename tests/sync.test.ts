@@ -146,26 +146,87 @@ describe('syncMessageFolder', () => {
     expect(getMessage(2)?.body).toBe('body-2');
   });
 
-  it('incremental sync stops on first page with no new ids', async () => {
+  it('incremental sync stops on first page with zero new ids', async () => {
+    // Cache has the most-recent N items already.
     upsertMessage({
-      id: 1, folder: 'inbox', subject: 'old', fromUser: 'A', sentAt: '2026-05-01T00:00:00Z',
-      recipients: [], body: 'cached', fetchedBodyAt: '2026-05-01T00:00:00Z',
+      id: 5, folder: 'inbox', subject: 'old5', fromUser: 'A', sentAt: '2026-05-05T00:00:00Z',
+      recipients: [], body: 'b5', fetchedBodyAt: '2026-05-05T00:00:00Z',
+      replyToId: null, chainRootId: null, listData: {},
+    });
+    upsertMessage({
+      id: 4, folder: 'inbox', subject: 'old4', fromUser: 'A', sentAt: '2026-05-04T00:00:00Z',
+      recipients: [], body: 'b4', fetchedBodyAt: '2026-05-04T00:00:00Z',
       replyToId: null, chainRootId: null, listData: {},
     });
 
     const client = new OFWClient();
     const spy = vi.spyOn(client, 'request')
-      .mockResolvedValueOnce(listResponse([{ id: 2, unread: false }, { id: 1, unread: false }]))
-      .mockResolvedValueOnce({ body: 'body-2' });
+      // page 1: one new + one cached
+      .mockResolvedValueOnce(listResponse([{ id: 6, unread: false, sentAt: '2026-05-06T00:00:00Z' }, { id: 5, unread: false }]))
+      .mockResolvedValueOnce({ body: 'body-6' })
+      // page 2: only the other cached item — zero new → stop
+      .mockResolvedValueOnce(listResponse([{ id: 4, unread: false }]));
 
     const result = await syncMessageFolder(client, 'inbox', '111', { fetchUnreadBodies: false });
 
     expect(result.synced).toBe(1);
-    expect(getMessage(2)?.body).toBe('body-2');
+    expect(getMessage(6)?.body).toBe('body-6');
     const detailCalls = spy.mock.calls.filter((c) => /\/pub\/v3\/messages\/[0-9]+$/.test(c[1] as string));
-    expect(detailCalls.map((c) => c[1])).toEqual(['/pub/v3/messages/2']);
+    expect(detailCalls.map((c) => c[1])).toEqual(['/pub/v3/messages/6']);
+    // Walked exactly two list pages: stopped on page 2 because it had no new items.
     const listCalls = spy.mock.calls.filter((c) => /\/pub\/v3\/messages\?/.test(c[1] as string));
-    expect(listCalls).toHaveLength(1);
+    expect(listCalls).toHaveLength(2);
+  });
+
+  it('walks past pages with cached items mixed in (gap recovery)', async () => {
+    // Simulates an ad-hoc cached old item creating a "gap" between recent
+    // history and that one cached item. The sync should walk past it and
+    // continue until a page has no new items.
+    upsertMessage({
+      id: 50, folder: 'inbox', subject: 'old', fromUser: 'A', sentAt: '2026-03-01T00:00:00Z',
+      recipients: [], body: 'cached', fetchedBodyAt: null,
+      replyToId: null, chainRootId: null, listData: {},
+    });
+
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      // page 1: new + the cached old item interleaved
+      .mockResolvedValueOnce(listResponse([{ id: 100, unread: false }, { id: 50, unread: false }]))
+      .mockResolvedValueOnce({ body: 'body-100' })
+      // page 2: another new item below — would be MISSED by old early-stop logic
+      .mockResolvedValueOnce(listResponse([{ id: 49, unread: false }]))
+      .mockResolvedValueOnce({ body: 'body-49' })
+      // page 3: empty
+      .mockResolvedValueOnce(listResponse([]));
+
+    const result = await syncMessageFolder(client, 'inbox', '111', { fetchUnreadBodies: false });
+
+    expect(result.synced).toBe(2);
+    expect(getMessage(100)?.body).toBe('body-100');
+    expect(getMessage(49)?.body).toBe('body-49');
+  });
+
+  it('deep:true walks every page even when no new items appear', async () => {
+    upsertMessage({
+      id: 1, folder: 'inbox', subject: 'cached', fromUser: 'A', sentAt: '2026-05-01T00:00:00Z',
+      recipients: [], body: 'b', fetchedBodyAt: null,
+      replyToId: null, chainRootId: null, listData: {},
+    });
+
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request')
+      .mockResolvedValueOnce(listResponse([{ id: 1, unread: false }]))
+      .mockResolvedValueOnce(listResponse([{ id: 2, unread: false, sentAt: '2026-04-30T00:00:00Z' }]))
+      .mockResolvedValueOnce({ body: 'body-2' })
+      .mockResolvedValueOnce(listResponse([])); // empty
+
+    const result = await syncMessageFolder(client, 'inbox', '111', { fetchUnreadBodies: false, deep: true });
+
+    expect(result.synced).toBe(1);
+    expect(getMessage(2)?.body).toBe('body-2');
+    // With deep:true, walked all the way to the empty page (3 list calls).
+    const listCalls = spy.mock.calls.filter((c) => /\/pub\/v3\/messages\?/.test(c[1] as string));
+    expect(listCalls).toHaveLength(3);
   });
 
   it('walks forward when page 1 has all-new ids', async () => {

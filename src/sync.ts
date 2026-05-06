@@ -73,7 +73,7 @@ export async function syncMessageFolder(
   client: OFWClient,
   folder: 'inbox' | 'sent',
   folderId: string,
-  opts: { fetchUnreadBodies: boolean }
+  opts: { fetchUnreadBodies: boolean; deep?: boolean }
 ): Promise<MessageSyncResult> {
   let page = 1;
   let synced = 0;
@@ -86,14 +86,12 @@ export async function syncMessageFolder(
     const items = list.data ?? [];
     if (items.length === 0) break;
 
-    let pageSawKnownItem = false;
+    let pageHadNewItem = false;
     for (const item of items) {
       if (newestId === null || item.id > newestId) newestId = item.id;
       const existing = getMessage(item.id);
-      if (existing) {
-        pageSawKnownItem = true;
-        continue;
-      }
+      if (existing) continue;
+      pageHadNewItem = true;
 
       const isInboxUnread = folder === 'inbox' && item.showNeverViewed === true;
       const shouldFetchBody = !isInboxUnread || opts.fetchUnreadBodies;
@@ -130,8 +128,12 @@ export async function syncMessageFolder(
       synced++;
     }
 
-    // OFW returns date-desc, so a known item means we've reached cached history.
-    if (pageSawKnownItem) break;
+    // Stop heuristic: a page with no new items means we've reached cached
+    // history (OFW returns date-desc). A page with even ONE new item could
+    // mean there are more new items on the next page that we haven't seen
+    // yet — keep walking. With `deep: true`, walk every page until OFW
+    // returns an empty page (used to backfill suspected gaps).
+    if (!opts.deep && !pageHadNewItem) break;
     page++;
   }
 
@@ -198,6 +200,7 @@ export async function syncDrafts(client: OFWClient, draftsFolderId: string): Pro
 export interface SyncAllOptions {
   folders?: FolderName[];
   fetchUnreadBodies?: boolean;
+  deep?: boolean;
 }
 
 export interface SyncAllResult {
@@ -216,11 +219,15 @@ export async function syncAll(client: OFWClient, opts: SyncAllOptions): Promise<
     if (folder === 'inbox') {
       const r = await syncMessageFolder(client, 'inbox', ids.inbox, {
         fetchUnreadBodies: opts.fetchUnreadBodies ?? false,
+        deep: opts.deep ?? false,
       });
       synced.inbox = r.synced;
       unreadInbox = r.unread;
     } else if (folder === 'sent') {
-      const r = await syncMessageFolder(client, 'sent', ids.sent, { fetchUnreadBodies: false });
+      const r = await syncMessageFolder(client, 'sent', ids.sent, {
+        fetchUnreadBodies: false,
+        deep: opts.deep ?? false,
+      });
       synced.sent = r.synced;
     } else if (folder === 'drafts') {
       const r = await syncDrafts(client, ids.drafts);

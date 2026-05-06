@@ -3,7 +3,7 @@ import { z } from 'zod';
 import type { OFWClient } from '../client.js';
 import { syncAll } from '../sync.js';
 import {
-  listMessages, listDrafts, getMessage, upsertMessage,
+  listMessages, countMessages, listDrafts, getMessage, upsertMessage,
   upsertDraft, deleteDraft, findLatestReplyTip,
   type MessageRow, type DraftRow, type Recipient,
 } from '../cache.js';
@@ -18,36 +18,47 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
   });
 
   server.registerTool('ofw_list_messages', {
-    description: 'List messages from the local OurFamilyWizard cache. folderId accepts "inbox" or "sent". Call ofw_sync_messages first if the cache is empty or stale.',
+    description: 'List messages from the local OurFamilyWizard cache. Supports filtering by folder, date range, and a substring query on subject+body. Pagination is offset-based but if you know what you want (a date range, a topic), prefer the filters over walking pages — the cache may have 1000+ messages. Call ofw_sync_messages first if the cache is empty or stale.',
     annotations: { readOnlyHint: true },
     inputSchema: {
-      folderId: z.string().describe('Folder name: "inbox" or "sent"'),
+      folderId: z.string().describe('Folder name: "inbox", "sent", or "both" (default "both")').optional(),
       page: z.number().describe('Page number (default 1)').optional(),
       size: z.number().describe('Messages per page (default 50)').optional(),
+      since: z.string().describe('ISO date or datetime — only messages with sent_at >= since (inclusive)').optional(),
+      until: z.string().describe('ISO date or datetime — only messages with sent_at < until (exclusive)').optional(),
+      q: z.string().describe('Substring match on subject AND body (case-insensitive). Use to find messages on a specific topic.').optional(),
     },
   }, async (args) => {
     const page = args.page ?? 1;
     const size = args.size ?? 50;
+    const folderArg = args.folderId ?? 'both';
 
-    let folder: 'inbox' | 'sent' | null = null;
-    if (args.folderId === 'inbox') folder = 'inbox';
-    else if (args.folderId === 'sent') folder = 'sent';
+    let folder: 'inbox' | 'sent' | undefined;
+    if (folderArg === 'inbox') folder = 'inbox';
+    else if (folderArg === 'sent') folder = 'sent';
+    else if (folderArg === 'both') folder = undefined;
     else {
       return {
         content: [{
           type: 'text' as const,
           text: JSON.stringify({
             messages: [],
-            note: 'Cache is keyed by folder name. Pass folderId: "inbox" or "sent" (numeric folder IDs are not yet supported by the cache layer).',
+            note: 'folderId must be "inbox", "sent", or "both". Numeric OFW folder IDs are not supported by the cache.',
           }, null, 2),
         }],
       };
     }
 
-    const messages = listMessages({ folder, page, size });
-    const payload = messages.length === 0
-      ? { messages: [], note: 'Cache empty for this folder. Call ofw_sync_messages to populate.' }
-      : { messages };
+    const filter = { folder, since: args.since, until: args.until, q: args.q };
+    const total = countMessages(filter);
+    const messages = listMessages({ ...filter, page, size });
+
+    const payload: Record<string, unknown> = { messages, total, page, size };
+    if (total === 0) {
+      payload.note = 'No messages match these filters. If you expected results, check ofw_sync_messages was run, or relax the filters.';
+    } else if (page * size < total) {
+      payload.note = `Showing ${(page - 1) * size + 1}–${(page - 1) * size + messages.length} of ${total}. Increase 'page' to see more, or narrow with since/until/q.`;
+    }
 
     return { content: [{ type: 'text' as const, text: JSON.stringify(payload, null, 2) }] };
   });
@@ -290,16 +301,18 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
   });
 
   server.registerTool('ofw_sync_messages', {
-    description: 'Sync messages from OurFamilyWizard into the local cache. Returns counts per folder and a list of unread inbox messages whose bodies were NOT fetched (to avoid mark-as-read on OFW). Call ofw_get_message(id) on those to read them.',
+    description: 'Sync messages from OurFamilyWizard into the local cache. Returns counts per folder and a list of unread inbox messages whose bodies were NOT fetched (to avoid mark-as-read on OFW). Call ofw_get_message(id) on those to read them. Pass deep:true to walk all OFW pages instead of stopping at the first all-cached page (use to backfill suspected gaps).',
     annotations: { readOnlyHint: false },
     inputSchema: {
       folders: z.array(z.enum(['inbox', 'sent', 'drafts'])).describe('Folders to sync (default: all three)').optional(),
       fetchUnreadBodies: z.boolean().describe('If true, also fetch bodies for unread inbox messages (will mark them as read on OFW). Default false.').optional(),
+      deep: z.boolean().describe('If true, walk every OFW page until empty regardless of cache state. Use to backfill gaps. Default false.').optional(),
     },
   }, async (args) => {
     const result = await syncAll(client, {
       folders: args.folders,
       fetchUnreadBodies: args.fetchUnreadBodies,
+      deep: args.deep,
     });
     return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
   });

@@ -165,15 +165,72 @@ export function getMessage(id: number): MessageRow | null {
   return r ? rowFromDb(r) : null;
 }
 
-export function listMessages(opts: { folder: 'inbox' | 'sent'; page: number; size: number }): MessageRow[] {
+export interface ListMessagesOptions {
+  folder?: 'inbox' | 'sent';   // omit to search both
+  page: number;
+  size: number;
+  since?: string;              // ISO date or datetime, inclusive
+  until?: string;              // ISO date or datetime, exclusive
+  q?: string;                  // substring match on subject and body (case-insensitive)
+}
+
+export function listMessages(opts: ListMessagesOptions): MessageRow[] {
   const { db } = openCache();
   const offset = (opts.page - 1) * opts.size;
+  const wheres: string[] = [];
+  const params: unknown[] = [];
+  if (opts.folder !== undefined) {
+    wheres.push('folder = ?');
+    params.push(opts.folder);
+  }
+  if (opts.since !== undefined) {
+    wheres.push('sent_at >= ?');
+    params.push(opts.since);
+  }
+  if (opts.until !== undefined) {
+    wheres.push('sent_at < ?');
+    params.push(opts.until);
+  }
+  if (opts.q !== undefined && opts.q.length > 0) {
+    const pattern = `%${opts.q}%`;
+    wheres.push('(subject LIKE ? OR body LIKE ?)');
+    params.push(pattern, pattern);
+  }
+  const where = wheres.length > 0 ? `WHERE ${wheres.join(' AND ')}` : '';
+  params.push(opts.size, offset);
   const rows = db.prepare(
-    `SELECT * FROM messages WHERE folder = ?
+    `SELECT * FROM messages ${where}
      ORDER BY sent_at DESC, id DESC
      LIMIT ? OFFSET ?`
-  ).all(opts.folder, opts.size, offset) as unknown as MessageDbRow[];
+  ).all(...params as never[]) as unknown as MessageDbRow[];
   return rows.map(rowFromDb);
+}
+
+export function countMessages(opts: Omit<ListMessagesOptions, 'page' | 'size'>): number {
+  const { db } = openCache();
+  const wheres: string[] = [];
+  const params: unknown[] = [];
+  if (opts.folder !== undefined) {
+    wheres.push('folder = ?');
+    params.push(opts.folder);
+  }
+  if (opts.since !== undefined) {
+    wheres.push('sent_at >= ?');
+    params.push(opts.since);
+  }
+  if (opts.until !== undefined) {
+    wheres.push('sent_at < ?');
+    params.push(opts.until);
+  }
+  if (opts.q !== undefined && opts.q.length > 0) {
+    const pattern = `%${opts.q}%`;
+    wheres.push('(subject LIKE ? OR body LIKE ?)');
+    params.push(pattern, pattern);
+  }
+  const where = wheres.length > 0 ? `WHERE ${wheres.join(' AND ')}` : '';
+  const r = db.prepare(`SELECT COUNT(*) as n FROM messages ${where}`)
+    .get(...params as never[]) as { n: number } | undefined;
+  return r?.n ?? 0;
 }
 
 export interface DraftRow {

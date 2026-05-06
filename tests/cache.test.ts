@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   openCache, closeCache,
-  upsertMessage, getMessage, listMessages, type MessageRow,
+  upsertMessage, getMessage, listMessages, countMessages, type MessageRow,
   upsertDraft, getDraft, listDrafts, deleteDraft, listDraftIds, type DraftRow,
   getSyncState, setSyncState, getMeta, setMeta,
   findLatestReplyTip,
@@ -126,6 +126,54 @@ describe('messages CRUD', () => {
     const page2 = listMessages({ folder: 'inbox', page: 2, size: 2 });
     expect(page1.map((m) => m.id)).toEqual([5, 4]);
     expect(page2.map((m) => m.id)).toEqual([3, 2]);
+  });
+
+  it('listMessages filters by since/until date range', () => {
+    openCache();
+    upsertMessage(sampleRow({ id: 1, sentAt: '2026-02-25T00:00:00Z' }));
+    upsertMessage(sampleRow({ id: 2, sentAt: '2026-03-01T09:48:58Z', subject: 'Boston' }));
+    upsertMessage(sampleRow({ id: 3, sentAt: '2026-03-02T09:30:37Z' }));
+    upsertMessage(sampleRow({ id: 4, sentAt: '2026-03-15T00:00:00Z' }));
+
+    const march1 = listMessages({ folder: 'inbox', page: 1, size: 50, since: '2026-03-01', until: '2026-03-02' });
+    expect(march1.map((m) => m.id)).toEqual([2]);
+
+    const earlyMarch = listMessages({ folder: 'inbox', page: 1, size: 50, since: '2026-03-01', until: '2026-03-03' });
+    expect(earlyMarch.map((m) => m.id)).toEqual([3, 2]);
+  });
+
+  it('listMessages filters by q (substring on subject and body, case-insensitive)', () => {
+    openCache();
+    upsertMessage(sampleRow({ id: 1, subject: 'Schedule update', body: 'no mention here' }));
+    upsertMessage(sampleRow({ id: 2, subject: 'May trip to Boston with the Boys', body: 'planning details' }));
+    upsertMessage(sampleRow({ id: 3, subject: 'Other thread', body: 'mentions Boston in body only' }));
+    upsertMessage(sampleRow({ id: 4, subject: 'Unrelated', body: 'completely unrelated' }));
+
+    const hits = listMessages({ folder: 'inbox', page: 1, size: 50, q: 'Boston' });
+    expect(hits.map((m) => m.id).sort()).toEqual([2, 3]);
+
+    // Case-insensitive
+    const lowerHits = listMessages({ folder: 'inbox', page: 1, size: 50, q: 'boston' });
+    expect(lowerHits.map((m) => m.id).sort()).toEqual([2, 3]);
+  });
+
+  it('listMessages with no folder searches both inbox and sent', () => {
+    openCache();
+    upsertMessage(sampleRow({ id: 1, folder: 'inbox', subject: 'inbox-msg' }));
+    upsertMessage(sampleRow({ id: 2, folder: 'sent', subject: 'sent-msg' }));
+
+    const both = listMessages({ page: 1, size: 50 });
+    expect(both).toHaveLength(2);
+  });
+
+  it('countMessages returns the total matching the filter', () => {
+    openCache();
+    for (let i = 1; i <= 10; i++) {
+      upsertMessage(sampleRow({ id: i, sentAt: `2026-05-${String(i).padStart(2, '0')}T00:00:00Z` }));
+    }
+    expect(countMessages({ folder: 'inbox' })).toBe(10);
+    expect(countMessages({ folder: 'inbox', since: '2026-05-05' })).toBe(6);
+    expect(countMessages({ folder: 'inbox', q: 'no-match' })).toBe(0);
   });
 });
 

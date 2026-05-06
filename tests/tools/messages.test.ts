@@ -140,6 +140,62 @@ describe('ofw_list_messages (cache-backed)', () => {
     const parsed = JSON.parse(result.content[0].text);
     expect(parsed.note).toMatch(/inbox.*sent/);
   });
+
+  it('filters by date range (since + until)', async () => {
+    upsertMessage({
+      id: 1, folder: 'inbox', subject: 'Feb msg', fromUser: 'A',
+      sentAt: '2026-02-15T00:00:00Z', recipients: [], body: 'b',
+      fetchedBodyAt: null, replyToId: null, chainRootId: null, listData: {},
+    });
+    upsertMessage({
+      id: 2, folder: 'inbox', subject: 'Boston', fromUser: 'A',
+      sentAt: '2026-03-01T09:48:58Z', recipients: [], body: 'b',
+      fetchedBodyAt: null, replyToId: null, chainRootId: null, listData: {},
+    });
+    upsertMessage({
+      id: 3, folder: 'inbox', subject: 'Apr msg', fromUser: 'A',
+      sentAt: '2026-04-01T00:00:00Z', recipients: [], body: 'b',
+      fetchedBodyAt: null, replyToId: null, chainRootId: null, listData: {},
+    });
+
+    const client = new OFWClient();
+    setup(client);
+    const result = await handlers.get('ofw_list_messages')!({
+      folderId: 'inbox', since: '2026-03-01', until: '2026-03-02',
+    });
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.messages).toHaveLength(1);
+    expect(parsed.messages[0].subject).toBe('Boston');
+    expect(parsed.total).toBe(1);
+  });
+
+  it('searches by q across subject and body', async () => {
+    upsertMessage({
+      id: 1, folder: 'inbox', subject: 'May trip to Boston with the Boys',
+      fromUser: 'A', sentAt: '2026-03-01T09:48:58Z',
+      recipients: [], body: 'planning', fetchedBodyAt: null,
+      replyToId: null, chainRootId: null, listData: {},
+    });
+    upsertMessage({
+      id: 2, folder: 'sent', subject: 'unrelated subject',
+      fromUser: 'Me', sentAt: '2026-03-10T00:00:00Z',
+      recipients: [], body: 'I am taking the boys to Boston', fetchedBodyAt: null,
+      replyToId: null, chainRootId: null, listData: {},
+    });
+    upsertMessage({
+      id: 3, folder: 'inbox', subject: 'Other thread',
+      fromUser: 'A', sentAt: '2026-03-20T00:00:00Z',
+      recipients: [], body: 'not related', fetchedBodyAt: null,
+      replyToId: null, chainRootId: null, listData: {},
+    });
+
+    const client = new OFWClient();
+    setup(client);
+    const result = await handlers.get('ofw_list_messages')!({ q: 'Boston' });
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.messages).toHaveLength(2);
+    expect(parsed.total).toBe(2);
+  });
 });
 
 describe('ofw_list_drafts (cache-backed)', () => {
