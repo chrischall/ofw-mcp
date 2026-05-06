@@ -31833,7 +31833,7 @@ process.emit = function(event, ...args) {
   }
   return originalEmit(event, ...args);
 };
-var server = new McpServer({ name: "ofw", version: "2.0.7" });
+var server = new McpServer({ name: "ofw", version: "2.0.8" });
 registerUserTools(server, client);
 registerMessageTools(server, client);
 registerCalendarTools(server, client);
