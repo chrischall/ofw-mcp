@@ -124,6 +124,19 @@ function rowFromDb(r: MessageDbRow): MessageRow {
   };
 }
 
+// node:sqlite rejects `undefined` as a bound parameter ("Provided value cannot
+// be bound"). Normalize undefined to null for nullable columns so callers
+// don't have to remember; throw with a useful error for NOT NULL fields that
+// somehow arrived as undefined.
+function nullish<T>(v: T | undefined | null): T | null {
+  return v === undefined ? null : v;
+}
+
+function requireString(field: string, v: string | undefined | null): string {
+  if (typeof v === 'string') return v;
+  throw new Error(`cache: ${field} is required (got ${v === undefined ? 'undefined' : 'null'})`);
+}
+
 export function upsertMessage(row: MessageRow): void {
   const { db } = openCache();
   db.prepare(
@@ -145,16 +158,16 @@ export function upsertMessage(row: MessageRow): void {
        last_seen_at=excluded.last_seen_at`
   ).run(
     row.id,
-    row.folder,
-    row.subject,
-    row.fromUser,
-    row.sentAt,
-    JSON.stringify(row.recipients),
-    row.body,
-    row.fetchedBodyAt,
-    row.replyToId,
-    row.chainRootId,
-    JSON.stringify(row.listData),
+    requireString('messages.folder', row.folder),
+    requireString('messages.subject', row.subject),
+    requireString('messages.fromUser', row.fromUser),
+    requireString('messages.sentAt', row.sentAt),
+    JSON.stringify(row.recipients ?? []),
+    nullish(row.body),
+    nullish(row.fetchedBodyAt),
+    nullish(row.replyToId),
+    nullish(row.chainRootId),
+    JSON.stringify(row.listData ?? null),
     new Date().toISOString()
   );
 }
@@ -279,12 +292,12 @@ export function upsertDraft(row: DraftRow): void {
        list_data_json=excluded.list_data_json`
   ).run(
     row.id,
-    row.subject,
-    row.body,
-    JSON.stringify(row.recipients),
-    row.replyToId,
-    row.modifiedAt,
-    JSON.stringify(row.listData)
+    requireString('drafts.subject', row.subject),
+    requireString('drafts.body', row.body),
+    JSON.stringify(row.recipients ?? []),
+    nullish(row.replyToId),
+    requireString('drafts.modifiedAt', row.modifiedAt),
+    JSON.stringify(row.listData ?? null)
   );
 }
 

@@ -245,6 +245,27 @@ describe('syncMessageFolder', () => {
     expect(listMessages({ folder: 'sent', page: 1, size: 50 }).map((m) => m.id)).toEqual([3, 2, 1]);
   });
 
+  it('handles messages where OFW omits date.dateTime (regression)', async () => {
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce({
+        data: [{
+          id: 99,
+          subject: 'missing date',
+          from: { name: 'Alice' },
+          // NOTE: date is missing
+          showNeverViewed: false,
+          recipients: [],
+        }],
+      })
+      .mockResolvedValueOnce({ body: 'body-99' })
+      .mockResolvedValueOnce(listResponse([]));
+
+    const result = await syncMessageFolder(client, 'sent', '222', { fetchUnreadBodies: false });
+    expect(result.synced).toBe(1);
+    expect(getMessage(99)?.sentAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+  });
+
   it('updates sync_state with newest id and timestamp', async () => {
     const client = new OFWClient();
     vi.spyOn(client, 'request')
@@ -323,6 +344,41 @@ describe('syncDrafts', () => {
     expect(got?.subject).toBe('New');
     expect(got?.body).toBe('new-body');
     expect(got?.modifiedAt).toBe('2026-05-04T00:00:00Z');
+  });
+
+  it('handles drafts where OFW omits replyToId (regression for SQLite param-5 bind error)', async () => {
+    // OFW occasionally returns drafts without a replyToId field at all.
+    // upsertDraft must accept that (treat as null) — previously this raised
+    // "Provided value cannot be bound to SQLite parameter 5".
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce({
+        data: [{
+          id: 1,
+          subject: 'Draft no replyToId',
+          date: { dateTime: '2026-05-06T00:00:00Z' },
+          // NOTE: no replyToId field
+          recipients: [],
+        }],
+      })
+      .mockResolvedValueOnce({ body: 'body', subject: 'Draft no replyToId', recipientIds: [] });
+
+    const result = await syncDrafts(client, '333');
+    expect(result.synced).toBe(1);
+    expect(getDraft(1)?.replyToId).toBeNull();
+  });
+
+  it('handles drafts where OFW omits the date field entirely', async () => {
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce({
+        data: [{ id: 1, subject: 'no date', replyToId: null, recipients: [] }],
+      })
+      .mockResolvedValueOnce({ body: 'b', subject: 'no date', recipientIds: [] });
+
+    const result = await syncDrafts(client, '333');
+    expect(result.synced).toBe(1);
+    expect(getDraft(1)?.modifiedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
   });
 
   it('skips refetching a draft whose modifiedAt is unchanged', async () => {

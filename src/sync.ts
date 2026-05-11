@@ -114,9 +114,9 @@ export async function syncMessageFolder(
       const row: MessageRow = {
         id: item.id,
         folder,
-        subject: item.subject,
+        subject: item.subject ?? '(no subject)',
         fromUser: item.from?.name ?? '',
-        sentAt: item.date.dateTime,
+        sentAt: item.date?.dateTime ?? new Date().toISOString(),
         recipients: recipientsFromList(item),
         body,
         fetchedBodyAt,
@@ -170,20 +170,23 @@ export async function syncDrafts(client: OFWClient, draftsFolderId: string): Pro
 
   for (const item of items) {
     seenIds.add(item.id);
+    const modifiedAt = item.date?.dateTime ?? new Date().toISOString();
     const existing = getDraft(item.id);
-    if (existing && existing.modifiedAt === item.date.dateTime) {
+    if (existing && existing.modifiedAt === modifiedAt) {
       continue;
     }
     const detail = await client.request<DraftDetailResponse>('GET', `/pub/v3/messages/${item.id}`);
     const row: DraftRow = {
       id: item.id,
-      subject: detail.subject ?? item.subject,
+      subject: detail.subject ?? item.subject ?? '(no subject)',
       body: detail.body ?? '',
       recipients: (item.recipients ?? []).map((r) => ({
-        userId: r.user.id, name: r.user.name, viewedAt: r.viewed?.dateTime ?? null,
+        userId: r.user?.id ?? 0,
+        name: r.user?.name ?? '',
+        viewedAt: r.viewed?.dateTime ?? null,
       })),
-      replyToId: item.replyToId,
-      modifiedAt: item.date.dateTime,
+      replyToId: item.replyToId ?? null,
+      modifiedAt,
       listData: item,
     };
     upsertDraft(row);
