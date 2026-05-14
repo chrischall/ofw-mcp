@@ -6,12 +6,12 @@
     "url": "https://github.com/chrischall/ofw-mcp",
     "source": "github"
   },
-  "version": "2.0.9",
+  "version": "2.0.10",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "ofw-mcp",
-      "version": "2.0.9",
+      "version": "2.0.10",
       "transport": {
         "type": "stdio"
       },
