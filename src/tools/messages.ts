@@ -9,8 +9,36 @@ import {
   type MessageRow, type DraftRow, type Recipient,
 } from '../cache.js';
 import { getAttachmentsDir } from '../config.js';
-import { mkdirSync, writeFileSync } from 'node:fs';
-import { dirname, join, isAbsolute, resolve } from 'node:path';
+import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { basename, dirname, extname, join, isAbsolute, resolve } from 'node:path';
+
+// Lightweight mime sniff from extension. OFW re-derives mime from the filename
+// server-side anyway, so this is just a polite Content-Type for the Blob.
+const MIME_BY_EXT: Record<string, string> = {
+  '.pdf': 'application/pdf',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.heic': 'image/heic',
+  '.txt': 'text/plain',
+  '.md': 'text/markdown',
+  '.csv': 'text/csv',
+  '.html': 'text/html', '.htm': 'text/html',
+  '.json': 'application/json',
+  '.xml': 'application/xml',
+  '.doc': 'application/msword',
+  '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  '.xls': 'application/vnd.ms-excel',
+  '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  '.ppt': 'application/vnd.ms-powerpoint',
+  '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  '.zip': 'application/zip',
+  '.ics': 'text/calendar',
+};
+function mimeFromName(name: string): string {
+  return MIME_BY_EXT[extname(name).toLowerCase()] ?? 'application/octet-stream';
+}
 
 export function registerMessageTools(server: McpServer, client: OFWClient): void {
   server.registerTool('ofw_list_message_folders', {
@@ -115,7 +143,7 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
   });
 
   server.registerTool('ofw_send_message', {
-    description: 'Send a message via OurFamilyWizard. If sending from a draft, pass draftId to delete the draft after sending. If replyToId is provided, the cache may rewrite it to the latest reply in the same thread (a note is included in the response when this happens).',
+    description: 'Send a message via OurFamilyWizard. If sending from a draft, pass draftId to delete the draft after sending. If replyToId is provided, the cache may rewrite it to the latest reply in the same thread (a note is included in the response when this happens). Attach files by passing their fileIds (from ofw_upload_attachment) in myFileIDs.',
     annotations: { destructiveHint: true },
     inputSchema: {
       subject: z.string().describe('Message subject'),
@@ -123,6 +151,7 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
       recipientIds: z.array(z.number()).describe('Array of recipient user IDs (get from ofw_get_profile)'),
       replyToId: z.number().describe('ID of the message being replied to').optional(),
       draftId: z.number().describe('ID of the draft to delete after sending (omit if not sending from a draft)').optional(),
+      myFileIDs: z.array(z.number()).describe('Attachment file ids (from ofw_upload_attachment) to attach to the message').optional(),
     },
   }, async (args) => {
     const requestedReplyTo = args.replyToId ?? null;
@@ -139,6 +168,7 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
       chainRootId = parent?.chainRootId ?? parent?.id ?? requestedReplyTo;
     }
 
+    const myFileIDs = args.myFileIDs ?? [];
     const data = await client.request<{
       id?: number; subject?: string; body?: string;
       date?: { dateTime: string }; from?: { name?: string };
@@ -147,7 +177,7 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
       subject: args.subject,
       body: args.body,
       recipientIds: args.recipientIds,
-      attachments: { myFileIDs: [] },
+      attachments: { myFileIDs },
       draft: false,
       includeOriginal: resolvedReplyTo !== null,
       replyToId: resolvedReplyTo,
@@ -171,6 +201,21 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
         listData: data,
       };
       upsertMessage(row);
+      // Link attached files to the new message in the attachments cache.
+      // We may not have full metadata if the upload happened in a prior
+      // session — fall back to what we know.
+      for (const fileId of myFileIDs) {
+        const existing = getAttachment(fileId);
+        upsertAttachmentForMessage({
+          fileId,
+          fileName: existing?.fileName ?? `file-${fileId}`,
+          label: existing?.label ?? existing?.fileName ?? `file-${fileId}`,
+          mimeType: existing?.mimeType ?? 'application/octet-stream',
+          sizeBytes: existing?.sizeBytes ?? null,
+          metadata: existing?.metadata ?? {},
+          messageId: data.id,
+        });
+      }
     }
 
     if (args.draftId !== undefined) {
@@ -203,7 +248,7 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
   });
 
   server.registerTool('ofw_save_draft', {
-    description: 'Save a message as a draft in OurFamilyWizard. Recipients are optional. To update an existing draft, provide its messageId. If replyToId is provided, the cache may rewrite it to the latest reply in the thread (note included in response).',
+    description: 'Save a message as a draft in OurFamilyWizard. Recipients are optional. To update an existing draft, provide its messageId. If replyToId is provided, the cache may rewrite it to the latest reply in the thread (note included in response). Attach files by passing their fileIds (from ofw_upload_attachment) in myFileIDs.',
     annotations: { readOnlyHint: false },
     inputSchema: {
       subject: z.string().describe('Message subject'),
@@ -211,6 +256,7 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
       recipientIds: z.array(z.number()).describe('Array of recipient user IDs (optional for drafts)').optional(),
       messageId: z.number().describe('ID of an existing draft to update (omit to create a new draft)').optional(),
       replyToId: z.number().describe('ID of the message this draft replies to').optional(),
+      myFileIDs: z.array(z.number()).describe('Attachment file ids (from ofw_upload_attachment)').optional(),
     },
   }, async (args) => {
     const requestedReplyTo = args.replyToId ?? null;
@@ -224,11 +270,12 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
       }
     }
 
+    const myFileIDs = args.myFileIDs ?? [];
     const payload: Record<string, unknown> = {
       subject: args.subject,
       body: args.body,
       recipientIds: args.recipientIds ?? [],
-      attachments: { myFileIDs: [] },
+      attachments: { myFileIDs },
       draft: true,
       includeOriginal: resolvedReplyTo !== null,
       replyToId: resolvedReplyTo,
@@ -308,6 +355,65 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
       }, null, 2) }] };
     }
     return { content: [{ type: 'text' as const, text: JSON.stringify(unread, null, 2) }] };
+  });
+
+  server.registerTool('ofw_upload_attachment', {
+    description: 'Upload a local file to OurFamilyWizard\'s "My Files" so it can be attached to a message. Returns the fileId — pass that to ofw_send_message or ofw_save_draft in myFileIDs to attach it. The file is uploaded as PRIVATE (visible only to you) by default; pass shareClass:"SHARED" to share with co-parents directly via the My Files area.',
+    annotations: { destructiveHint: false },
+    inputSchema: {
+      path: z.string().describe('Absolute path to the local file to upload. Tilde (~) is expanded.'),
+      shareClass: z.enum(['PRIVATE', 'SHARED']).describe('Share class (default PRIVATE)').optional(),
+      label: z.string().describe('Display label for the file in OFW (default: filename)').optional(),
+      description: z.string().describe('Description shown in OFW My Files (default: filename)').optional(),
+    },
+  }, async (args) => {
+    // Resolve and read the local file
+    const expanded = args.path.startsWith('~/')
+      ? join(process.env.HOME ?? '', args.path.slice(2))
+      : args.path;
+    const abs = isAbsolute(expanded) ? expanded : resolve(expanded);
+    const stat = statSync(abs); // throws if missing
+    if (!stat.isFile()) throw new Error(`Not a file: ${abs}`);
+    const buf = readFileSync(abs);
+    const fileName = basename(abs);
+    const mime = mimeFromName(fileName);
+
+    // Build the multipart payload matching the OFW web UI's request shape
+    const form = new FormData();
+    form.append('file', new Blob([new Uint8Array(buf)], { type: mime }), fileName);
+    form.append('source', 'message');
+    form.append('description', args.description ?? fileName);
+    form.append('label', args.label ?? fileName);
+    form.append('fileName', fileName);
+    form.append('shareClass', args.shareClass ?? 'PRIVATE');
+
+    const meta = await client.request<{
+      fileId: number; fileName?: string; label?: string;
+      fileType?: string; sizeInBytes?: number; shareClass?: string;
+    }>('POST', '/pub/v3/myfiles/multipart', form);
+
+    // Cache the metadata so subsequent ofw_get_message calls can surface it
+    // and ofw_download_attachment short-circuits if asked. messageId is 0
+    // because no message references this yet — it'll be linked once a
+    // message is sent with this fileId in its attachments.
+    upsertAttachmentForMessage({
+      fileId: meta.fileId,
+      fileName: meta.fileName ?? fileName,
+      label: meta.label ?? args.label ?? fileName,
+      mimeType: meta.fileType ?? mime,
+      sizeBytes: typeof meta.sizeInBytes === 'number' ? meta.sizeInBytes : buf.length,
+      metadata: meta,
+      messageId: 0,
+    });
+
+    return { content: [{ type: 'text' as const, text: JSON.stringify({
+      fileId: meta.fileId,
+      fileName: meta.fileName ?? fileName,
+      mimeType: meta.fileType ?? mime,
+      sizeBytes: meta.sizeInBytes ?? buf.length,
+      shareClass: meta.shareClass ?? args.shareClass ?? 'PRIVATE',
+      note: 'Pass this fileId to ofw_send_message or ofw_save_draft in myFileIDs to attach it.',
+    }, null, 2) }] };
   });
 
   server.registerTool('ofw_download_attachment', {

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -669,6 +669,118 @@ describe('ofw_get_unread_sent (cache-backed)', () => {
   });
 });
 
+describe('ofw_upload_attachment', () => {
+  it('reads the file, POSTs multipart to /pub/v3/myfiles/multipart, returns fileId', async () => {
+    const client = new OFWClient();
+    const reqSpy = vi.spyOn(client, 'request').mockResolvedValueOnce({
+      fileId: 99887766,
+      fileName: 'note.txt',
+      label: 'note.txt',
+      fileType: 'text/plain',
+      sizeInBytes: 19,
+      shareClass: 'PRIVATE',
+    });
+    setup(client);
+
+    const dir = mkdtempSync(join(tmpdir(), 'ofw-up-'));
+    const filePath = join(dir, 'note.txt');
+    writeFileSync(filePath, 'hello attachments!');
+    try {
+      const result = await handlers.get('ofw_upload_attachment')!({ path: filePath });
+      const parsed = JSON.parse(result.content[0].text);
+      expect(parsed.fileId).toBe(99887766);
+      expect(parsed.fileName).toBe('note.txt');
+      expect(parsed.shareClass).toBe('PRIVATE');
+
+      // Check the request was POST to the multipart endpoint with FormData
+      const [method, path, body] = reqSpy.mock.calls[0];
+      expect(method).toBe('POST');
+      expect(path).toBe('/pub/v3/myfiles/multipart');
+      expect(body).toBeInstanceOf(FormData);
+      const form = body as FormData;
+      expect(form.get('source')).toBe('message');
+      expect(form.get('shareClass')).toBe('PRIVATE');
+      expect(form.get('fileName')).toBe('note.txt');
+      expect(form.get('label')).toBe('note.txt');
+      expect(form.get('description')).toBe('note.txt');
+      const fileBlob = form.get('file') as Blob | null;
+      expect(fileBlob).not.toBeNull();
+      expect(fileBlob?.type).toBe('text/plain');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('honors shareClass:"SHARED" and custom label/description', async () => {
+    const client = new OFWClient();
+    const reqSpy = vi.spyOn(client, 'request').mockResolvedValueOnce({
+      fileId: 1, fileName: 'a.pdf', fileType: 'application/pdf', sizeInBytes: 4, shareClass: 'SHARED',
+    });
+    setup(client);
+    const dir = mkdtempSync(join(tmpdir(), 'ofw-up-'));
+    const filePath = join(dir, 'a.pdf');
+    writeFileSync(filePath, 'PDF.');
+    try {
+      await handlers.get('ofw_upload_attachment')!({
+        path: filePath, shareClass: 'SHARED', label: 'May invoice', description: 'Itemized invoice for May',
+      });
+      const form = reqSpy.mock.calls[0][2] as FormData;
+      expect(form.get('shareClass')).toBe('SHARED');
+      expect(form.get('label')).toBe('May invoice');
+      expect(form.get('description')).toBe('Itemized invoice for May');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('throws a clear error when the file does not exist', async () => {
+    const client = new OFWClient();
+    setup(client);
+    await expect(
+      handlers.get('ofw_upload_attachment')!({ path: '/tmp/does-not-exist-' + Date.now() })
+    ).rejects.toThrow();
+  });
+});
+
+describe('ofw_send_message with attachments', () => {
+  it('passes myFileIDs through to the OFW payload', async () => {
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request').mockResolvedValueOnce({
+      id: 200, subject: 'with attach', body: 'see attached',
+      date: { dateTime: '2026-05-14T00:00:00Z' }, from: { name: 'Me' }, recipients: [],
+    });
+    setup(client);
+    await handlers.get('ofw_send_message')!({
+      subject: 'with attach', body: 'see attached', recipientIds: [1],
+      myFileIDs: [50015547, 99887766],
+    });
+    const post = spy.mock.calls.find((c) => c[0] === 'POST');
+    expect((post![2] as { attachments: { myFileIDs: number[] } }).attachments.myFileIDs).toEqual([50015547, 99887766]);
+  });
+
+  it('links attachment cache rows to the new sent message', async () => {
+    // Pre-cache the attachment metadata as if it had been uploaded earlier
+    upsertAttachmentForMessage({
+      fileId: 50015547, fileName: 'doc.pdf', label: 'doc', mimeType: 'application/pdf',
+      sizeBytes: 1024, metadata: {}, messageId: 0,
+    });
+    const client = new OFWClient();
+    vi.spyOn(client, 'request').mockResolvedValueOnce({
+      id: 200, subject: 'x', body: 'y',
+      date: { dateTime: '2026-05-14T00:00:00Z' }, from: { name: 'Me' }, recipients: [],
+    });
+    setup(client);
+    await handlers.get('ofw_send_message')!({
+      subject: 'x', body: 'y', recipientIds: [1], myFileIDs: [50015547],
+    });
+    // After send, the attachment should now be linked to message 200
+    const { listAttachmentsForMessage } = await import('../../src/cache.js');
+    const atts = listAttachmentsForMessage(200);
+    expect(atts).toHaveLength(1);
+    expect(atts[0].fileId).toBe(50015547);
+  });
+});
+
 describe('ofw_download_attachment', () => {
   it('fetches metadata + bytes, writes file, returns path/mime/size', async () => {
     const client = new OFWClient();
@@ -752,10 +864,10 @@ describe('ofw_get_message attachments', () => {
 });
 
 describe('registerMessageTools', () => {
-  it('registers 10 message tools', () => {
+  it('registers 11 message tools', () => {
     const client = makeClient({});
     setup(client);
-    expect(handlers.size).toBe(10);
+    expect(handlers.size).toBe(11);
     expect(handlers.has('ofw_list_message_folders')).toBe(true);
     expect(handlers.has('ofw_list_messages')).toBe(true);
     expect(handlers.has('ofw_get_message')).toBe(true);
@@ -766,5 +878,6 @@ describe('registerMessageTools', () => {
     expect(handlers.has('ofw_get_unread_sent')).toBe(true);
     expect(handlers.has('ofw_sync_messages')).toBe(true);
     expect(handlers.has('ofw_download_attachment')).toBe(true);
+    expect(handlers.has('ofw_upload_attachment')).toBe(true);
   });
 });
