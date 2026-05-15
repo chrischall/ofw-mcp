@@ -6,6 +6,7 @@ const MOCK_TOKEN = 'test-token-abc';
 interface MockResponse {
   status: number;
   body?: unknown;
+  bytes?: Uint8Array;
   headers?: Record<string, string>;
 }
 
@@ -21,6 +22,7 @@ function mockFetch(responses: MockResponse[]) {
       headers: { get: (key: string) => headerMap[key.toLowerCase()] ?? null },
       json: async () => r.body,
       text: async () => JSON.stringify(r.body),
+      arrayBuffer: async () => (r.bytes ?? new Uint8Array()).buffer,
     } as unknown as Response;
   });
 }
@@ -260,5 +262,183 @@ describe('OFWClient', () => {
     const h = init.headers as Record<string, string>;
     expect(h['ofw-client']).toBe('WebApplication');
     expect(h['ofw-version']).toBe('1.0.0');
+  });
+});
+
+describe('OFWClient.requestBinary', () => {
+  beforeEach(() => {
+    process.env.OFW_USERNAME = 'test@example.com';
+    process.env.OFW_PASSWORD = 'testpass';
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const PNG_BYTES = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
+  it('returns body as Buffer with content-type and parsed filename', async () => {
+    mockFetch([
+      LOGIN_INIT,
+      LOGIN_SUCCESS,
+      { status: 200, bytes: PNG_BYTES, headers: {
+        'content-type': 'image/png',
+        'content-disposition': 'attachment; filename="kid.png"',
+      } },
+    ]);
+
+    const client = new OFWClient();
+    const r = await client.requestBinary('GET', '/pub/v1/myfiles/1/data');
+
+    expect(Buffer.isBuffer(r.body)).toBe(true);
+    expect(r.body.equals(Buffer.from(PNG_BYTES))).toBe(true);
+    expect(r.contentType).toBe('image/png');
+    expect(r.suggestedFileName).toBe('kid.png');
+  });
+
+  it('sends Authorization, ofw-* headers, and Accept: application/octet-stream', async () => {
+    const spy = mockFetch([
+      LOGIN_INIT,
+      LOGIN_SUCCESS,
+      { status: 200, bytes: PNG_BYTES },
+    ]);
+
+    const client = new OFWClient();
+    await client.requestBinary('GET', '/pub/v1/myfiles/1/data');
+
+    const init = spy.mock.calls[2][1] as RequestInit;
+    const h = init.headers as Record<string, string>;
+    expect(h['Authorization']).toBe(`Bearer ${MOCK_TOKEN}`);
+    expect(h['Accept']).toBe('application/octet-stream');
+    expect(h['ofw-client']).toBe('WebApplication');
+    expect(h['ofw-version']).toBe('1.0.0');
+    expect(h['Content-Type']).toBeUndefined();
+  });
+
+  it('re-logs in and retries on 401', async () => {
+    const spy = mockFetch([
+      LOGIN_INIT,
+      LOGIN_SUCCESS,
+      { status: 401, body: {} },
+      LOGIN_INIT,
+      { ...LOGIN_SUCCESS, body: { auth: 'new-token', redirectUrl: '/' } },
+      { status: 200, bytes: PNG_BYTES },
+    ]);
+
+    const client = new OFWClient();
+    const r = await client.requestBinary('GET', '/pub/v1/myfiles/1/data');
+    expect(r.body.length).toBe(PNG_BYTES.length);
+    expect(spy).toHaveBeenCalledTimes(6);
+  });
+
+  it('throws on a second 401', async () => {
+    mockFetch([
+      LOGIN_INIT,
+      LOGIN_SUCCESS,
+      { status: 401, body: {} },
+      LOGIN_INIT,
+      LOGIN_SUCCESS,
+      { status: 401, body: {} },
+    ]);
+
+    const client = new OFWClient();
+    await expect(client.requestBinary('GET', '/pub/v1/myfiles/1/data')).rejects.toThrow('401');
+  });
+
+  it('waits 2s and retries on 429', async () => {
+    vi.useFakeTimers();
+    const spy = mockFetch([
+      LOGIN_INIT,
+      LOGIN_SUCCESS,
+      { status: 429, body: {} },
+      { status: 200, bytes: PNG_BYTES },
+    ]);
+
+    const client = new OFWClient();
+    const promise = client.requestBinary('GET', '/pub/v1/myfiles/1/data');
+    await vi.advanceTimersByTimeAsync(2000);
+    const r = await promise;
+
+    expect(r.body.length).toBe(PNG_BYTES.length);
+    expect(spy).toHaveBeenCalledTimes(4);
+    vi.useRealTimers();
+  });
+
+  it('throws "Rate limited" on a second 429 (matches request() behavior)', async () => {
+    vi.useFakeTimers();
+    mockFetch([
+      LOGIN_INIT,
+      LOGIN_SUCCESS,
+      { status: 429, body: {} },
+      { status: 429, body: {} },
+    ]);
+
+    const client = new OFWClient();
+    const promise = client.requestBinary('GET', '/pub/v1/myfiles/1/data');
+    promise.catch(() => {});
+    await vi.advanceTimersByTimeAsync(2000);
+    await expect(promise).rejects.toThrow('Rate limited');
+    vi.useRealTimers();
+  });
+
+  it('throws on non-2xx response', async () => {
+    mockFetch([
+      LOGIN_INIT,
+      LOGIN_SUCCESS,
+      { status: 500, body: {} },
+    ]);
+
+    const client = new OFWClient();
+    await expect(client.requestBinary('GET', '/pub/v1/myfiles/1/data')).rejects.toThrow('500');
+  });
+
+  describe('Content-Disposition filename parsing', () => {
+    async function downloadWithCD(cd: string | undefined): Promise<string | null> {
+      const headers: Record<string, string> = { 'content-type': 'application/octet-stream' };
+      if (cd !== undefined) headers['content-disposition'] = cd;
+      mockFetch([
+        LOGIN_INIT,
+        LOGIN_SUCCESS,
+        { status: 200, bytes: new Uint8Array([1, 2, 3]), headers },
+      ]);
+      const client = new OFWClient();
+      const r = await client.requestBinary('GET', '/pub/v1/myfiles/1/data');
+      return r.suggestedFileName;
+    }
+
+    it('decodes RFC 6266 filename*=UTF-8\'\'percent-encoded', async () => {
+      expect(await downloadWithCD("attachment; filename*=UTF-8''Hello%20World.pdf")).toBe('Hello World.pdf');
+    });
+
+    it('decodes filename*= without the UTF-8\'\' prefix', async () => {
+      expect(await downloadWithCD('attachment; filename*=Hello%20World.pdf')).toBe('Hello World.pdf');
+    });
+
+    it('prefers filename*= over legacy filename=', async () => {
+      expect(await downloadWithCD(
+        'attachment; filename="legacy.pdf"; filename*=UTF-8\'\'fancy%20name.pdf',
+      )).toBe('fancy name.pdf');
+    });
+
+    it('matches legacy quoted filename', async () => {
+      expect(await downloadWithCD('attachment; filename="legacy file.pdf"')).toBe('legacy file.pdf');
+    });
+
+    it('matches legacy unquoted filename', async () => {
+      expect(await downloadWithCD('attachment; filename=legacy.pdf')).toBe('legacy.pdf');
+    });
+
+    it('falls back to the raw value when filename*= has broken percent-encoding', async () => {
+      // %ZZ is invalid → decodeURIComponent throws → we keep the raw token.
+      expect(await downloadWithCD("attachment; filename*=UTF-8''bad%ZZname.pdf")).toBe('bad%ZZname.pdf');
+    });
+
+    it('returns null when there is no Content-Disposition header', async () => {
+      expect(await downloadWithCD(undefined)).toBeNull();
+    });
+
+    it('returns null when Content-Disposition has no filename', async () => {
+      expect(await downloadWithCD('attachment')).toBeNull();
+    });
   });
 });

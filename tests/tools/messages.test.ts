@@ -943,6 +943,82 @@ describe('ofw_download_attachment', () => {
     }
   });
 
+  it('inline:true falls through to a network fetch when the on-disk copy is missing', async () => {
+    const client = new OFWClient();
+    const bytes = Buffer.from('fresh-bytes', 'utf8');
+    vi.spyOn(client, 'request').mockResolvedValueOnce({
+      fileId: 77, fileName: 'gone.txt', label: 'gone.txt',
+      fileType: 'text/plain', fileSize: bytes.length,
+    });
+    const binSpy = vi.spyOn(client, 'requestBinary')
+      .mockResolvedValueOnce({ body: bytes, contentType: 'text/plain', suggestedFileName: 'gone.txt' })
+      .mockResolvedValueOnce({ body: bytes, contentType: 'text/plain', suggestedFileName: 'gone.txt' });
+    setup(client);
+
+    const dir = mkdtempSync(join(tmpdir(), 'ofw-dl-'));
+    try {
+      // Populate downloadedPath in the attachment cache, then delete the actual file.
+      const first = await handlers.get('ofw_download_attachment')!({ fileId: 77, saveTo: dir + '/' });
+      const path = JSON.parse(first.content[0].text).path;
+      rmSync(path);
+
+      // Inline mode should detect the missing file and re-fetch from the network.
+      const result = await handlers.get('ofw_download_attachment')!({ fileId: 77, inline: true });
+      expect(binSpy).toHaveBeenCalledTimes(2);
+      const res = result.content[1];
+      expect(res.type).toBe('resource');
+      expect(Buffer.from(res.resource.blob, 'base64').equals(bytes)).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('inline:true falls back to cached mime/filename when the server omits Content-Type/Disposition', async () => {
+    const client = new OFWClient();
+    const bytes = Buffer.from('%PDF-1.4 fake', 'utf8');
+    vi.spyOn(client, 'request').mockResolvedValueOnce({
+      fileId: 88, fileName: 'cached.pdf', label: 'cached.pdf',
+      fileType: 'application/pdf', fileSize: bytes.length,
+    });
+    vi.spyOn(client, 'requestBinary').mockResolvedValueOnce({
+      body: bytes, contentType: null, suggestedFileName: null,
+    });
+    setup(client);
+
+    const result = await handlers.get('ofw_download_attachment')!({ fileId: 88, inline: true });
+    const meta = JSON.parse(result.content[0].text);
+    expect(meta.mimeType).toBe('application/pdf');
+    expect(meta.fileName).toBe('cached.pdf');
+    const res = result.content[1];
+    expect(res.type).toBe('resource');
+    expect(res.resource.mimeType).toBe('application/pdf');
+    expect(res.resource.uri).toBe('ofw://attachment/88/cached.pdf');
+  });
+
+  it('disk mode falls back to cached mime/filename when the server omits Content-Type/Disposition', async () => {
+    const client = new OFWClient();
+    const bytes = Buffer.from('zipdata', 'utf8');
+    vi.spyOn(client, 'request').mockResolvedValueOnce({
+      fileId: 89, fileName: 'archive.zip', label: 'archive.zip',
+      fileType: 'application/zip', fileSize: bytes.length,
+    });
+    vi.spyOn(client, 'requestBinary').mockResolvedValueOnce({
+      body: bytes, contentType: null, suggestedFileName: null,
+    });
+    setup(client);
+
+    const dir = mkdtempSync(join(tmpdir(), 'ofw-dl-'));
+    try {
+      const result = await handlers.get('ofw_download_attachment')!({ fileId: 89, saveTo: dir + '/' });
+      const parsed = JSON.parse(result.content[0].text);
+      expect(parsed.mimeType).toBe('application/zip');
+      expect(parsed.fileName).toBe('archive.zip');
+      expect(parsed.path.endsWith('89-archive.zip')).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('skips re-download when the file is already at the same path (no force)', async () => {
     const client = new OFWClient();
     const reqSpy = vi.spyOn(client, 'request').mockResolvedValueOnce({
