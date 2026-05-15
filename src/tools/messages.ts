@@ -447,11 +447,11 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
   });
 
   server.registerTool('ofw_download_attachment', {
-    description: 'Download an OFW message attachment by fileId. Bytes are saved to disk; the tool returns the absolute path, mime type, and size so the caller can then read/analyze the file. fileId comes from the attachments array on ofw_get_message. Saves under ~/.cache/ofw-mcp/attachments/<hash>/ by default (override via OFW_ATTACHMENTS_DIR or the saveTo argument). Re-downloading is a no-op if the file is already on disk.',
+    description: 'Download an OFW message attachment by fileId. Bytes are saved to disk; the tool returns the absolute path, mime type, and size so the caller can then read/analyze the file. fileId comes from the attachments array on ofw_get_message. Saves under ~/Downloads/ofw-mcp/ by default — a user-accessible location so sandboxed MCP hosts (e.g. Claude Desktop) can read the file back. Override with OFW_ATTACHMENTS_DIR or the saveTo argument. Re-downloading is a no-op if the file is already on disk.',
     annotations: { readOnlyHint: false },
     inputSchema: {
       fileId: z.number().describe('Attachment file id (from ofw_get_message → attachments[].fileId)'),
-      saveTo: z.string().describe('Absolute path or directory to write to. If a directory, the OFW filename is used. Default: ~/.cache/ofw-mcp/attachments/<hash>/<fileId>-<filename>').optional(),
+      saveTo: z.string().describe('Absolute path or directory to write to. If a directory, the OFW filename is used. Default: ~/Downloads/ofw-mcp/<fileId>-<filename>').optional(),
       force: z.boolean().describe('Re-download even if already on disk. Default false.').optional(),
     },
   }, async (args) => {

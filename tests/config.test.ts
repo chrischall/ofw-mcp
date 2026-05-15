@@ -1,8 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { getCacheDbPath } from '../src/config.js';
+import { getAttachmentsDir, getCacheDbPath } from '../src/config.js';
 
 describe('getCacheDbPath', () => {
   let tmp: string;
@@ -46,5 +46,28 @@ describe('getCacheDbPath', () => {
   it('throws if OFW_USERNAME is not set', () => {
     delete process.env.OFW_USERNAME;
     expect(() => getCacheDbPath()).toThrow(/OFW_USERNAME/);
+  });
+});
+
+describe('getAttachmentsDir', () => {
+  let originalAttachmentsDir: string | undefined;
+
+  beforeEach(() => {
+    originalAttachmentsDir = process.env.OFW_ATTACHMENTS_DIR;
+    delete process.env.OFW_ATTACHMENTS_DIR;
+  });
+
+  afterEach(() => {
+    if (originalAttachmentsDir === undefined) delete process.env.OFW_ATTACHMENTS_DIR;
+    else process.env.OFW_ATTACHMENTS_DIR = originalAttachmentsDir;
+  });
+
+  it('defaults to ~/Downloads/ofw-mcp so sandboxed MCP hosts can read the file', () => {
+    expect(getAttachmentsDir()).toBe(join(homedir(), 'Downloads', 'ofw-mcp'));
+  });
+
+  it('honors OFW_ATTACHMENTS_DIR override', () => {
+    process.env.OFW_ATTACHMENTS_DIR = '/custom/attachments';
+    expect(getAttachmentsDir()).toBe('/custom/attachments');
   });
 });

@@ -25,8 +25,10 @@ export function getCacheDbPath(): string {
 export function getAttachmentsDir(): string {
   const override = process.env.OFW_ATTACHMENTS_DIR;
   if (override && override.trim().length > 0) return override.trim();
-  // Sibling to the cache db: ~/.cache/ofw-mcp/attachments/<hash>/
-  const username = readUsername();
-  const hash = createHash('sha256').update(username).digest('hex').slice(0, 16);
-  return join(getCacheDir(), 'attachments', hash);
+  // Default to ~/Downloads/ofw-mcp/ — the cache dir (~/.cache/...) is hidden and
+  // typically outside the filesystem allowlist of sandboxed MCP hosts like
+  // Claude Desktop, so files written there are unreadable to the model that
+  // just downloaded them. Downloads is the standard "user-accessible files"
+  // location across macOS/Linux/Windows.
+  return join(homedir(), 'Downloads', 'ofw-mcp');
 }
