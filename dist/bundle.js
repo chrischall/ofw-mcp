@@ -31962,12 +31962,13 @@ ${text}` : text;
     }, null, 2) }] };
   });
   server2.registerTool("ofw_download_attachment", {
-    description: "Download an OFW message attachment by fileId. Bytes are saved to disk; the tool returns the absolute path, mime type, and size so the caller can then read/analyze the file. fileId comes from the attachments array on ofw_get_message. Saves under ~/Downloads/ofw-mcp/ by default \u2014 a user-accessible location so sandboxed MCP hosts (e.g. Claude Desktop) can read the file back. Override with OFW_ATTACHMENTS_DIR or the saveTo argument. Re-downloading is a no-op if the file is already on disk.",
+    description: "Download an OFW message attachment by fileId. By default, bytes are saved to disk (~/Downloads/ofw-mcp/) and the response carries the absolute path, mime type, and size for the caller to read back. Pass inline:true to skip disk entirely and return the bytes as MCP content blocks \u2014 images come back as ImageContent (the model sees them directly); other files come back as an EmbeddedResource blob. Use inline for small files where you want the model to read content immediately and the host is sandboxed; use disk for large files or when you want a persistent local copy. fileId comes from attachments[].fileId on ofw_get_message. Override disk destination with OFW_ATTACHMENTS_DIR or saveTo. Re-downloading to the same path is a no-op (disk mode only).",
     annotations: { readOnlyHint: false },
     inputSchema: {
       fileId: external_exports.number().describe("Attachment file id (from ofw_get_message \u2192 attachments[].fileId)"),
-      saveTo: external_exports.string().describe("Absolute path or directory to write to. If a directory, the OFW filename is used. Default: ~/Downloads/ofw-mcp/<fileId>-<filename>").optional(),
-      force: external_exports.boolean().describe("Re-download even if already on disk. Default false.").optional()
+      inline: external_exports.boolean().describe("If true, return bytes inline as MCP content (image for image/*, embedded resource blob otherwise) and skip the disk write. Default false (writes to disk).").optional(),
+      saveTo: external_exports.string().describe("Absolute path or directory to write to. If a directory, the OFW filename is used. Default: ~/Downloads/ofw-mcp/<fileId>-<filename>. Ignored when inline:true.").optional(),
+      force: external_exports.boolean().describe("Re-download even if already on disk. Default false. Ignored when inline:true (inline always fetches fresh bytes, or reuses an on-disk copy if present).").optional()
     }
   }, async (args) => {
     const fileId = args.fileId;
@@ -31986,6 +31987,44 @@ ${text}` : text;
       });
       cached2 = getAttachment(fileId);
       if (!cached2) throw new Error(`failed to fetch metadata for fileId ${fileId}`);
+    }
+    if (args.inline) {
+      let bytes;
+      let mimeType;
+      let fileName;
+      if (cached2.downloadedPath) {
+        try {
+          bytes = readFileSync(cached2.downloadedPath);
+          mimeType = cached2.mimeType;
+          fileName = cached2.fileName;
+        } catch {
+          const response2 = await client2.requestBinary("GET", `/pub/v1/myfiles/${fileId}/data`);
+          bytes = response2.body;
+          mimeType = response2.contentType ?? cached2.mimeType;
+          fileName = response2.suggestedFileName ?? cached2.fileName;
+        }
+      } else {
+        const response2 = await client2.requestBinary("GET", `/pub/v1/myfiles/${fileId}/data`);
+        bytes = response2.body;
+        mimeType = response2.contentType ?? cached2.mimeType;
+        fileName = response2.suggestedFileName ?? cached2.fileName;
+      }
+      const base643 = bytes.toString("base64");
+      const metaBlock = { type: "text", text: JSON.stringify({
+        fileId,
+        fileName,
+        mimeType,
+        sizeBytes: bytes.length,
+        mode: "inline"
+      }, null, 2) };
+      if (mimeType.startsWith("image/")) {
+        return { content: [metaBlock, { type: "image", data: base643, mimeType }] };
+      }
+      return { content: [metaBlock, { type: "resource", resource: {
+        uri: `ofw://attachment/${fileId}/${encodeURIComponent(fileName)}`,
+        mimeType,
+        blob: base643
+      } }] };
     }
     let dest;
     if (args.saveTo) {

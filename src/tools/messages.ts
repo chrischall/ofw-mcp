@@ -447,12 +447,13 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
   });
 
   server.registerTool('ofw_download_attachment', {
-    description: 'Download an OFW message attachment by fileId. Bytes are saved to disk; the tool returns the absolute path, mime type, and size so the caller can then read/analyze the file. fileId comes from the attachments array on ofw_get_message. Saves under ~/Downloads/ofw-mcp/ by default — a user-accessible location so sandboxed MCP hosts (e.g. Claude Desktop) can read the file back. Override with OFW_ATTACHMENTS_DIR or the saveTo argument. Re-downloading is a no-op if the file is already on disk.',
+    description: 'Download an OFW message attachment by fileId. By default, bytes are saved to disk (~/Downloads/ofw-mcp/) and the response carries the absolute path, mime type, and size for the caller to read back. Pass inline:true to skip disk entirely and return the bytes as MCP content blocks — images come back as ImageContent (the model sees them directly); other files come back as an EmbeddedResource blob. Use inline for small files where you want the model to read content immediately and the host is sandboxed; use disk for large files or when you want a persistent local copy. fileId comes from attachments[].fileId on ofw_get_message. Override disk destination with OFW_ATTACHMENTS_DIR or saveTo. Re-downloading to the same path is a no-op (disk mode only).',
     annotations: { readOnlyHint: false },
     inputSchema: {
       fileId: z.number().describe('Attachment file id (from ofw_get_message → attachments[].fileId)'),
-      saveTo: z.string().describe('Absolute path or directory to write to. If a directory, the OFW filename is used. Default: ~/Downloads/ofw-mcp/<fileId>-<filename>').optional(),
-      force: z.boolean().describe('Re-download even if already on disk. Default false.').optional(),
+      inline: z.boolean().describe('If true, return bytes inline as MCP content (image for image/*, embedded resource blob otherwise) and skip the disk write. Default false (writes to disk).').optional(),
+      saveTo: z.string().describe('Absolute path or directory to write to. If a directory, the OFW filename is used. Default: ~/Downloads/ofw-mcp/<fileId>-<filename>. Ignored when inline:true.').optional(),
+      force: z.boolean().describe('Re-download even if already on disk. Default false. Ignored when inline:true (inline always fetches fresh bytes, or reuses an on-disk copy if present).').optional(),
     },
   }, async (args) => {
     const fileId = args.fileId;
@@ -475,6 +476,44 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
       });
       cached = getAttachment(fileId);
       if (!cached) throw new Error(`failed to fetch metadata for fileId ${fileId}`);
+    }
+
+    // Inline mode: return bytes as MCP content, no disk write.
+    if (args.inline) {
+      // Reuse on-disk bytes if we already have them, otherwise fetch fresh.
+      let bytes: Buffer;
+      let mimeType: string;
+      let fileName: string;
+      if (cached.downloadedPath) {
+        try {
+          bytes = readFileSync(cached.downloadedPath);
+          mimeType = cached.mimeType;
+          fileName = cached.fileName;
+        } catch {
+          // On-disk copy went missing — fall through to a network fetch.
+          const response = await client.requestBinary('GET', `/pub/v1/myfiles/${fileId}/data`);
+          bytes = response.body;
+          mimeType = response.contentType ?? cached.mimeType;
+          fileName = response.suggestedFileName ?? cached.fileName;
+        }
+      } else {
+        const response = await client.requestBinary('GET', `/pub/v1/myfiles/${fileId}/data`);
+        bytes = response.body;
+        mimeType = response.contentType ?? cached.mimeType;
+        fileName = response.suggestedFileName ?? cached.fileName;
+      }
+      const base64 = bytes.toString('base64');
+      const metaBlock = { type: 'text' as const, text: JSON.stringify({
+        fileId, fileName, mimeType, sizeBytes: bytes.length, mode: 'inline',
+      }, null, 2) };
+      if (mimeType.startsWith('image/')) {
+        return { content: [metaBlock, { type: 'image' as const, data: base64, mimeType }] };
+      }
+      return { content: [metaBlock, { type: 'resource' as const, resource: {
+        uri: `ofw://attachment/${fileId}/${encodeURIComponent(fileName)}`,
+        mimeType,
+        blob: base64,
+      } }] };
     }
 
     // Decide destination path
