@@ -32154,7 +32154,7 @@ process.emit = function(event, ...args) {
   }
   return originalEmit(event, ...args);
 };
-var server = new McpServer({ name: "ofw", version: "2.0.12" });
+var server = new McpServer({ name: "ofw", version: "2.0.13" });
 registerUserTools(server, client);
 registerMessageTools(server, client);
 registerCalendarTools(server, client);
