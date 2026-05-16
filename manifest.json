@@ -36,7 +36,9 @@
       ],
       "env": {
         "OFW_USERNAME": "${user_config.ofw_username}",
-        "OFW_PASSWORD": "${user_config.ofw_password}"
+        "OFW_PASSWORD": "${user_config.ofw_password}",
+        "OFW_INLINE_ATTACHMENTS": "${user_config.ofw_inline_attachments}",
+        "OFW_ATTACHMENTS_DIR": "${user_config.ofw_attachments_dir}"
       }
     }
   },
@@ -53,6 +55,19 @@
       "description": "Your OurFamilyWizard password",
       "required": true,
       "sensitive": true
+    },
+    "ofw_inline_attachments": {
+      "type": "boolean",
+      "title": "Return attachments inline",
+      "description": "When on, ofw_download_attachment returns bytes inline as MCP content (images render directly; other files come back as embedded resources) instead of writing to disk. Recommended for sandboxed hosts like Claude Desktop where the model cannot read files written to ~/Downloads. Callers can still override per-call via the tool's `inline` argument.",
+      "required": false,
+      "default": false
+    },
+    "ofw_attachments_dir": {
+      "type": "directory",
+      "title": "Attachments download directory",
+      "description": "Directory where ofw_download_attachment writes files when not returning inline. Defaults to ~/Downloads/ofw-mcp/. Pick a directory that is readable by your MCP host.",
+      "required": false
     }
   },
   "tools": [
@@ -91,6 +106,18 @@
     {
       "name": "ofw_delete_draft",
       "description": "Delete a draft"
+    },
+    {
+      "name": "ofw_get_unread_sent",
+      "description": "List sent messages the co-parent has not yet viewed"
+    },
+    {
+      "name": "ofw_upload_attachment",
+      "description": "Upload a file from disk to use as an attachment on a message or draft"
+    },
+    {
+      "name": "ofw_download_attachment",
+      "description": "Download a message attachment by fileId — returns bytes inline or writes to disk"
     },
     {
       "name": "ofw_sync_messages",
