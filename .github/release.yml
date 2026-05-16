@@ -1,0 +1,48 @@
+# Configuration for GitHub's auto-generated release notes.
+# Honored by softprops/action-gh-release when generate_release_notes: true,
+# and by the GitHub web UI when drafting release notes.
+# Docs: https://docs.github.com/en/repositories/releasing-projects-on-github/automatically-generated-release-notes/automatically-generated-release-notes#configuration-options
+#
+# Only PRs merged into the default branch appear in release notes — direct
+# pushes to main (e.g. the Tag & Bump bot) are not listed. Apply one of the
+# labels below to every PR so it lands in the right section.
+changelog:
+  exclude:
+    labels:
+      - ignore-for-release
+    authors:
+      - dependabot
+      - dependabot[bot]
+      - github-actions
+      - github-actions[bot]
+  categories:
+    - title: Features
+      labels:
+        - enhancement
+        - feature
+    - title: Bug Fixes
+      labels:
+        - bug
+        - fix
+    - title: Security
+      labels:
+        - security
+    - title: Refactor
+      labels:
+        - refactor
+    - title: Documentation
+      labels:
+        - documentation
+    - title: Tests
+      labels:
+        - test
+    - title: Dependencies
+      labels:
+        - dependencies
+    - title: CI & Build
+      labels:
+        - ci
+        - github_actions
+    - title: Other Changes
+      labels:
+        - "*"
