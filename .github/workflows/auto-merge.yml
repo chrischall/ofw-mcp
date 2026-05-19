@@ -1,0 +1,37 @@
+name: Auto-merge PRs
+
+# Arm auto-merge on every non-draft PR from the repo owner or dependabot.
+# The actual merge still waits for branch protection's required status
+# check, so this is "merge as soon as CI is green," not "merge without
+# CI."
+#
+# pull_request_target is used (not pull_request) so dependabot PRs can
+# also enable auto-merge — dependabot's pull_request token is restricted.
+# Safe because we never check out or execute PR code; we only call the
+# GitHub API via the gh CLI.
+
+on:
+  pull_request_target:
+    types: [opened, reopened, ready_for_review, synchronize]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: auto-merge-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  enable-auto-merge:
+    runs-on: ubuntu-latest
+    if: |
+      github.event.pull_request.draft == false &&
+      (github.event.pull_request.user.login == github.repository_owner ||
+       github.event.pull_request.user.login == 'dependabot[bot]')
+    steps:
+      - name: Enable auto-merge via gh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: gh pr merge --auto --merge "$PR_URL"
