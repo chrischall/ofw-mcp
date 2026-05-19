@@ -69,8 +69,18 @@ jobs:
           npx @anthropic-ai/mcpb pack
           mv ofw-mcp.mcpb "ofw-mcp-${VERSION}.mcpb"
 
+      # Idempotent: skip if this version is already on the registry, so the
+      # workflow can be re-run safely on the same tag (e.g. after a flaky
+      # downstream publish step).
       - name: Publish to npm
-        run: npm publish --access public --provenance
+        run: |
+          PKG=$(node -p "require('./package.json').name")
+          PUBLISHED=$(npm view "${PKG}@${VERSION}" version 2>/dev/null || true)
+          if [ "$PUBLISHED" = "$VERSION" ]; then
+            echo "npm already has ${PKG}@${VERSION} — skipping publish."
+            exit 0
+          fi
+          npm publish --access public --provenance
 
       # ─── modelcontextprotocol/registry (PulseMCP auto-ingests weekly) ───
       - name: Install mcp-publisher
