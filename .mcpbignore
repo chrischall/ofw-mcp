@@ -1,31 +1,69 @@
-# Source — dist/ is all that's needed at runtime
+# Keep the .mcpb lean — the esbuild bundle at dist/bundle.js is self-contained
+# and is the only thing the host runs. Ship just three files:
+#   - manifest.json    (declared entry point + user config)
+#   - dist/bundle.js   (the bundle itself)
+#   - package.json     ({"type":"module"} is required for Node to read bundle.js as ESM)
+
+# Dependencies — already inlined into dist/bundle.js by esbuild
+node_modules/
+
+# Source (TypeScript + tests) — not executed at runtime
 src/
 tests/
+*.test.ts
+*.spec.ts
 
-# Dev tooling
-node_modules/
-coverage/
+# tsc emits one .js per .ts alongside the bundle — those aren't referenced
+dist/*
+!dist/bundle.js
+
+# Build config / dev tooling
 tsconfig.json
 vitest.config.ts
-*.skill
+package-lock.json
+esbuild.config.*
 
-# Plugin/marketplace files (not needed in the bundle)
-.claude-plugin/
-skills/
-plugin.json
-.mcp.json
+# Reports & build artifacts
+coverage/
+*.tsbuildinfo
+*.map
 
-# Docs/specs (dev artifacts)
+# Docs & planning
 docs/
+README.md
+CLAUDE.md
+.env.example
+*.yaml
+*.yml
 
-# GitHub/CI
+# Registry / plugin / skill manifests (not used at runtime)
+server.json
+plugin.json
+.claude-plugin/
+.mcp.json
+SKILL.md
+skills/
+
+# Companion native bits (e.g. Chrome extension) are installed separately
+extension/
+
+# Repo-local maintenance scripts
+scripts/
+
+# CI / local tooling
 .github/
-
-# Local config
 .claude/
+
+# Runtime secrets
 .env
 .env.*
 
-# Git
-.git/
-.gitignore
+# Editor / OS noise
+.DS_Store
+*.log
+.vscode/
+.idea/
+
+# Don't recursively pack the bundle into itself
+*.mcpb
+*.skill
