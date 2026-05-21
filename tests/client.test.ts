@@ -147,10 +147,13 @@ describe('OFWClient', () => {
     vi.useRealTimers();
   });
 
-  it('throws if credentials are missing', async () => {
+  it('throws if credentials are missing and fetchproxy is disabled', async () => {
     delete process.env.OFW_USERNAME;
+    delete process.env.OFW_PASSWORD;
+    process.env.OFW_DISABLE_FETCHPROXY = '1';
     const client = new OFWClient();
     await expect(client.request('GET', '/pub/v1/test')).rejects.toThrow('OFW_USERNAME');
+    delete process.env.OFW_DISABLE_FETCHPROXY;
   });
 
   it('throws if login POST returns non-2xx', async () => {

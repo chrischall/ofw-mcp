@@ -1,5 +1,6 @@
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
+import { resolveAuth } from './auth.js';
 
 // Load .env for local dev; silently skip if dotenv is unavailable (e.g. mcpb bundle)
 try {
@@ -10,32 +11,12 @@ try {
   // not available — rely on process.env (mcpb sets credentials via mcp_config.env)
 }
 
-/**
- * Read an env var, trim whitespace, and treat as unset if blank or if the value
- * looks like an unsubstituted shell placeholder (e.g. `${FOO}`) — defends
- * against MCP hosts that pass .mcp.json env blocks through unexpanded.
- */
-function readVar(key: string): string | undefined {
-  const raw = process.env[key];
-  if (typeof raw !== 'string') return undefined;
-  const trimmed = raw.trim();
-  if (trimmed.length === 0) return undefined;
-  if (trimmed === 'undefined' || trimmed === 'null') return undefined;
-  if (/^\$\{[^}]*\}$/.test(trimmed)) return undefined;
-  return trimmed;
-}
-
 const BASE_URL = 'https://ofw.ourfamilywizard.com';
 
 const OFW_PROTOCOL_HEADERS = {
   'ofw-client': 'WebApplication',
   'ofw-version': '1.0.0',
 } as const;
-
-interface LoginResponse {
-  auth: string; // Bearer token for all subsequent API calls
-  redirectUrl: string;
-}
 
 export interface BinaryResponse {
   body: Buffer;
@@ -126,53 +107,18 @@ export class OFWClient {
     await this.login();
   }
 
+  // Auth resolution is delegated to `./auth.ts`. This client doesn't care
+  // whether the token came from a password POST or from a one-shot
+  // fetchproxy session-snapshot — it just consumes the result.
+  //
+  // If `expiresAt` is missing (the fetchproxy path on a tab whose
+  // browser didn't persist tokenExpiry), we fall back to the same 6h
+  // estimate the password path uses. The 401-replay path covers us if
+  // the estimate is wrong.
   private async login(): Promise<void> {
-    const username = readVar('OFW_USERNAME');
-    const password = readVar('OFW_PASSWORD');
-    if (!username || !password) {
-      throw new Error('OFW_USERNAME and OFW_PASSWORD must be set');
-    }
-
-    // Spring Security requires a SESSION cookie before accepting the login POST.
-    // GET /ofw/login.form with redirect:manual to capture the Set-Cookie from the 303 response.
-    const initResponse = await fetch(`${BASE_URL}/ofw/login.form`, {
-      headers: { ...OFW_PROTOCOL_HEADERS },
-      redirect: 'manual',
-    });
-    // Extract just the SESSION=value part (strip attributes like Path, Secure, etc.)
-    const setCookie = initResponse.headers.get('set-cookie') ?? '';
-    const sessionCookie = setCookie.split(';')[0];
-
-    const response = await fetch(`${BASE_URL}/ofw/login`, {
-      method: 'POST',
-      headers: {
-        ...OFW_PROTOCOL_HEADERS,
-        Accept: 'application/json',
-        'Content-Type': 'application/x-www-form-urlencoded',
-        ...(sessionCookie ? { Cookie: sessionCookie } : {}),
-      },
-      body: new URLSearchParams({
-        submit: 'Sign In',
-        _eventId: 'submit',
-        username,
-        password,
-      }).toString(),
-    });
-
-    if (!response.ok) {
-      throw new Error(`OFW login failed: ${response.status} ${response.statusText}`);
-    }
-
-    const contentType = response.headers.get('content-type') ?? '';
-    if (!contentType.includes('application/json')) {
-      const body = await response.text();
-      throw new Error(`OFW login returned unexpected response (${contentType}): ${body.substring(0, 200)}`);
-    }
-
-    const data = (await response.json()) as LoginResponse;
-    this.token = data.auth;
-    // Token expiry not returned by login endpoint; use 6h as a safe default
-    this.tokenExpiry = new Date(Date.now() + 6 * 60 * 60 * 1000);
+    const { token, expiresAt } = await resolveAuth();
+    this.token = token;
+    this.tokenExpiry = expiresAt ?? new Date(Date.now() + 6 * 60 * 60 * 1000);
   }
 
   private isTokenExpiredSoon(): boolean {

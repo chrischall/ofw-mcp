@@ -8,13 +8,16 @@ describe('getCacheDbPath', () => {
   let tmp: string;
   let originalCacheDir: string | undefined;
   let originalUsername: string | undefined;
+  let originalIdentity: string | undefined;
 
   beforeEach(() => {
     tmp = mkdtempSync(join(tmpdir(), 'ofw-cache-'));
     originalCacheDir = process.env.OFW_CACHE_DIR;
     originalUsername = process.env.OFW_USERNAME;
+    originalIdentity = process.env.OFW_CACHE_IDENTITY;
     process.env.OFW_CACHE_DIR = tmp;
     process.env.OFW_USERNAME = 'test@example.com';
+    delete process.env.OFW_CACHE_IDENTITY;
   });
 
   afterEach(() => {
@@ -22,6 +25,8 @@ describe('getCacheDbPath', () => {
     else process.env.OFW_CACHE_DIR = originalCacheDir;
     if (originalUsername === undefined) delete process.env.OFW_USERNAME;
     else process.env.OFW_USERNAME = originalUsername;
+    if (originalIdentity === undefined) delete process.env.OFW_CACHE_IDENTITY;
+    else process.env.OFW_CACHE_IDENTITY = originalIdentity;
     rmSync(tmp, { recursive: true, force: true });
   });
 
@@ -43,9 +48,30 @@ describe('getCacheDbPath', () => {
     expect(a).not.toBe(b);
   });
 
-  it('throws if OFW_USERNAME is not set', () => {
+  it('uses OFW_CACHE_IDENTITY when set (fetchproxy-only auth, no username)', () => {
     delete process.env.OFW_USERNAME;
-    expect(() => getCacheDbPath()).toThrow(/OFW_USERNAME/);
+    process.env.OFW_CACHE_IDENTITY = 'browser-session';
+    const path = getCacheDbPath();
+    const filename = path.slice(tmp.length + 1);
+    expect(filename).toMatch(/^[0-9a-f]{16}\.db$/);
+  });
+
+  it('prefers OFW_CACHE_IDENTITY over OFW_USERNAME when both are set', () => {
+    process.env.OFW_USERNAME = 'me@example.com';
+    process.env.OFW_CACHE_IDENTITY = 'override';
+    const a = getCacheDbPath();
+    delete process.env.OFW_CACHE_IDENTITY;
+    const b = getCacheDbPath();
+    expect(a).not.toBe(b);
+  });
+
+  it('falls back to "_default" when neither OFW_USERNAME nor OFW_CACHE_IDENTITY is set', () => {
+    delete process.env.OFW_USERNAME;
+    // Single-user fetchproxy install: cache is keyed on the placeholder.
+    // Multi-account users should set OFW_CACHE_IDENTITY explicitly.
+    expect(() => getCacheDbPath()).not.toThrow();
+    const path = getCacheDbPath();
+    expect(path.startsWith(tmp)).toBe(true);
   });
 });
 
