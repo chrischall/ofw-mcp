@@ -34493,13 +34493,14 @@ import { dirname, join as join2 } from "path";
 import { fileURLToPath } from "url";
 
 // node_modules/@fetchproxy/protocol/dist/frames.js
-var PROTOCOL_VERSION = 1;
+var PROTOCOL_VERSION = 2;
 var KNOWN_CAPABILITIES = /* @__PURE__ */ new Set([
   "fetch",
   "read_cookies",
   "read_local_storage",
   "read_session_storage",
-  "capture_request_header"
+  "capture_request_header",
+  "read_indexed_db"
 ]);
 
 // node_modules/@fetchproxy/protocol/dist/mcp-id.js
@@ -34523,6 +34524,40 @@ function randomHex(bytes) {
   return Array.from(arr, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+// node_modules/@fetchproxy/protocol/dist/json-pointer.js
+function matchesDeclaredKey(requested, declared) {
+  for (const decl of declared) {
+    if (!decl.endsWith("*")) {
+      if (decl === requested)
+        return true;
+      continue;
+    }
+    const prefix = decl.slice(0, -1);
+    if (requested.length > prefix.length && requested.startsWith(prefix)) {
+      return true;
+    }
+  }
+  return false;
+}
+function undeclaredKeys(requested, declared) {
+  return requested.filter((k) => !matchesDeclaredKey(k, declared));
+}
+function isValidJsonPointer(pointer) {
+  if (pointer === "")
+    return true;
+  if (!pointer.startsWith("/"))
+    return false;
+  for (let i = 0; i < pointer.length; i++) {
+    if (pointer[i] === "~") {
+      const next = pointer[i + 1];
+      if (next !== "0" && next !== "1")
+        return false;
+      i++;
+    }
+  }
+  return true;
+}
+
 // node_modules/@fetchproxy/protocol/dist/validate.js
 var ProtocolError = class extends Error {
   constructor(message) {
@@ -34533,6 +34568,7 @@ var ProtocolError = class extends Error {
 var FORBIDDEN_KEYS = /* @__PURE__ */ new Set(["__proto__", "constructor", "prototype"]);
 var BASE64_RE = /^[A-Za-z0-9+/]*={0,2}$/;
 var SCOPE_KEY_RE = /^[A-Za-z0-9_.\-]{1,256}$/;
+var SCOPE_KEY_GLOB_RE = /^[A-Za-z0-9_.\-]{1,255}\*?$/;
 var HEADER_NAME_RE = /^[A-Za-z0-9_\-]{1,128}$/;
 var HOSTNAME_RE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$/i;
 function assertObject(x, label) {
@@ -34602,7 +34638,7 @@ function assertScopeKeyArray(value, label) {
     if (typeof k !== "string") {
       throw new ProtocolError(`${label}: entry must be string, got ${typeof k}`);
     }
-    if (!SCOPE_KEY_RE.test(k)) {
+    if (!SCOPE_KEY_GLOB_RE.test(k)) {
       throw new ProtocolError(`${label}: invalid key ${JSON.stringify(k)}`);
     }
     if (seen.has(k)) {
@@ -34642,6 +34678,93 @@ function assertCaptureHeadersArray(value, label) {
     seen.add(key);
     for (const k of Object.keys(entry)) {
       if (k !== "urlPattern" && k !== "headerName") {
+        throw new ProtocolError(`${label}[${i}]: unexpected field ${JSON.stringify(k)}`);
+      }
+    }
+  }
+}
+function assertStoragePointersArray(value, label, declaredKeys) {
+  if (!Array.isArray(value)) {
+    throw new ProtocolError(`${label}: expected array, got ${typeof value}`);
+  }
+  const seen = /* @__PURE__ */ new Set();
+  for (let i = 0; i < value.length; i++) {
+    const entry = value[i];
+    assertObject(entry, `${label}[${i}]`);
+    if (entry.key === void 0) {
+      throw new ProtocolError(`${label}[${i}].key: missing`);
+    }
+    if (entry.jsonPointer === void 0) {
+      throw new ProtocolError(`${label}[${i}].jsonPointer: missing`);
+    }
+    if (typeof entry.key !== "string" || !SCOPE_KEY_GLOB_RE.test(entry.key)) {
+      throw new ProtocolError(`${label}[${i}].key: invalid key ${JSON.stringify(entry.key)}`);
+    }
+    if (typeof entry.jsonPointer !== "string" || !isValidJsonPointer(entry.jsonPointer)) {
+      throw new ProtocolError(`${label}[${i}].jsonPointer: invalid pointer ${JSON.stringify(entry.jsonPointer)}`);
+    }
+    if (declaredKeys && !declaredKeys.includes(entry.key)) {
+      throw new ProtocolError(`${label}[${i}].key: ${JSON.stringify(entry.key)} not in declared storage key set`);
+    }
+    const dedupe = `${entry.key}\0${entry.jsonPointer}`;
+    if (seen.has(dedupe)) {
+      throw new ProtocolError(`${label}: duplicate (${entry.key}, ${entry.jsonPointer})`);
+    }
+    seen.add(dedupe);
+    for (const k of Object.keys(entry)) {
+      if (k !== "key" && k !== "jsonPointer") {
+        throw new ProtocolError(`${label}[${i}]: unexpected field ${JSON.stringify(k)}`);
+      }
+    }
+  }
+}
+function assertIndexedDbScopesArray(value, label) {
+  if (!Array.isArray(value)) {
+    throw new ProtocolError(`${label}: expected array, got ${typeof value}`);
+  }
+  const seen = /* @__PURE__ */ new Set();
+  for (let i = 0; i < value.length; i++) {
+    const entry = value[i];
+    assertObject(entry, `${label}[${i}]`);
+    if (entry.origin === void 0) {
+      throw new ProtocolError(`${label}[${i}].origin: missing`);
+    }
+    if (entry.database === void 0) {
+      throw new ProtocolError(`${label}[${i}].database: missing`);
+    }
+    if (entry.store === void 0) {
+      throw new ProtocolError(`${label}[${i}].store: missing`);
+    }
+    if (entry.keys === void 0) {
+      throw new ProtocolError(`${label}[${i}].keys: missing`);
+    }
+    assertHttpsOriginOnly(entry.origin, `${label}[${i}].origin`);
+    if (typeof entry.database !== "string" || !SCOPE_KEY_RE.test(entry.database)) {
+      throw new ProtocolError(`${label}[${i}].database: invalid name ${JSON.stringify(entry.database)}`);
+    }
+    if (typeof entry.store !== "string" || !SCOPE_KEY_RE.test(entry.store)) {
+      throw new ProtocolError(`${label}[${i}].store: invalid name ${JSON.stringify(entry.store)}`);
+    }
+    if (!Array.isArray(entry.keys) || entry.keys.length === 0) {
+      throw new ProtocolError(`${label}[${i}].keys: must be non-empty array`);
+    }
+    const keysSeen = /* @__PURE__ */ new Set();
+    for (const k of entry.keys) {
+      if (typeof k !== "string" || !SCOPE_KEY_RE.test(k)) {
+        throw new ProtocolError(`${label}[${i}].keys: invalid key ${JSON.stringify(k)}`);
+      }
+      if (keysSeen.has(k)) {
+        throw new ProtocolError(`${label}[${i}].keys: duplicate ${JSON.stringify(k)}`);
+      }
+      keysSeen.add(k);
+    }
+    const dedupe = `${entry.origin}\0${entry.database}\0${entry.store}\0${[...entry.keys].sort().join(",")}`;
+    if (seen.has(dedupe)) {
+      throw new ProtocolError(`${label}: duplicate scope (${entry.origin} ${entry.database}/${entry.store})`);
+    }
+    seen.add(dedupe);
+    for (const k of Object.keys(entry)) {
+      if (k !== "origin" && k !== "database" && k !== "store" && k !== "keys") {
         throw new ProtocolError(`${label}[${i}]: unexpected field ${JSON.stringify(k)}`);
       }
     }
@@ -34728,6 +34851,15 @@ function validateHello(raw) {
     if (raw.captureHeaders !== void 0) {
       assertCaptureHeadersArray(raw.captureHeaders, "hello.captureHeaders");
     }
+    if (raw.indexedDbScopes !== void 0) {
+      assertIndexedDbScopesArray(raw.indexedDbScopes, "hello.indexedDbScopes");
+    }
+    if (raw.localStoragePointers !== void 0) {
+      assertStoragePointersArray(raw.localStoragePointers, "hello.localStoragePointers", raw.localStorageKeys);
+    }
+    if (raw.sessionStoragePointers !== void 0) {
+      assertStoragePointersArray(raw.sessionStoragePointers, "hello.sessionStoragePointers", raw.sessionStorageKeys);
+    }
     assertBase64(raw.identityX25519Pub, "hello.identityX25519Pub");
     assertBase64(raw.identityEd25519Pub, "hello.identityEd25519Pub");
     assertBase64(raw.sessionNonce, "hello.sessionNonce");
@@ -34741,6 +34873,9 @@ function validateHello(raw) {
     }
     assertString(raw.extensionId, "hello.extensionId");
     assertString(raw.version, "hello.version");
+    assertBase64(raw.identityX25519Pub, "hello.identityX25519Pub");
+    assertBase64(raw.identityEd25519Pub, "hello.identityEd25519Pub");
+    assertBase64(raw.sessionNonce, "hello.sessionNonce");
     return raw;
   }
   throw new ProtocolError(`hello.role: must be 'server' or 'extension', got ${String(role)}`);
@@ -34750,6 +34885,7 @@ function validateReady(raw) {
   if (!isValidMcpId(raw.mcpId))
     throw new ProtocolError("ready.mcpId: invalid format");
   assertBase64(raw.extensionSessionPub, "ready.extensionSessionPub");
+  assertBase64(raw.sessionSig, "ready.sessionSig");
   return raw;
 }
 function validateEncrypted(raw) {
@@ -34833,8 +34969,36 @@ function validateInnerRequest(raw) {
     }
     assertHttpsOriginOnly(raw.init.origin, "inner.init.origin");
     assertNonEmptyKeyArray(raw.init.keys, "inner.init.keys");
+    if (raw.init.pointers !== void 0) {
+      assertObject(raw.init.pointers, "inner.init.pointers");
+      for (const [outKey, ptr] of Object.entries(raw.init.pointers)) {
+        if (FORBIDDEN_KEYS.has(outKey)) {
+          throw new ProtocolError(`inner.init.pointers: forbidden output key ${outKey}`);
+        }
+        assertObject(ptr, `inner.init.pointers[${outKey}]`);
+        if (typeof ptr.storageKey !== "string") {
+          throw new ProtocolError(`inner.init.pointers[${outKey}].storageKey: must be string`);
+        }
+        const storageKey = ptr.storageKey;
+        if (!SCOPE_KEY_RE.test(storageKey)) {
+          throw new ProtocolError(`inner.init.pointers[${outKey}].storageKey: invalid key ${JSON.stringify(storageKey)}`);
+        }
+        const jsonPointer = ptr.jsonPointer;
+        if (typeof jsonPointer !== "string" || !isValidJsonPointer(jsonPointer)) {
+          throw new ProtocolError(`inner.init.pointers[${outKey}].jsonPointer: invalid pointer ${JSON.stringify(jsonPointer)}`);
+        }
+        if (!raw.init.keys.includes(storageKey)) {
+          throw new ProtocolError(`inner.init.pointers[${outKey}].storageKey: ${JSON.stringify(storageKey)} not in init.keys`);
+        }
+        for (const k of Object.keys(ptr)) {
+          if (k !== "storageKey" && k !== "jsonPointer") {
+            throw new ProtocolError(`inner.init.pointers[${outKey}]: unexpected field ${JSON.stringify(k)}`);
+          }
+        }
+      }
+    }
     for (const k of Object.keys(raw.init)) {
-      if (k !== "origin" && k !== "keys") {
+      if (k !== "origin" && k !== "keys" && k !== "pointers") {
         throw new ProtocolError(`inner.init: unexpected field ${JSON.stringify(k)} on ${raw.op}`);
       }
     }
@@ -34860,7 +35024,32 @@ function validateInnerRequest(raw) {
     }
     return raw;
   }
-  throw new ProtocolError(`inner.op: must be one of "fetch", "read_cookies", "read_local_storage", "read_session_storage", "capture_request_header"; got ${JSON.stringify(raw.op)}`);
+  if (raw.op === "read_indexed_db") {
+    assertObject(raw.init, "inner.init");
+    if (raw.init.origin === void 0)
+      throw new ProtocolError("inner.init.origin: missing");
+    if (raw.init.database === void 0)
+      throw new ProtocolError("inner.init.database: missing");
+    if (raw.init.store === void 0)
+      throw new ProtocolError("inner.init.store: missing");
+    if (raw.init.keys === void 0)
+      throw new ProtocolError("inner.init.keys: missing");
+    assertHttpsOriginOnly(raw.init.origin, "inner.init.origin");
+    if (typeof raw.init.database !== "string" || !SCOPE_KEY_RE.test(raw.init.database)) {
+      throw new ProtocolError(`inner.init.database: invalid name ${JSON.stringify(raw.init.database)}`);
+    }
+    if (typeof raw.init.store !== "string" || !SCOPE_KEY_RE.test(raw.init.store)) {
+      throw new ProtocolError(`inner.init.store: invalid name ${JSON.stringify(raw.init.store)}`);
+    }
+    assertNonEmptyKeyArray(raw.init.keys, "inner.init.keys");
+    for (const k of Object.keys(raw.init)) {
+      if (k !== "origin" && k !== "database" && k !== "store" && k !== "keys") {
+        throw new ProtocolError(`inner.init: unexpected field ${JSON.stringify(k)} on read_indexed_db`);
+      }
+    }
+    return raw;
+  }
+  throw new ProtocolError(`inner.op: must be one of "fetch", "read_cookies", "read_local_storage", "read_session_storage", "capture_request_header", "read_indexed_db"; got ${JSON.stringify(raw.op)}`);
 }
 function assertNonEmptyKeyArray(value, label) {
   if (!Array.isArray(value)) {
@@ -34929,6 +35118,13 @@ function validateInnerResponse(raw) {
         throw new ProtocolError("inner.value: missing on capture_request_header response");
       }
       assertString(raw.value, "inner.value");
+      return raw;
+    }
+    if (op === "read_indexed_db") {
+      if (raw.values === void 0) {
+        throw new ProtocolError("inner.values: missing on read_indexed_db response");
+      }
+      assertObject(raw.values, "inner.values");
       return raw;
     }
     throw new ProtocolError(`inner.op: unknown success-response op ${JSON.stringify(raw.op)}`);
@@ -35021,6 +35217,9 @@ async function importEd25519Priv(raw) {
   pkcs8.set(raw, prefix.length);
   return subtle.importKey("pkcs8", pkcs8, { name: "Ed25519" }, false, ["sign"]);
 }
+async function importEd25519Pub(raw) {
+  return subtle.importKey("raw", raw, { name: "Ed25519" }, false, ["verify"]);
+}
 async function ecdhX25519(privRaw, pubRaw) {
   const priv = await importX25519Priv(privRaw);
   const pub = await importX25519Pub(pubRaw);
@@ -35031,6 +35230,10 @@ async function ed25519Sign(privRaw, msg) {
   const priv = await importEd25519Priv(privRaw);
   const sig = await subtle.sign({ name: "Ed25519" }, priv, msg);
   return new Uint8Array(sig);
+}
+async function ed25519Verify(pubRaw, msg, sig) {
+  const pub = await importEd25519Pub(pubRaw);
+  return subtle.verify({ name: "Ed25519" }, pub, sig, msg);
 }
 async function hkdfSha256(ikm, salt, info, lenBytes) {
   const baseKey = await subtle.importKey("raw", ikm, { name: "HKDF" }, false, [
@@ -35058,6 +35261,10 @@ async function aesGcmOpen(key, iv, ciphertext) {
   const pt = await subtle.decrypt({ name: "AES-GCM", iv }, k, ciphertext);
   return new Uint8Array(pt);
 }
+async function sha256(data) {
+  const h = await subtle.digest("SHA-256", data);
+  return new Uint8Array(h);
+}
 
 // node_modules/@fetchproxy/protocol/dist/encoding.js
 function toB64(bytes) {
@@ -35078,6 +35285,22 @@ function concatBytes(a, b) {
   out.set(a, 0);
   out.set(b, a.length);
   return out;
+}
+
+// node_modules/@fetchproxy/protocol/dist/pair-code.js
+async function derivePairCode(pub) {
+  const h = await sha256(pub);
+  const b0 = h[0] ?? 0;
+  const b1 = h[1] ?? 0;
+  const b2 = h[2] ?? 0;
+  const b3 = h[3] ?? 0;
+  const u32 = (b0 << 24 | b1 << 16 | b2 << 8 | b3) >>> 0;
+  const n = u32 % 1e6;
+  const s = n.toString().padStart(6, "0");
+  return `${s.slice(0, 3)}-${s.slice(3)}`;
+}
+async function derivePairCodeFromIds(mcpPub, extPub) {
+  return derivePairCode(concatBytes(mcpPub, extPub));
 }
 
 // node_modules/@fetchproxy/protocol/dist/seal.js
@@ -35179,6 +35402,26 @@ async function buildServerHello(opts) {
       headerName: d.headerName
     }));
   }
+  if (opts.indexedDbScopes && opts.indexedDbScopes.length > 0) {
+    hello.indexedDbScopes = opts.indexedDbScopes.map((d) => ({
+      origin: d.origin,
+      database: d.database,
+      store: d.store,
+      keys: [...d.keys]
+    }));
+  }
+  if (opts.localStoragePointers && opts.localStoragePointers.length > 0) {
+    hello.localStoragePointers = opts.localStoragePointers.map((d) => ({
+      key: d.key,
+      jsonPointer: d.jsonPointer
+    }));
+  }
+  if (opts.sessionStoragePointers && opts.sessionStoragePointers.length > 0) {
+    hello.sessionStoragePointers = opts.sessionStoragePointers.map((d) => ({
+      key: d.key,
+      jsonPointer: d.jsonPointer
+    }));
+  }
   return hello;
 }
 
@@ -35227,7 +35470,10 @@ async function startHost(opts) {
     cookieKeys: opts.ownCookieKeys,
     localStorageKeys: opts.ownLocalStorageKeys,
     sessionStorageKeys: opts.ownSessionStorageKeys,
-    captureHeaders: opts.ownCaptureHeaders
+    captureHeaders: opts.ownCaptureHeaders,
+    indexedDbScopes: opts.ownIndexedDbScopes,
+    localStoragePointers: opts.ownLocalStoragePointers,
+    sessionStoragePointers: opts.ownSessionStoragePointers
   });
   const ownSessionNonce = fromB64(ownHello.sessionNonce);
   let extensionWs = null;
@@ -35242,6 +35488,7 @@ async function startHost(opts) {
   });
   ownSessionReady.catch(() => {
   });
+  let extensionHello = null;
   wss.on("connection", (ws) => {
     let identified = null;
     let peerMcpId = null;
@@ -35262,6 +35509,15 @@ async function startHost(opts) {
           }
           identified = "extension";
           extensionWs = ws;
+          extensionHello = frame;
+          if (opts.onPairCode) {
+            try {
+              const code = await derivePairCodeFromIds(opts.ownIdentity.x25519Pub, fromB64(frame.identityX25519Pub));
+              opts.onPairCode(code);
+            } catch (e) {
+              console.error("[fetchproxy] onPairCode threw:", e);
+            }
+          }
           ws.send(JSON.stringify(ownHello));
           for (const slot of peers.values()) {
             ws.send(JSON.stringify(slot.helloFrame));
@@ -35278,6 +35534,26 @@ async function startHost(opts) {
         }
         if (frame.type === "ready") {
           if (frame.mcpId === opts.ownMcpId) {
+            if (!extensionHello) {
+              console.warn("[fetchproxy] ready before extension hello \u2014 closing");
+              ws.close(1002, "ready before extension hello");
+              return;
+            }
+            const extEdPub = fromB64(extensionHello.identityEd25519Pub);
+            const extNonce = fromB64(extensionHello.sessionNonce);
+            const msg = concatBytes(ownSessionNonce, extNonce);
+            const sig = fromB64(frame.sessionSig);
+            let sigOk = false;
+            try {
+              sigOk = await ed25519Verify(extEdPub, msg, sig);
+            } catch {
+              sigOk = false;
+            }
+            if (!sigOk) {
+              console.warn("[fetchproxy] extension session signature invalid \u2014 closing (possible MITM)");
+              ws.close(1008, "extension session signature invalid");
+              return;
+            }
             const extPub = fromB64(frame.extensionSessionPub);
             const shared = await ecdhX25519(opts.ownIdentity.x25519Priv, extPub);
             const key = await hkdfSha256(shared, ownSessionNonce, enc2.encode("fetchproxy/0.1.0/session"), 32);
@@ -35322,6 +35598,7 @@ async function startHost(opts) {
     ws.on("close", () => {
       if (identified === "extension" && extensionWs === ws) {
         extensionWs = null;
+        extensionHello = null;
         if (!ownSession) {
           rejectOwnSession(new Error("extension disconnected before ready"));
         }
@@ -35371,7 +35648,10 @@ async function startPeer(opts) {
     cookieKeys: opts.cookieKeys,
     localStorageKeys: opts.localStorageKeys,
     sessionStorageKeys: opts.sessionStorageKeys,
-    captureHeaders: opts.captureHeaders
+    captureHeaders: opts.captureHeaders,
+    indexedDbScopes: opts.indexedDbScopes,
+    localStoragePointers: opts.localStoragePointers,
+    sessionStoragePointers: opts.sessionStoragePointers
   });
   const sessionNonce = fromB64(hello.sessionNonce);
   ws.send(JSON.stringify(hello));
@@ -35536,6 +35816,8 @@ var FetchproxyServer = class {
   pendingStorage = /* @__PURE__ */ new Map();
   // 0.3.0+: capture-header awaiters resolve a single string.
   pendingCapture = /* @__PURE__ */ new Map();
+  // 0.4.0+: read_indexed_db awaiters resolve a JSON-typed values map.
+  pendingIdb = /* @__PURE__ */ new Map();
   mcpId = null;
   identity = null;
   constructor(opts) {
@@ -35570,7 +35852,22 @@ var FetchproxyServer = class {
         urlPattern: d.urlPattern,
         headerName: d.headerName
       })),
-      identityDir: opts.identityDir
+      indexedDbScopes: (opts.indexedDbScopes ?? []).map((d) => ({
+        origin: d.origin,
+        database: d.database,
+        store: d.store,
+        keys: [...d.keys]
+      })),
+      localStoragePointers: (opts.localStoragePointers ?? []).map((d) => ({
+        key: d.key,
+        jsonPointer: d.jsonPointer
+      })),
+      sessionStoragePointers: (opts.sessionStoragePointers ?? []).map((d) => ({
+        key: d.key,
+        jsonPointer: d.jsonPointer
+      })),
+      identityDir: opts.identityDir,
+      onPairCode: opts.onPairCode
     };
   }
   /**
@@ -35598,7 +35895,11 @@ var FetchproxyServer = class {
         ownCookieKeys: this.opts.cookieKeys,
         ownLocalStorageKeys: this.opts.localStorageKeys,
         ownSessionStorageKeys: this.opts.sessionStorageKeys,
-        ownCaptureHeaders: this.opts.captureHeaders
+        ownCaptureHeaders: this.opts.captureHeaders,
+        ownIndexedDbScopes: this.opts.indexedDbScopes,
+        ownLocalStoragePointers: this.opts.localStoragePointers,
+        ownSessionStoragePointers: this.opts.sessionStoragePointers,
+        onPairCode: this.opts.onPairCode
       });
       this.hostHandle.onOwnInner((inner) => this.onInner(inner));
     } else {
@@ -35615,7 +35916,10 @@ var FetchproxyServer = class {
         cookieKeys: this.opts.cookieKeys,
         localStorageKeys: this.opts.localStorageKeys,
         sessionStorageKeys: this.opts.sessionStorageKeys,
-        captureHeaders: this.opts.captureHeaders
+        captureHeaders: this.opts.captureHeaders,
+        indexedDbScopes: this.opts.indexedDbScopes,
+        localStoragePointers: this.opts.localStoragePointers,
+        sessionStoragePointers: this.opts.sessionStoragePointers
       });
       this.peerHandle.onInner((inner) => this.onInner(inner));
     }
@@ -35816,18 +36120,23 @@ var FetchproxyServer = class {
    * tab. Requires `'read_local_storage'` in capabilities AND each key
    * to be in declared `localStorageKeys`. Returns a `Record<string, string>`
    * including only keys that exist in storage.
+   *
+   * 0.4.0+: optional `pointers` map. Each entry `{ outputKey: { storageKey, jsonPointer } }`
+   * extracts a node from the JSON-parsed value at `storageKey`. The
+   * `(storageKey, jsonPointer)` pair must match a declared
+   * `localStoragePointers` entry on the server hello.
    */
   async readLocalStorage(opts) {
-    return this.readStorageImpl("read_local_storage", this.opts.localStorageKeys, opts, "localStorageKeys");
+    return this.readStorageImpl("read_local_storage", this.opts.localStorageKeys, this.opts.localStoragePointers, opts, "localStorageKeys", "localStoragePointers");
   }
   /**
    * 0.3.0+: read declared sessionStorage keys. Identical shape to
    * `readLocalStorage` but against sessionStorage.
    */
   async readSessionStorage(opts) {
-    return this.readStorageImpl("read_session_storage", this.opts.sessionStorageKeys, opts, "sessionStorageKeys");
+    return this.readStorageImpl("read_session_storage", this.opts.sessionStorageKeys, this.opts.sessionStoragePointers, opts, "sessionStorageKeys", "sessionStoragePointers");
   }
-  async readStorageImpl(op, declaredKeys, opts, declLabel) {
+  async readStorageImpl(op, declaredKeys, declaredPointers, opts, declLabel, pointersDeclLabel) {
     if (!this.opts.capabilities.includes(op)) {
       throw new Error(`FetchproxyServer.${op === "read_local_storage" ? "readLocalStorage" : "readSessionStorage"}(): MCP did not declare ${JSON.stringify(op)} in capabilities`);
     }
@@ -35838,6 +36147,17 @@ var FetchproxyServer = class {
       throw new Error(`FetchproxyServer.${op}: opts.keys must be a non-empty array`);
     }
     this.assertScopeSubset(opts.keys, declaredKeys, declLabel);
+    if (opts.pointers) {
+      for (const [outputKey, p] of Object.entries(opts.pointers)) {
+        const match = declaredPointers.find((d) => d.key === p.storageKey && d.jsonPointer === p.jsonPointer);
+        if (!match) {
+          throw new Error(`FetchproxyServer.${op}: pointer (${JSON.stringify(p.storageKey)}, ${JSON.stringify(p.jsonPointer)}) for outputKey=${JSON.stringify(outputKey)} not in declared ${pointersDeclLabel}`);
+        }
+        if (!opts.keys.includes(p.storageKey)) {
+          throw new Error(`FetchproxyServer.${op}: pointer storageKey ${JSON.stringify(p.storageKey)} not in opts.keys`);
+        }
+      }
+    }
     if (opts.subdomain !== void 0)
       assertSubdomainLabel(opts.subdomain);
     const baseDomain = this.resolveBaseDomain(opts.domain);
@@ -35847,7 +36167,11 @@ var FetchproxyServer = class {
       type: "request",
       id,
       op,
-      init: { origin: `https://${host}`, keys: [...opts.keys] }
+      init: {
+        origin: `https://${host}`,
+        keys: [...opts.keys],
+        ...opts.pointers ? { pointers: { ...opts.pointers } } : {}
+      }
     };
     const pending = new Promise((resolve2, reject) => {
       this.pendingStorage.set(id, { resolve: resolve2, reject });
@@ -35901,9 +36225,61 @@ var FetchproxyServer = class {
     }
     return pending;
   }
+  /**
+   * 0.4.0+: read declared IndexedDB keys from the user's signed-in
+   * tab. Requires `'read_indexed_db'` in capabilities AND the
+   * `(database, store, keys)` triple to subset-match a declared
+   * `indexedDbScopes` entry on the same origin.
+   *
+   * Returns a `Record<string, unknown>` of the JSON-typed values, with
+   * missing keys omitted. Throws `FetchproxyProtocolError` on bridge
+   * failures (no tab, extension offline, etc.) and a plain `Error`
+   * on developer mistakes (undeclared capability, undeclared scope).
+   */
+  async readIndexedDb(opts) {
+    if (!this.opts.capabilities.includes("read_indexed_db")) {
+      throw new Error('FetchproxyServer.readIndexedDb(): MCP did not declare "read_indexed_db" in capabilities');
+    }
+    if (!this.hostHandle && !this.peerHandle) {
+      throw new Error("FetchproxyServer.readIndexedDb called before listen() \u2014 not listening");
+    }
+    if (!Array.isArray(opts.keys) || opts.keys.length === 0) {
+      throw new Error("FetchproxyServer.readIndexedDb: opts.keys must be a non-empty array");
+    }
+    if (opts.subdomain !== void 0)
+      assertSubdomainLabel(opts.subdomain);
+    const baseDomain = this.resolveBaseDomain(opts.domain);
+    const host = opts.subdomain ? `${opts.subdomain}.${baseDomain}` : baseDomain;
+    const origin = `https://${host}`;
+    const decl = this.opts.indexedDbScopes.find((d) => d.origin === origin && d.database === opts.database && d.store === opts.store);
+    if (!decl) {
+      throw new Error(`FetchproxyServer.readIndexedDb: (origin=${origin}, database=${JSON.stringify(opts.database)}, store=${JSON.stringify(opts.store)}) not declared in indexedDbScopes`);
+    }
+    this.assertScopeSubset(opts.keys, decl.keys, "indexedDbScopes.keys");
+    const id = this.nextRequestId++;
+    const inner = {
+      type: "request",
+      id,
+      op: "read_indexed_db",
+      init: {
+        origin,
+        database: opts.database,
+        store: opts.store,
+        keys: [...opts.keys]
+      }
+    };
+    const pending = new Promise((resolve2, reject) => {
+      this.pendingIdb.set(id, { resolve: resolve2, reject });
+    });
+    if (this.hostHandle) {
+      await this.hostHandle.sendOwnInner(inner);
+    } else if (this.peerHandle) {
+      await this.peerHandle.sendInner(inner);
+    }
+    return pending;
+  }
   assertScopeSubset(requested, declared, label) {
-    const declaredSet = new Set(declared);
-    const undeclared = requested.filter((k) => !declaredSet.has(k));
+    const undeclared = undeclaredKeys(requested, declared);
     if (undeclared.length > 0) {
       throw new Error(`FetchproxyServer: requested key(s) [${undeclared.map((k) => JSON.stringify(k)).join(", ")}] not in declared ${label} [${declared.map((k) => JSON.stringify(k)).join(", ")}]`);
     }
@@ -35979,6 +36355,20 @@ var FetchproxyServer = class {
       }
       return;
     }
+    const idbCb = this.pendingIdb.get(inner.id);
+    if (idbCb) {
+      this.pendingIdb.delete(inner.id);
+      if (inner.ok) {
+        if (inner.op === "read_indexed_db" && inner.values) {
+          idbCb.resolve({ ...inner.values });
+        } else {
+          idbCb.reject(new FetchproxyProtocolError(`unexpected ${String(inner.op)} response on read_indexed_db awaiter`));
+        }
+      } else {
+        idbCb.reject(new FetchproxyProtocolError(inner.error));
+      }
+      return;
+    }
     const cookiesCb = this.pendingReadCookies.get(inner.id);
     if (cookiesCb) {
       this.pendingReadCookies.delete(inner.id);
@@ -36020,25 +36410,58 @@ var FetchproxyServer = class {
 // node_modules/@fetchproxy/bootstrap/dist/index.js
 var defaultFactory = (opts) => new FetchproxyServer(opts);
 async function bootstrap(opts) {
+  const envVar = opts.serverName.toUpperCase().replace(/[^A-Z0-9]/g, "_").replace(/^_+/, "") + "_DISABLE_FETCHPROXY";
+  const envVal = process.env[envVar];
+  if (envVal !== void 0 && envVal !== "" && envVal !== "0" && envVal !== "false") {
+    throw new BootstrapDisabledError(opts.serverName, envVar);
+  }
   const factory = opts._serverFactory ?? defaultFactory;
+  const indexedDb = opts.declare.indexedDb ?? [];
+  const localStoragePointers = opts.declare.localStoragePointers ?? [];
+  const sessionStoragePointers = opts.declare.sessionStoragePointers ?? [];
   const capabilities = ["fetch"];
   if (opts.declare.cookies.length > 0)
     capabilities.push("read_cookies");
-  if (opts.declare.localStorage.length > 0)
+  if (opts.declare.localStorage.length > 0 || localStoragePointers.length > 0) {
     capabilities.push("read_local_storage");
-  if (opts.declare.sessionStorage.length > 0)
+  }
+  if (opts.declare.sessionStorage.length > 0 || sessionStoragePointers.length > 0) {
     capabilities.push("read_session_storage");
+  }
   if (opts.declare.captureHeaders.length > 0)
     capabilities.push("capture_request_header");
+  if (indexedDb.length > 0)
+    capabilities.push("read_indexed_db");
+  const localStorageKeys = new Set(opts.declare.localStorage);
+  for (const p of localStoragePointers)
+    localStorageKeys.add(p.storageKey);
+  const sessionStorageKeys = new Set(opts.declare.sessionStorage);
+  for (const p of sessionStoragePointers)
+    sessionStorageKeys.add(p.storageKey);
   const server2 = factory({
     serverName: opts.serverName,
     version: opts.version,
     domains: [...opts.domains],
     capabilities,
     cookieKeys: [...opts.declare.cookies],
-    localStorageKeys: [...opts.declare.localStorage],
-    sessionStorageKeys: [...opts.declare.sessionStorage],
-    captureHeaders: opts.declare.captureHeaders.map((d) => ({ ...d }))
+    localStorageKeys: [...localStorageKeys],
+    sessionStorageKeys: [...sessionStorageKeys],
+    captureHeaders: opts.declare.captureHeaders.map((d) => ({ ...d })),
+    indexedDbScopes: indexedDb.map((d) => ({
+      origin: d.origin,
+      database: d.database,
+      store: d.store,
+      keys: [...d.keys]
+    })),
+    localStoragePointers: localStoragePointers.map((p) => ({
+      key: p.storageKey,
+      jsonPointer: p.jsonPointer
+    })),
+    sessionStoragePointers: sessionStoragePointers.map((p) => ({
+      key: p.storageKey,
+      jsonPointer: p.jsonPointer
+    })),
+    onPairCode: opts.onPairCode
   });
   try {
     await server2.listen();
@@ -36054,16 +36477,66 @@ async function bootstrap(opts) {
         cookies[piece.slice(0, eq)] = piece.slice(eq + 1);
       }
     }
-    const localStorage = opts.declare.localStorage.length > 0 ? await server2.readLocalStorage({ keys: opts.declare.localStorage }) : {};
-    const sessionStorage = opts.declare.sessionStorage.length > 0 ? await server2.readSessionStorage({ keys: opts.declare.sessionStorage }) : {};
+    let localStorage = {};
+    if (opts.declare.localStorage.length > 0 || localStoragePointers.length > 0) {
+      const allKeys = [...localStorageKeys];
+      const pointers = {};
+      for (const p of localStoragePointers) {
+        pointers[p.outputKey] = { storageKey: p.storageKey, jsonPointer: p.jsonPointer };
+      }
+      const stub = server2;
+      localStorage = await stub.readLocalStorage({
+        keys: allKeys,
+        ...localStoragePointers.length > 0 ? { pointers } : {}
+      });
+    }
+    let sessionStorage = {};
+    if (opts.declare.sessionStorage.length > 0 || sessionStoragePointers.length > 0) {
+      const allKeys = [...sessionStorageKeys];
+      const pointers = {};
+      for (const p of sessionStoragePointers) {
+        pointers[p.outputKey] = { storageKey: p.storageKey, jsonPointer: p.jsonPointer };
+      }
+      const stub = server2;
+      sessionStorage = await stub.readSessionStorage({
+        keys: allKeys,
+        ...sessionStoragePointers.length > 0 ? { pointers } : {}
+      });
+    }
     const capturedHeaders = {};
     for (const h of opts.declare.captureHeaders) {
+      if (opts.onWaiting) {
+        try {
+          const url2 = new URL(h.urlPattern.replace(/\*+/g, "placeholder"));
+          opts.onWaiting(`waiting for next request to ${url2.host} to capture ${h.headerName} \u2014 interact with the page in your browser`);
+        } catch {
+          opts.onWaiting(`waiting to capture ${h.headerName} \u2014 interact with the page in your browser`);
+        }
+      }
       capturedHeaders[h.headerName] = await server2.captureRequestHeader({
         urlPattern: h.urlPattern,
         headerName: h.headerName
       });
     }
-    return { cookies, localStorage, sessionStorage, capturedHeaders };
+    const indexedDbBucket = {};
+    for (const d of indexedDb) {
+      if (!server2.readIndexedDb) {
+        throw new Error("bootstrap: server factory does not implement readIndexedDb (declared indexedDb but server stub omits it)");
+      }
+      const values = await server2.readIndexedDb({
+        database: d.database,
+        store: d.store,
+        keys: [...d.keys]
+      });
+      indexedDbBucket[`${d.database}/${d.store}`] = values;
+    }
+    return {
+      cookies,
+      localStorage,
+      sessionStorage,
+      capturedHeaders,
+      indexedDb: indexedDbBucket
+    };
   } finally {
     try {
       await server2.close();
@@ -36071,6 +36544,16 @@ async function bootstrap(opts) {
     }
   }
 }
+var BootstrapDisabledError = class extends Error {
+  serverName;
+  envVar;
+  constructor(serverName, envVar) {
+    super(`fetchproxy bootstrap disabled by ${envVar} (serverName: ${serverName})`);
+    this.serverName = serverName;
+    this.envVar = envVar;
+    this.name = "BootstrapDisabledError";
+  }
+};
 
 // src/auth-password.ts
 var BASE_URL = "https://ofw.ourfamilywizard.com";
@@ -36148,7 +36631,7 @@ var package_default = {
     "test:watch": "vitest"
   },
   dependencies: {
-    "@fetchproxy/bootstrap": "^0.3.0",
+    "@fetchproxy/bootstrap": "^0.4.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
     dotenv: "^17.4.0",
     zod: "^4.4.2"
