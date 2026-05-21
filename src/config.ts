@@ -2,12 +2,20 @@ import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
-function readUsername(): string {
-  const raw = process.env.OFW_USERNAME;
-  if (typeof raw !== 'string' || raw.trim().length === 0) {
-    throw new Error('OFW_USERNAME must be set to derive cache path');
-  }
-  return raw.trim();
+// Cache identity drives the per-user SQLite DB filename. Order of preference:
+//   1. OFW_CACHE_IDENTITY — explicit override for users who want to label the
+//      cache themselves (e.g. when authing via fetchproxy and OFW_USERNAME is
+//      not set).
+//   2. OFW_USERNAME — legacy path; existing users keep their existing DB.
+//   3. "_default" — fallback for fetchproxy-only setups where neither is set.
+//      Single-user installs are fine on this; multi-account users should set
+//      OFW_CACHE_IDENTITY explicitly so their caches don't collide.
+function readCacheIdentity(): string {
+  const explicit = process.env.OFW_CACHE_IDENTITY;
+  if (typeof explicit === 'string' && explicit.trim().length > 0) return explicit.trim();
+  const username = process.env.OFW_USERNAME;
+  if (typeof username === 'string' && username.trim().length > 0) return username.trim();
+  return '_default';
 }
 
 export function getCacheDir(): string {
@@ -17,8 +25,8 @@ export function getCacheDir(): string {
 }
 
 export function getCacheDbPath(): string {
-  const username = readUsername();
-  const hash = createHash('sha256').update(username).digest('hex').slice(0, 16);
+  const identity = readCacheIdentity();
+  const hash = createHash('sha256').update(identity).digest('hex').slice(0, 16);
   return join(getCacheDir(), `${hash}.db`);
 }
 
