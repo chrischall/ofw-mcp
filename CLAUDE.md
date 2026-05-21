@@ -17,19 +17,21 @@ npm run dev          # node --env-file=.env dist/index.js (requires built dist)
 
 ```
 src/
-  index.ts       MCP server entry — McpServer + StdioServerTransport, registers all tools
-  client.ts      OFWClient (Spring Security login, Bearer token, 401/429 retry, JSON + binary)
-  config.ts      env-driven cache dir + sha256(OFW_USERNAME) DB path + attachments dir
-  cache.ts       node:sqlite cache (messages, drafts, attachments, sync_state, meta) with typed CRUD + findLatestReplyTip
-  sync.ts        resolveFolderIds + syncMessageFolder/syncDrafts/syncAll + attachment-meta fetch
+  index.ts          MCP server entry — McpServer + StdioServerTransport, registers all tools
+  client.ts         OFWClient (Bearer token, 401/429 retry, JSON + binary). Delegates auth to ./auth.ts
+  auth.ts           resolveAuth(): three-path priority (env vars → fetchproxy fallback → error). Template for sibling MCPs
+  auth-password.ts  loginWithPassword(): legacy OFW Spring Security form login (kept as own module so auth.ts can mock it cleanly)
+  config.ts         env-driven cache dir + sha256(OFW_CACHE_IDENTITY|OFW_USERNAME|"_default") DB path + attachments dir
+  cache.ts          node:sqlite cache (messages, drafts, attachments, sync_state, meta) with typed CRUD + findLatestReplyTip
+  sync.ts           resolveFolderIds + syncMessageFolder/syncDrafts/syncAll + attachment-meta fetch
   tools/
-    _shared.ts   recipient mapping, response helpers, path expansion
-    user.ts      ofw_get_profile, ofw_get_notifications
-    messages.ts  folders, list, get, send, drafts, get_unread_sent, upload/download_attachment, sync_messages
-    calendar.ts  list/create/update/delete events
-    expenses.ts  totals, list, create
-    journal.ts   list, create entries
-tests/           mirrors src/; mocks OFWClient.request via vi.spyOn; cache tests use OFW_CACHE_DIR + tmp dir
+    _shared.ts      recipient mapping, response helpers, path expansion
+    user.ts         ofw_get_profile, ofw_get_notifications
+    messages.ts     folders, list, get, send, drafts, get_unread_sent, upload/download_attachment, sync_messages
+    calendar.ts     list/create/update/delete events
+    expenses.ts     totals, list, create
+    journal.ts      list, create entries
+tests/              mirrors src/; mocks OFWClient.request via vi.spyOn; cache tests use OFW_CACHE_DIR + tmp dir
 ```
 
 Tool files use `server.registerTool(name, schema, handler)`. `index.ts` wires `registerXTools(server, client)` for each domain.
@@ -37,16 +39,28 @@ Tool files use `server.registerTool(name, schema, handler)`. `index.ts` wires `r
 ## Environment
 
 ```
-OFW_USERNAME              Required. OFW login email
-OFW_PASSWORD              Required. OFW password
+OFW_USERNAME              Optional. OFW login email (legacy env-var auth path; also serves as cache key)
+OFW_PASSWORD              Optional. OFW password (legacy env-var auth path)
+OFW_DISABLE_FETCHPROXY    Optional. "1|true|yes|on" → skip the fetchproxy fallback (missing creds become a hard error)
+OFW_CACHE_IDENTITY        Optional. Explicit cache-key label; overrides OFW_USERNAME for fetchproxy-only multi-account setups
 OFW_CACHE_DIR             Optional. Overrides cache dir (default ~/.cache/ofw-mcp)
 OFW_ATTACHMENTS_DIR       Optional. Where ofw_download_attachment writes (default ~/Downloads/ofw-mcp)
 OFW_INLINE_ATTACHMENTS    Optional. "1|true|yes|on" → return attachments as MCP content blocks by default
 ```
 
-`client.ts` ignores blank values, the strings `"undefined"`/`"null"`, and unsubstituted `${VAR}` placeholders — defensive against MCP hosts passing the env block through unexpanded.
+`auth.ts` ignores blank values, the strings `"undefined"`/`"null"`, and unsubstituted `${VAR}` placeholders — defensive against MCP hosts passing the env block through unexpanded.
 
 `.env` (project root) is loaded by `client.ts` via dynamic `dotenv` import (silently skipped if unavailable, e.g. inside the mcpb bundle). Real env vars take precedence (`override: false`).
+
+## Auth resolution (Pattern A template)
+
+`src/auth.ts` is the canonical "browser-bootstrap + Node-direct" auth shape used across our MCP servers. Six sibling MCPs model their auth on this file — keep the structure flat, the path-selection explicit, the error messages actionable. Three paths in priority order:
+
+1. **Env-var credentials** (`OFW_USERNAME` + `OFW_PASSWORD`) → `src/auth-password.ts` does the legacy Spring Security form login. Unchanged from pre-fetchproxy behavior.
+2. **fetchproxy fallback** → `@fetchproxy/bootstrap` snapshots `localStorage["auth"]` + `localStorage["tokenExpiry"]` from a signed-in `ourfamilywizard.com` tab in ~one round-trip, then closes the bridge. All subsequent OFW API calls go out via direct Node fetch — fetchproxy is NOT in the hot path.
+3. **Error** → tells the user how to fix it (set creds, OR install the extension and sign in).
+
+The split into `auth.ts` + `auth-password.ts` is deliberate: tests mock `auth-password.js` and `@fetchproxy/bootstrap` at the module boundary, so path-selection logic in `resolveAuth()` stays independent of either implementation. Sibling MCPs should copy this split.
 
 ## Message Cache
 

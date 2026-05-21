@@ -66,9 +66,15 @@ Quit completely (Cmd+Q on Mac, not just close the window) and relaunch.
 
 Ask Claude: *"What does my OFW dashboard look like?"* — it should show your unread message count, upcoming events, and outstanding expenses.
 
-## Credentials
+## Authentication
 
-Credentials are read from environment variables, with two ways to provide them:
+`ofw-mcp` tries three auth paths in order; whichever succeeds first is used. Existing setups keep working unchanged.
+
+1. **Env-var credentials (legacy, recommended for Claude Desktop).** Set `OFW_USERNAME` + `OFW_PASSWORD` and the server logs in via OFW's form endpoint. This is the path shown in the Claude Desktop config above.
+2. **fetchproxy fallback (no env vars needed).** When the credentials are absent, the server reads `localStorage["auth"]` once at startup from your already-signed-in `ourfamilywizard.com` tab via the [fetchproxy](https://github.com/chrischall/fetchproxy) browser extension. After that one read, all OFW API calls go directly from Node — the extension is **not** in the request hot path. Install the fetchproxy extension (Chrome Web Store / Safari `.dmg`), sign into OurFamilyWizard once, and the MCP just works. If you have multiple OFW accounts and want them to use separate caches, set `OFW_CACHE_IDENTITY` to a label per profile.
+3. **Error.** If neither path is available, the server tells you exactly which fix to apply. Set `OFW_DISABLE_FETCHPROXY=1` to skip the fetchproxy fallback entirely (turns missing credentials into a hard error — useful in headless CI).
+
+### Credential options (env-var path)
 
 **Option A — env block in Claude Desktop config** (shown above, recommended):
 
@@ -121,7 +127,9 @@ Read-only tools run automatically. Write tools ask for your confirmation first.
 
 **"0 messages"** — Claude may have read the notification counts rather than the actual messages. Ask explicitly: *"List the messages in my OFW inbox"* or *"Use ofw_list_message_folders then ofw_list_messages"*.
 
-**"OFW_USERNAME and OFW_PASSWORD must be set"** — credentials are missing. Check the `env` block in your Claude Desktop config or your `.env` file.
+**"OFW auth: set OFW_USERNAME + OFW_PASSWORD, or install the fetchproxy extension…"** — neither auth path is configured. Either fill in the `env` block in your Claude Desktop config, or install the [fetchproxy extension](https://github.com/chrischall/fetchproxy) and sign into `ourfamilywizard.com` in your browser.
+
+**"fetchproxy fallback failed"** — the env-var path wasn't configured and the extension couldn't be reached. Confirm the fetchproxy extension is installed, signed into OFW, and that it's running (open the extension popup). If you want to disable the fallback entirely, set `OFW_DISABLE_FETCHPROXY=1`.
 
 **403 Forbidden** — wrong credentials. Verify your username/password at [ofw.ourfamilywizard.com](https://ofw.ourfamilywizard.com).
 
@@ -162,14 +170,17 @@ tests/
 
 ### Auth flow
 
-OFW uses Spring Security form login:
+Auth resolution lives in `src/auth.ts`. Three paths, in priority order:
 
-1. `GET /ofw/login.form` — establishes a session cookie
-2. `POST /ofw/login` — submits credentials, returns `{ auth: "<token>" }`
-3. All API calls use `Authorization: Bearer <token>`
-4. On 401, re-authenticates automatically and retries once
+1. **Env vars present** → `src/auth-password.ts` does the legacy OFW Spring Security form login:
+   1. `GET /ofw/login.form` — establishes a session cookie
+   2. `POST /ofw/login` — submits credentials, returns `{ auth: "<token>" }`
+2. **Env vars absent (and `OFW_DISABLE_FETCHPROXY` unset)** → `@fetchproxy/bootstrap` reads `localStorage["auth"]` + `localStorage["tokenExpiry"]` once from the user's signed-in `ourfamilywizard.com` tab, then closes the bridge.
+3. **Nothing configured** → throws with both fixes spelled out.
 
-Tokens are cached for 6 hours.
+Either path returns a Bearer token to `OFWClient`, which then operates from Node with `Authorization: Bearer <token>` — fetchproxy is **not** in the request hot path. On 401 the client re-resolves auth and replays once. Tokens are cached for 6h (env-var path) or until `tokenExpiry` (fetchproxy path).
+
+Also see the [fetchproxy README](https://github.com/chrischall/fetchproxy) for extension install instructions.
 
 ## License
 
