@@ -165,7 +165,7 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
   });
 
   server.registerTool('ofw_send_message', {
-    description: 'Send a message via OurFamilyWizard. If sending from a draft, pass draftId to delete the draft after sending. If replyToId is provided, the cache may rewrite it to the latest reply in the same thread (a note is included in the response when this happens). Attach files by passing their fileIds (from ofw_upload_attachment) in myFileIDs.',
+    description: 'Send a message via OurFamilyWizard. If sending from a draft, pass draftId to delete the draft after sending. If replyToId is provided, the cache may rewrite it to the latest reply in the same thread (a note is included in the response when this happens). Attach files by passing their fileIds (from ofw_upload_attachment) in myFileIDs. After sending, the tool re-fetches the message from OFW to populate the local cache and link attachments to the new message id.',
     annotations: { destructiveHint: true },
     inputSchema: {
       subject: z.string().describe('Message subject'),
@@ -191,11 +191,12 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
     }
 
     const myFileIDs = args.myFileIDs ?? [];
+    // OFW's POST /pub/v3/messages response is minimal — typically just
+    // `{entityId: <id>}` — so the cache write needs to fetch detail
+    // afterwards (same shape as ofw_save_draft).
     const data = await client.request<{
-      id?: number; subject?: string; body?: string;
-      date?: { dateTime: string }; from?: { name?: string };
-      recipients?: Array<{ user: { id: number; name: string }; viewed?: { dateTime: string } | null }>;
-    }>('POST', '/pub/v3/messages', {
+      id?: number; entityId?: number;
+    } & Record<string, unknown>>('POST', '/pub/v3/messages', {
       subject: args.subject,
       body: args.body,
       recipientIds: args.recipientIds,
@@ -205,21 +206,33 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
       replyToId: resolvedReplyTo,
     });
 
-    if (data && typeof data.id === 'number') {
-      const row: MessageRow = {
-        id: data.id,
+    const newId: number | null =
+      typeof data?.id === 'number' ? data.id
+      : typeof data?.entityId === 'number' ? data.entityId
+      : null;
+
+    let persisted: MessageRow | null = null;
+    if (newId !== null) {
+      const detail = await client.request<{
+        id: number; subject?: string; body?: string;
+        date?: { dateTime: string }; from?: { name?: string };
+        recipients?: Array<{ user: { id: number; name: string }; viewed?: { dateTime: string } | null }>;
+      }>('GET', `/pub/v3/messages/${newId}`);
+
+      persisted = {
+        id: newId,
         folder: 'sent',
-        subject: data.subject ?? args.subject,
-        fromUser: data.from?.name ?? '',
-        sentAt: data.date?.dateTime ?? new Date().toISOString(),
-        recipients: mapRecipients(data.recipients),
-        body: data.body ?? args.body,
+        subject: detail.subject ?? args.subject,
+        fromUser: detail.from?.name ?? '',
+        sentAt: detail.date?.dateTime ?? new Date().toISOString(),
+        recipients: mapRecipients(detail.recipients),
+        body: detail.body ?? args.body,
         fetchedBodyAt: new Date().toISOString(),
         replyToId: resolvedReplyTo,
         chainRootId,
-        listData: data,
+        listData: detail,
       };
-      upsertMessage(row);
+      upsertMessage(persisted);
       // Link attached files to the new message in the attachments cache.
       // We may not have full metadata if the upload happened in a prior
       // session — fall back to what we know.
@@ -232,7 +245,7 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
           mimeType: existing?.mimeType ?? 'application/octet-stream',
           sizeBytes: existing?.sizeBytes ?? null,
           metadata: existing?.metadata ?? {},
-          messageId: data.id,
+          messageId: newId,
         });
       }
     }
@@ -242,7 +255,8 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
       deleteDraft(args.draftId);
     }
 
-    const text = data ? JSON.stringify(data, null, 2) : 'Message sent successfully.';
+    const responseObj = persisted ?? data;
+    const text = responseObj ? JSON.stringify(responseObj, null, 2) : 'Message sent successfully.';
     return textResponse(rewriteNote ? `${rewriteNote}\n\n${text}` : text);
   });
 
@@ -264,7 +278,7 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
   });
 
   server.registerTool('ofw_save_draft', {
-    description: 'Save a message as a draft in OurFamilyWizard. Recipients are optional. To update an existing draft, provide its messageId. If replyToId is provided, the cache may rewrite it to the latest reply in the thread (note included in response). Attach files by passing their fileIds (from ofw_upload_attachment) in myFileIDs.',
+    description: 'Save a message as a draft in OurFamilyWizard. Recipients are optional. To update an existing draft, provide its messageId. If replyToId is provided, the cache may rewrite it to the latest reply in the thread (note included in response). Attach files by passing their fileIds (from ofw_upload_attachment) in myFileIDs. After saving, the tool re-fetches the draft from OFW to populate the local cache and verify what was actually persisted; if OFW silently no-ops an update (a known issue with repeated updates to the same draft), the response includes a WARNING note with a workaround.',
     annotations: { readOnlyHint: false },
     inputSchema: {
       subject: z.string().describe('Message subject'),
@@ -298,28 +312,56 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
     };
     if (args.messageId !== undefined) payload.messageId = args.messageId;
 
+    // OFW's POST /pub/v3/messages response for drafts is minimal — typically
+    // just `{entityId: <id>}` — and worse, it returns the same success shape
+    // even when the server silently no-ops on a subsequent update to the
+    // same draft. Don't trust the POST response: extract the id from it,
+    // then GET the detail endpoint to repopulate the cache from
+    // authoritative server state.
     const data = await client.request<{
-      id?: number; subject?: string; body?: string;
-      date?: { dateTime: string };
-      replyToId?: number | null;
-      recipients?: Array<{ user: { id: number; name: string }; viewed?: { dateTime: string } | null }>;
-    }>('POST', '/pub/v3/messages', payload);
+      id?: number; entityId?: number;
+    } & Record<string, unknown>>('POST', '/pub/v3/messages', payload);
 
-    if (data && typeof data.id === 'number') {
-      const draft: DraftRow = {
-        id: data.id,
-        subject: data.subject ?? args.subject,
-        body: data.body ?? args.body,
-        recipients: mapRecipients(data.recipients),
-        replyToId: data.replyToId ?? resolvedReplyTo,
-        modifiedAt: data.date?.dateTime ?? new Date().toISOString(),
-        listData: data,
+    const newId: number | null =
+      typeof data?.id === 'number' ? data.id
+      : typeof data?.entityId === 'number' ? data.entityId
+      : null;
+
+    let persisted: DraftRow | null = null;
+    let noOpWarning: string | null = null;
+
+    if (newId !== null) {
+      const detail = await client.request<{
+        id: number; subject?: string; body?: string;
+        date?: { dateTime: string };
+        replyToId?: number | null;
+        recipients?: Array<{ user: { id: number; name: string }; viewed?: { dateTime: string } | null }>;
+      }>('GET', `/pub/v3/messages/${newId}`);
+
+      persisted = {
+        id: newId,
+        subject: detail.subject ?? args.subject,
+        body: detail.body ?? '',
+        recipients: mapRecipients(detail.recipients),
+        replyToId: detail.replyToId ?? resolvedReplyTo,
+        modifiedAt: detail.date?.dateTime ?? new Date().toISOString(),
+        listData: detail,
       };
-      upsertDraft(draft);
+      upsertDraft(persisted);
+
+      // If this was an update (messageId provided) and OFW's reported body
+      // doesn't match what we asked it to save, the server silently
+      // dropped the change. Warn the caller so the model can take the
+      // create-then-delete fallback.
+      if (args.messageId !== undefined && persisted.body !== args.body) {
+        noOpWarning = 'WARNING: OFW reported success but the draft body it returned does not match the requested update. The OFW POST /pub/v3/messages endpoint can silently no-op on subsequent updates to the same draft. Workaround: delete this draft (ofw_delete_draft) and create a new one (ofw_save_draft without messageId).';
+      }
     }
 
-    const text = data ? JSON.stringify(data, null, 2) : 'Draft saved.';
-    return textResponse(rewriteNote ? `${rewriteNote}\n\n${text}` : text);
+    const responseObj = persisted ?? data;
+    const text = responseObj ? JSON.stringify(responseObj, null, 2) : 'Draft saved.';
+    const notes = [rewriteNote, noOpWarning].filter((n): n is string => n !== null).join('\n\n');
+    return textResponse(notes ? `${notes}\n\n${text}` : text);
   });
 
   server.registerTool('ofw_delete_draft', {

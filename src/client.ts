@@ -37,6 +37,20 @@ function parseContentDispositionFilename(cd: string): string | null {
   return m ? m[1] : null;
 }
 
+// Set OFW_DEBUG_LOG=1 (or true/yes/on) to log every OFW request/response to
+// stderr. Authorization is redacted. Bodies are logged in full — set this
+// only when debugging, never in normal use.
+function debugLogEnabled(): boolean {
+  const v = process.env.OFW_DEBUG_LOG;
+  return v === '1' || v === 'true' || v === 'yes' || v === 'on';
+}
+
+function redactHeaders(h: Record<string, string>): Record<string, string> {
+  const out = { ...h };
+  if (out.Authorization) out.Authorization = `Bearer ${out.Authorization.slice(7, 17)}…`;
+  return out;
+}
+
 export class OFWClient {
   private token: string | null = null;
   private tokenExpiry: Date | null = null;
@@ -45,6 +59,9 @@ export class OFWClient {
     await this.ensureAuthenticated();
     const response = await this.fetchWithRetry(method, path, body, 'application/json', false);
     const text = await response.text();
+    if (debugLogEnabled()) {
+      console.error(`[ofw-debug] response body: ${text || '<empty>'}`);
+    }
     return (text ? JSON.parse(text) : null) as T;
   }
 
@@ -77,11 +94,27 @@ export class OFWClient {
     };
     if (body !== undefined && !isFormData) headers['Content-Type'] = 'application/json';
 
-    const response = await fetch(`${BASE_URL}${path}`, {
+    const url = `${BASE_URL}${path}`;
+    if (debugLogEnabled()) {
+      const bodyPreview = body === undefined
+        ? '<none>'
+        : isFormData
+          ? `<FormData entries=${Array.from((body as FormData).keys()).join(',')}>`
+          : JSON.stringify(body);
+      console.error(`[ofw-debug] → ${method} ${url}${isRetry ? ' (retry)' : ''}`);
+      console.error(`[ofw-debug]   headers: ${JSON.stringify(redactHeaders(headers))}`);
+      console.error(`[ofw-debug]   body: ${bodyPreview}`);
+    }
+
+    const response = await fetch(url, {
       method,
       headers,
       ...(body !== undefined ? { body: isFormData ? body : JSON.stringify(body) } : {}),
     });
+
+    if (debugLogEnabled()) {
+      console.error(`[ofw-debug] ← ${response.status} ${response.statusText}`);
+    }
 
     if (response.status === 401 && !isRetry) {
       this.token = null;

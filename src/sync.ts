@@ -221,10 +221,10 @@ export async function syncDrafts(client: OFWClient, draftsFolderId: string): Pro
   for (const item of items) {
     seenIds.add(item.id);
     const modifiedAt = item.date?.dateTime ?? new Date().toISOString();
+    // OFW's list endpoint's `date.dateTime` is NOT a reliable modification
+    // timestamp for drafts — direct UI edits don't bump it — so we can't
+    // use it to skip the detail fetch. Always re-fetch; drafts are few.
     const existing = getDraft(item.id);
-    if (existing && existing.modifiedAt === modifiedAt) {
-      continue;
-    }
     const detail = await client.request<DraftDetailResponse>('GET', `/pub/v3/messages/${item.id}`);
     const row: DraftRow = {
       id: item.id,
@@ -236,7 +236,12 @@ export async function syncDrafts(client: OFWClient, draftsFolderId: string): Pro
       listData: item,
     };
     upsertDraft(row);
-    synced++;
+    if (!existing
+        || existing.body !== row.body
+        || existing.subject !== row.subject
+        || existing.replyToId !== row.replyToId) {
+      synced++;
+    }
   }
 
   for (const id of listDraftIds()) {

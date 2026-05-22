@@ -266,6 +266,98 @@ describe('OFWClient', () => {
     expect(h['ofw-client']).toBe('WebApplication');
     expect(h['ofw-version']).toBe('1.0.0');
   });
+
+  describe('OFW_DEBUG_LOG', () => {
+    let originalDebug: string | undefined;
+    let errSpy: ReturnType<typeof vi.spyOn>;
+
+    beforeEach(() => {
+      originalDebug = process.env.OFW_DEBUG_LOG;
+      process.env.OFW_DEBUG_LOG = '1';
+      errSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    });
+
+    afterEach(() => {
+      if (originalDebug === undefined) delete process.env.OFW_DEBUG_LOG;
+      else process.env.OFW_DEBUG_LOG = originalDebug;
+    });
+
+    it('logs request method/url/headers/body and response status+body when enabled', async () => {
+      mockFetch([
+        LOGIN_INIT,
+        LOGIN_SUCCESS,
+        { status: 200, body: { ok: true } },
+      ]);
+      const client = new OFWClient();
+      await client.request('POST', '/pub/v3/messages', { foo: 'bar' });
+
+      const lines = errSpy.mock.calls.map((c) => String(c[0]));
+      const debugLines = lines.filter((l) => l.startsWith('[ofw-debug]'));
+      expect(debugLines.some((l) => l.includes('→ POST'))).toBe(true);
+      expect(debugLines.some((l) => l.includes('"foo":"bar"'))).toBe(true);
+      // Authorization header is redacted (only the prefix is logged).
+      expect(debugLines.some((l) => l.includes('"Authorization":"Bearer ') && l.includes('…"'))).toBe(true);
+      expect(debugLines.some((l) => l.includes('← 200'))).toBe(true);
+      expect(debugLines.some((l) => l.includes('response body:'))).toBe(true);
+    });
+
+    it('logs FormData payloads as a key summary, not the full multipart contents', async () => {
+      mockFetch([
+        LOGIN_INIT,
+        LOGIN_SUCCESS,
+        { status: 200, body: {} },
+      ]);
+      const form = new FormData();
+      form.append('messageIds', '42');
+      form.append('messageIds', '43');
+      const client = new OFWClient();
+      await client.request('DELETE', '/pub/v1/messages', form);
+
+      const lines = errSpy.mock.calls.map((c) => String(c[0]));
+      expect(lines.some((l) => l.includes('<FormData entries=messageIds,messageIds>'))).toBe(true);
+    });
+
+    it('logs <none> for a bodyless request', async () => {
+      mockFetch([
+        LOGIN_INIT,
+        LOGIN_SUCCESS,
+        { status: 200, body: {} },
+      ]);
+      const client = new OFWClient();
+      await client.request('GET', '/pub/v1/test');
+
+      const lines = errSpy.mock.calls.map((c) => String(c[0]));
+      expect(lines.some((l) => l.includes('body: <none>'))).toBe(true);
+    });
+
+    it('marks retried requests in the log', async () => {
+      mockFetch([
+        LOGIN_INIT,
+        LOGIN_SUCCESS,
+        { status: 401, body: {} },
+        LOGIN_INIT,
+        LOGIN_SUCCESS,
+        { status: 200, body: { ok: true } },
+      ]);
+      const client = new OFWClient();
+      await client.request('GET', '/pub/v1/test');
+      const lines = errSpy.mock.calls.map((c) => String(c[0]));
+      expect(lines.some((l) => l.includes('(retry)'))).toBe(true);
+    });
+
+    it('logs <empty> when response body is empty', async () => {
+      mockFetch([
+        LOGIN_INIT,
+        LOGIN_SUCCESS,
+        { status: 200, body: '' },
+      ]);
+      const client = new OFWClient();
+      await client.request('GET', '/pub/v1/test');
+      const lines = errSpy.mock.calls.map((c) => String(c[0]));
+      // mockFetch JSON.stringifies undefined-ish body to '""'; force an explicit empty.
+      expect(lines.some((l) => l.startsWith('[ofw-debug] response body:'))).toBe(true);
+    });
+  });
 });
 
 describe('OFWClient.requestBinary', () => {
