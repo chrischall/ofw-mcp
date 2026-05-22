@@ -379,17 +379,38 @@ describe('OFWClient', () => {
       expect(lines.some((l) => l.includes('(retry)'))).toBe(true);
     });
 
-    it('logs <empty> when response body is empty', async () => {
-      mockFetch([
-        LOGIN_INIT,
-        LOGIN_SUCCESS,
-        { status: 200, body: '' },
-      ]);
+    it('logs <empty> when response body is genuinely empty', async () => {
+      // Hand-stub the API call's text() to return '' so we exercise the
+      // `text || '<empty>'` branch in client.ts (the shared mockFetch
+      // JSON.stringifies its body, which never yields an empty string).
+      let call = 0;
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+        call++;
+        if (call === 1) {
+          return {
+            ok: false, status: 303, statusText: '303',
+            headers: { get: (k: string) => k.toLowerCase() === 'set-cookie' ? 'SESSION=x' : null },
+            text: async () => '', json: async () => null,
+          } as unknown as Response;
+        }
+        if (call === 2) {
+          return {
+            ok: true, status: 200, statusText: '200',
+            headers: { get: (k: string) => k.toLowerCase() === 'content-type' ? 'application/json' : null },
+            text: async () => JSON.stringify({ auth: MOCK_TOKEN }),
+            json: async () => ({ auth: MOCK_TOKEN }),
+          } as unknown as Response;
+        }
+        return {
+          ok: true, status: 200, statusText: '200',
+          headers: { get: () => null },
+          text: async () => '',
+        } as unknown as Response;
+      });
       const client = new OFWClient();
       await client.request('GET', '/pub/v1/test');
       const lines = errSpy.mock.calls.map((c) => String(c[0]));
-      // mockFetch JSON.stringifies undefined-ish body to '""'; force an explicit empty.
-      expect(lines.some((l) => l.startsWith('[ofw-debug] response body:'))).toBe(true);
+      expect(lines.some((l) => l === '[ofw-debug] response body: <empty>')).toBe(true);
     });
   });
 });
