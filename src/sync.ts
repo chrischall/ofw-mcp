@@ -6,7 +6,7 @@ import {
   upsertAttachmentForMessage,
   type MessageRow, type DraftRow, type FolderName,
 } from './cache.js';
-import { mapRecipients } from './tools/_shared.js';
+import { mapRecipients, type ApiRecipient } from './tools/_shared.js';
 
 // Each OFW message detail returns `files: [fileId, ...]`. We fetch the metadata
 // for each file id (cheap JSON call) so the model can see filenames/mime types
@@ -49,12 +49,11 @@ export async function fetchAttachmentMetaForMessage(
   messageId: number,
   fileIds: number[],
 ): Promise<void> {
-  for (const fid of fileIds) {
-    // Best-effort: a single bad attachment shouldn't break the surrounding
-    // sync. The file id stays in the message's listData; the model can
-    // retry later via ofw_download_attachment, which surfaces the real error.
-    try { await fetchAttachmentMeta(client, fid, messageId); } catch { /* swallow */ }
-  }
+  // Fan out in parallel — each fetch is independent and the file id stays
+  // in listData on failure (model can retry via ofw_download_attachment,
+  // which surfaces the real error). Promise.allSettled so one bad
+  // attachment doesn't break the surrounding sync.
+  await Promise.allSettled(fileIds.map((fid) => fetchAttachmentMeta(client, fid, messageId)));
 }
 
 export interface FolderIds {
@@ -94,7 +93,7 @@ interface ListItem {
   date: { dateTime: string };
   from?: { name?: string };
   showNeverViewed: boolean;
-  recipients?: Array<{ user: { id: number; name: string }; viewed?: { dateTime: string } | null }>;
+  recipients?: ApiRecipient[];
 }
 
 interface ListResponse { data?: ListItem[] }
@@ -200,7 +199,7 @@ interface DraftListItem {
   subject: string;
   date: { dateTime: string };
   replyToId: number | null;
-  recipients?: Array<{ user: { id: number; name: string }; viewed?: { dateTime: string } | null }>;
+  recipients?: ApiRecipient[];
 }
 interface DraftListResponse { data?: DraftListItem[] }
 interface DraftDetailResponse {

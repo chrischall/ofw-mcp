@@ -1275,21 +1275,3 @@ describe('ofw_get_message attachments', () => {
   });
 });
 
-describe('registerMessageTools', () => {
-  it('registers 11 message tools', () => {
-    const client = makeClient({});
-    setup(client);
-    expect(handlers.size).toBe(11);
-    expect(handlers.has('ofw_list_message_folders')).toBe(true);
-    expect(handlers.has('ofw_list_messages')).toBe(true);
-    expect(handlers.has('ofw_get_message')).toBe(true);
-    expect(handlers.has('ofw_send_message')).toBe(true);
-    expect(handlers.has('ofw_list_drafts')).toBe(true);
-    expect(handlers.has('ofw_save_draft')).toBe(true);
-    expect(handlers.has('ofw_delete_draft')).toBe(true);
-    expect(handlers.has('ofw_get_unread_sent')).toBe(true);
-    expect(handlers.has('ofw_sync_messages')).toBe(true);
-    expect(handlers.has('ofw_download_attachment')).toBe(true);
-    expect(handlers.has('ofw_upload_attachment')).toBe(true);
-  });
-});

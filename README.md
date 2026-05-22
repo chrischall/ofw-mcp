@@ -18,7 +18,7 @@ Ask Claude things like:
 ## Requirements
 
 - [Claude Desktop](https://claude.ai/download)
-- [Node.js](https://nodejs.org) 18 or later
+- [Node.js](https://nodejs.org) 22.5 or later (`node:sqlite` is the cache backend)
 - An active OurFamilyWizard account
 
 ## Installation
@@ -147,25 +147,32 @@ Read-only tools run automatically. Write tools ask for your confirmation first.
 ## Development
 
 ```bash
-npm test        # run the test suite
-npm run build   # compile TypeScript → dist/
+npm test         # run the vitest suite
+npm run build    # tsc → dist/, then esbuild bundle → dist/bundle.js
+npm run dev      # node --env-file=.env dist/index.js (requires built dist)
 ```
+
+Main is protected. All changes land via PR — open with `gh pr create --label <release-notes-label>` and add `ready-to-merge` once you're satisfied with the auto-review feedback. See `CLAUDE.md` for the full PR + release flow.
 
 ### Project structure
 
 ```
 src/
-  client.ts       OFW auth and HTTP client
-  index.ts        MCP server entry point
+  index.ts          MCP server entry (McpServer + StdioServerTransport)
+  client.ts         OFW HTTP client with Bearer token + 401/429 retry
+  auth.ts           resolveAuth(): env-var creds → fetchproxy → error
+  auth-password.ts  Spring Security form login (legacy env-var path)
+  cache.ts          SQLite cache (messages, drafts, attachments, sync state)
+  sync.ts           Folder ID resolution + per-folder sync logic
+  config.ts         Cache dir, attachment dir, env parsing
   tools/
-    user.ts       ofw_get_profile, ofw_get_notifications
-    messages.ts   folders, list, get, send
-    calendar.ts   list, create, update, delete events
-    expenses.ts   totals, list, create
-    journal.ts    list, create entries
-tests/
-  client.test.ts
-  tools/
+    _shared.ts      Recipient mapping, response helpers, path expansion
+    user.ts         ofw_get_profile, ofw_get_notifications
+    messages.ts     Folders, list, get, send, drafts, sync, attachments
+    calendar.ts     List, create, update, delete events
+    expenses.ts     Totals, list, create
+    journal.ts      List, create entries
+tests/              Mirrors src/; mocks OFWClient.request via vi.spyOn
 ```
 
 ### Auth flow

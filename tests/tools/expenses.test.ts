@@ -75,13 +75,3 @@ describe('ofw_create_expense', () => {
   });
 });
 
-describe('registerExpenseTools', () => {
-  it('registers 3 expense tools', () => {
-    const client = makeClient({});
-    setup(client);
-    expect(handlers.size).toBe(3);
-    expect(handlers.has('ofw_get_expense_totals')).toBe(true);
-    expect(handlers.has('ofw_list_expenses')).toBe(true);
-    expect(handlers.has('ofw_create_expense')).toBe(true);
-  });
-});

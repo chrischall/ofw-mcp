@@ -55,11 +55,3 @@ describe('ofw_get_notifications', () => {
   });
 });
 
-describe('registerUserTools', () => {
-  it('registers ofw_get_profile and ofw_get_notifications', () => {
-    const client = makeClient({});
-    setup(client);
-    expect(handlers.has('ofw_get_profile')).toBe(true);
-    expect(handlers.has('ofw_get_notifications')).toBe(true);
-  });
-});

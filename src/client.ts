@@ -1,6 +1,8 @@
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import { resolveAuth } from './auth.js';
+import { parseBoolEnv } from './config.js';
+import { BASE_URL, OFW_PROTOCOL_HEADERS, OFW_TOKEN_TTL_MS, OFW_TOKEN_EXPIRY_SKEW_MS } from './protocol.js';
 
 // Load .env for local dev; silently skip if dotenv is unavailable (e.g. mcpb bundle)
 try {
@@ -10,13 +12,6 @@ try {
 } catch {
   // not available — rely on process.env (mcpb sets credentials via mcp_config.env)
 }
-
-const BASE_URL = 'https://ofw.ourfamilywizard.com';
-
-const OFW_PROTOCOL_HEADERS = {
-  'ofw-client': 'WebApplication',
-  'ofw-version': '1.0.0',
-} as const;
 
 export interface BinaryResponse {
   body: Buffer;
@@ -41,8 +36,7 @@ function parseContentDispositionFilename(cd: string): string | null {
 // stderr. Authorization is redacted. Bodies are logged in full — set this
 // only when debugging, never in normal use.
 function debugLogEnabled(): boolean {
-  const v = process.env.OFW_DEBUG_LOG;
-  return v === '1' || v === 'true' || v === 'yes' || v === 'on';
+  return parseBoolEnv('OFW_DEBUG_LOG');
 }
 
 function redactHeaders(h: Record<string, string>): Record<string, string> {
@@ -151,12 +145,12 @@ export class OFWClient {
   private async login(): Promise<void> {
     const { token, expiresAt } = await resolveAuth();
     this.token = token;
-    this.tokenExpiry = expiresAt ?? new Date(Date.now() + 6 * 60 * 60 * 1000);
+    this.tokenExpiry = expiresAt ?? new Date(Date.now() + OFW_TOKEN_TTL_MS);
   }
 
   private isTokenExpiredSoon(): boolean {
     if (!this.token || !this.tokenExpiry) return true;
-    return this.tokenExpiry.getTime() - Date.now() < 5 * 60 * 1000;
+    return this.tokenExpiry.getTime() - Date.now() < OFW_TOKEN_EXPIRY_SKEW_MS;
   }
 }
 

@@ -44,7 +44,7 @@ export function registerCalendarTools(server: McpServer, client: OFWClient): voi
 
   server.registerTool('ofw_update_event', {
     description: 'Update an existing OurFamilyWizard calendar event',
-    annotations: { destructiveHint: false },
+    annotations: { destructiveHint: true },
     inputSchema: {
       eventId: z.string(),
       title: z.string().optional(),

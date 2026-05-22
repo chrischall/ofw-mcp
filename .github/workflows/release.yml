@@ -59,7 +59,7 @@ jobs:
           out = pathlib.Path(f"{skill_name}-{version}.skill")
 
           with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
-              zf.write(pathlib.Path("SKILL.md"), f"{skill_name}/SKILL.md")
+              zf.write(pathlib.Path("skills/ofw/SKILL.md"), f"{skill_name}/SKILL.md")
 
           print(f"Packaged {out} ({out.stat().st_size} bytes)")
           EOF
@@ -103,8 +103,8 @@ jobs:
             echo "CLAWHUB_TOKEN not set — skipping ClawHub publish."
             exit 0
           fi
-          if [ ! -f SKILL.md ]; then
-            echo "SKILL.md not present — skipping ClawHub publish."
+          if [ ! -f skills/ofw/SKILL.md ]; then
+            echo "skills/ofw/SKILL.md not present — skipping ClawHub publish."
             exit 0
           fi
           npx --yes clawhub login --token "$CLAWHUB_TOKEN" --no-browser
@@ -113,7 +113,7 @@ jobs:
           # requires an openclaw.plugin.json we don't have. Workaround: copy
           # SKILL.md to a clean temp dir and publish that as a standalone skill.
           SKILL_DIR=$(mktemp -d)
-          cp SKILL.md "$SKILL_DIR/"
+          cp skills/ofw/SKILL.md "$SKILL_DIR/"
           npx --yes clawhub publish "$SKILL_DIR" --version "${VERSION}" --slug ofw-mcp
 
       - name: Create GitHub Release

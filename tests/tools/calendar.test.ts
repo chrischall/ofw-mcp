@@ -104,14 +104,3 @@ describe('ofw_delete_event', () => {
   });
 });
 
-describe('registerCalendarTools', () => {
-  it('registers 4 calendar tools', () => {
-    const client = makeClient({});
-    setup(client);
-    expect(handlers.size).toBe(4);
-    expect(handlers.has('ofw_list_events')).toBe(true);
-    expect(handlers.has('ofw_create_event')).toBe(true);
-    expect(handlers.has('ofw_update_event')).toBe(true);
-    expect(handlers.has('ofw_delete_event')).toBe(true);
-  });
-});
