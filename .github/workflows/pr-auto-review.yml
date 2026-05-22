@@ -35,8 +35,14 @@ permissions:
   contents: read
   pull-requests: write
   issues: write
-  id-token: write
   actions: read
+  # Intentionally NOT granting `id-token: write`. On `pull_request_target`
+  # claude-code-action auto-detects "agent mode" and, if `id-token: write`
+  # is available, attempts an OIDC token exchange against Anthropic's
+  # federation endpoint — which 401s for this repo (no federation rule
+  # configured) and fails the step instead of falling back to
+  # ANTHROPIC_API_KEY. Without `id-token: write` the action proceeds
+  # straight to API-key auth, which is what we want.
 
 concurrency:
   group: pr-auto-review-${{ github.event.pull_request.number }}
