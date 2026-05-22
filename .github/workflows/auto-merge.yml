@@ -18,6 +18,12 @@ name: Auto-merge PRs
 # arm — dependabot's pull_request token is restricted. Safe because we
 # never check out or execute PR code; we only call the GitHub API via
 # the gh CLI.
+#
+# RELEASE_PAT (not GITHUB_TOKEN) is used to arm `gh pr merge --auto`.
+# GitHub suppresses workflow runs for events triggered by GITHUB_TOKEN
+# to prevent loops; with the PAT, the merge it eventually performs
+# fires `push` events on main, which is what tag-on-release-merge.yml
+# listens on.
 
 on:
   pull_request_target:
@@ -44,7 +50,7 @@ jobs:
     steps:
       - name: Arm auto-merge for dependabot
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.RELEASE_PAT }}
           PR_URL: ${{ github.event.pull_request.html_url }}
         run: gh pr merge --auto --merge "$PR_URL"
 
@@ -58,6 +64,6 @@ jobs:
     steps:
       - name: Arm auto-merge after owner adds ready-to-merge
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.RELEASE_PAT }}
           PR_URL: ${{ github.event.pull_request.html_url }}
         run: gh pr merge --auto --merge "$PR_URL"
