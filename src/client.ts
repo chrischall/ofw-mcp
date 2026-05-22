@@ -1,6 +1,7 @@
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import { resolveAuth } from './auth.js';
+import { parseBoolEnv } from './config.js';
 
 // Load .env for local dev; silently skip if dotenv is unavailable (e.g. mcpb bundle)
 try {
@@ -41,8 +42,7 @@ function parseContentDispositionFilename(cd: string): string | null {
 // stderr. Authorization is redacted. Bodies are logged in full — set this
 // only when debugging, never in normal use.
 function debugLogEnabled(): boolean {
-  const v = process.env.OFW_DEBUG_LOG;
-  return v === '1' || v === 'true' || v === 'yes' || v === 'on';
+  return parseBoolEnv('OFW_DEBUG_LOG');
 }
 
 function redactHeaders(h: Record<string, string>): Record<string, string> {
