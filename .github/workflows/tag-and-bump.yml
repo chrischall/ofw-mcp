@@ -93,7 +93,7 @@ jobs:
           CURRENT: ${{ steps.versions.outputs.current }}
           NEXT: ${{ steps.versions.outputs.next }}
         run: |
-          gh pr create \
+          PR_URL=$(gh pr create \
             --base main \
             --head "release/v${NEXT}" \
             --label "ignore-for-release" \
@@ -112,4 +112,13 @@ jobs:
           Labeled \`ignore-for-release\` so this PR does not appear in
           the v${CURRENT} release notes.
           EOF
-          )"
+          )")
+          echo "Opened $PR_URL"
+
+          # Follow-up add of `ready-to-merge` so auto-merge.yml arms.
+          # Labels passed to `gh pr create` are bundled into the `opened`
+          # event and DON'T fire a separate `labeled` event — only a
+          # post-create label add does. So this is a deliberate second
+          # call to make `arm-owner-on-ready-label` actually trigger.
+          gh pr edit "$PR_URL" --add-label ready-to-merge
+          echo "Added ready-to-merge to $PR_URL"
