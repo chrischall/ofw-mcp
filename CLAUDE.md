@@ -46,6 +46,7 @@ OFW_CACHE_IDENTITY        Optional. Explicit cache-key label; overrides OFW_USER
 OFW_CACHE_DIR             Optional. Overrides cache dir (default ~/.cache/ofw-mcp)
 OFW_ATTACHMENTS_DIR       Optional. Where ofw_download_attachment writes (default ~/Downloads/ofw-mcp)
 OFW_INLINE_ATTACHMENTS    Optional. "1|true|yes|on" → return attachments as MCP content blocks by default
+OFW_DEBUG_LOG             Optional. "1|true|yes|on" → log every OFW request/response to stderr (Authorization redacted). Diagnostic only.
 ```
 
 `auth.ts` ignores blank values, the strings `"undefined"`/`"null"`, and unsubstituted `${VAR}` placeholders — defensive against MCP hosts passing the env block through unexpanded.
