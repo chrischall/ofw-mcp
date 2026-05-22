@@ -36,13 +36,11 @@ permissions:
   pull-requests: write
   issues: write
   actions: read
-  # Intentionally NOT granting `id-token: write`. On `pull_request_target`
-  # claude-code-action auto-detects "agent mode" and, if `id-token: write`
-  # is available, attempts an OIDC token exchange against Anthropic's
-  # federation endpoint — which 401s for this repo (no federation rule
-  # configured) and fails the step instead of falling back to
-  # ANTHROPIC_API_KEY. Without `id-token: write` the action proceeds
-  # straight to API-key auth, which is what we want.
+  # No `id-token: write` — see the `github_token:` override on the
+  # claude-code-action step below. With that override the action skips
+  # the GitHub-App OIDC exchange entirely (which 401s for us because
+  # the `claude[bot]` App is not authorized for our pull_request_target
+  # events), so id-token permission is unnecessary.
 
 concurrency:
   group: pr-auto-review-${{ github.event.pull_request.number }}
@@ -97,6 +95,11 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Short-circuits setupGitHubToken() in the action so it skips the
+          # OIDC → claude[bot] App-token exchange and uses the supplied
+          # token directly. PR comments will be authored by
+          # `github-actions[bot]`, not `claude[bot]` — content unchanged.
+          github_token: ${{ secrets.GITHUB_TOKEN }}
           claude_args: |
             --json-schema '{"type":"object","required":["verdict","summary","important_findings"],"properties":{"verdict":{"enum":["pass","warn","fail"]},"summary":{"type":"string"},"important_findings":{"type":"array","items":{"type":"string"}}}}'
             --allowedTools "Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr comment:*),Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(cat:*),Bash(rg:*),Bash(jq:*),Bash(ls:*),Bash(find:*),mcp__github_inline_comment__create_inline_comment"
