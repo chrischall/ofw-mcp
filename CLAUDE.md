@@ -89,35 +89,40 @@ npm test           # vitest run
 
 ## Versioning
 
-Version appears in SEVEN places — all must match:
+Driven by **release-please** (`googleapis/release-please-action@v4`). Authoritative state lives in `.release-please-manifest.json`; release-please bumps every file registered in `release-please-config.json`'s `extra-files`:
 
-1. `package.json` → `"version"`
-2. `package-lock.json` → `npm install --package-lock-only` after changing package.json (or `npm version` does it automatically)
-3. `src/index.ts` → `McpServer` constructor `version` field
-4. `manifest.json` → `"version"`
-5. `server.json` → `"version"` and `packages[].version` (two entries)
-6. `.claude-plugin/plugin.json` → `"version"`
-7. `.claude-plugin/marketplace.json` → `plugins[].version` and `metadata.version`
+- `package.json` / `package-lock.json` — handled by `release-type: node`
+- `src/index.ts` — the `version: '…'` literal on the line marked `// x-release-please-version`
+- `manifest.json` — `$.version`
+- `server.json` — `$.version` and `$.packages[*].version`
+- `.claude-plugin/plugin.json` — `$.version`
+- `.claude-plugin/marketplace.json` — `$.plugins[*].version` and `$.metadata.version`
+
+If you add a new file with a `version` field, register it in `release-please-config.json`. Otherwise it silently drifts — release-please trusts its own bump logic, and there's no in-workflow guard.
 
 ### Important
 
-Do NOT manually bump versions or create tags unless the user explicitly asks. Versioning is handled by the **Tag & Bump** GitHub Action (`.github/workflows/tag-and-bump.yml`).
+Do NOT manually bump versions or create tags. Conventional-commit PR titles tell release-please what to do: `fix:` → patch, `feat:` → minor, `feat!:` / `BREAKING CHANGE` → major. `chore:`, `docs:`, `ci:`, `test:`, `build:`, `refactor:` don't trigger a release on their own.
 
 ### Release workflow
 
-Main is always one version ahead of the latest tag. Releases are zero-touch — kicking off **Tag & Bump** drives the whole loop:
+Main is always at the latest released version (not "one ahead" — that was the old `tag-and-bump` model). The whole loop lives in `.github/workflows/release-please.yml`:
 
-1. **Tag & Bump** (`.github/workflows/tag-and-bump.yml`, manual `workflow_dispatch`): branches `release/v<NEXT>` off main, bumps every version field (see the list above), rebuilds, pushes the branch, opens a PR titled `chore: release v<CURRENT> (bump main to v<NEXT>)` labeled `ignore-for-release`, then follows up with `gh pr edit --add-label ready-to-merge` to arm auto-merge.
-2. **Auto-merge** (`auto-merge.yml`, `arm-owner-on-ready-label` job): sees `ready-to-merge` on an owner PR and calls `gh pr merge --auto --merge` via `RELEASE_PAT`. (The PAT, not `GITHUB_TOKEN`, so the resulting merge fires downstream workflows.)
-3. **Tag on release merge** (`tag-on-release-merge.yml`, `push: branches: [main]`): compares `HEAD`'s `package.json` version to `HEAD~1`'s. When they differ, tags `HEAD~1` with `v<HEAD~1's version>` — i.e. the released code, before the bump — and pushes the tag via `RELEASE_PAT`. Idempotent: skips if the tag already exists.
-4. **Release** (`release.yml`, `push: tags: ['v*']`): rebuilds, publishes to npm with provenance, publishes to the MCP Registry, publishes the skill to ClawHub (if `CLAWHUB_TOKEN` is set), creates a GitHub Release with the `.mcpb` + `.skill` assets and `generate_release_notes: true`.
+1. **release-please-action runs** on every push to main. When it sees commits since the last release that warrant a bump, it opens (or updates) a release PR titled `chore: release v<NEXT>`, bumps every file in `extra-files`, and writes the new entry into `CHANGELOG.md`.
+2. **The release PR sits open as your review gate.** Look at the proposed CHANGELOG. When you're ready to ship, either merge it via the GitHub UI, or add the `ready-to-merge` label and `auto-merge.yml` will arm `gh pr merge --auto`. CI gates the merge either way.
+3. When the release PR merges, **release-please-action runs again** on the new push, creates the `v<NEXT>` tag, and creates a GitHub Release with the CHANGELOG section as the body. Its `release_created` output flips to `true`.
+4. **The `publish` job** in the same workflow runs (gated on `needs.release-please.outputs.release_created == 'true'`): checks out the tag, builds and packages the `.mcpb` bundle and `.skill` archive, publishes to npm (provenance, idempotent), the MCP Registry (OIDC), and ClawHub (gated on `secrets.CLAWHUB_TOKEN`), then attaches the `.mcpb` and `.skill` to the existing release via `gh release upload --clobber`.
 
-The branch-and-PR shape is required because `main` is protected: direct pushes are blocked, `ci` is a required status check, and admin enforcement is on. The release bot has no escape hatch — every change to main goes through a PR.
+To skip a release temporarily, close release-please's PR — it'll re-open with more content the next time something warrants a bump. To force a release for content release-please thinks doesn't warrant one, see release-please's `release-as` / `--release-as` options.
 
-<!-- pr-workflow:v3 -->
+Recovery from a flaky publish step: re-run the failed `release-please.yml` workflow run from the GitHub Actions UI. The publish job's npm step is idempotent (skips if already published); MCP Registry publish is idempotent in practice; `gh release upload --clobber` overwrites any prior uploads.
+
+The branch-and-PR shape is still required because `main` is protected by the *main protection (PR + ci)* ruleset.
+
+<!-- pr-workflow:v4 -->
 ## Pull requests & release notes
 
-**Default workflow: branch + PR. Direct pushes to `main` are blocked by branch protection** (required status check `ci`, required PR flow, admin enforcement on). The PR mechanism is also the only way release notes get generated — `generate_release_notes` (configured in `.github/release.yml`) picks up merged PRs.
+**Default workflow: branch + PR. Direct pushes to `main` are blocked by the *main protection (PR + ci)* ruleset.** The PR mechanism is also how release-please learns what's queued: every merged PR's conventional-commit prefixes (`fix:`, `feat:`, etc.) drive both the next version bump and the CHANGELOG section.
 
 PR handling is **source-aware**:
 
@@ -138,24 +143,25 @@ Verdict semantics (Claude follows the official `code-review` plugin's severity m
 
 Override: if you want to merge through a `warn` or `fail`, add `ready-to-merge` by hand — it still arms auto-merge. To suppress auto-merge on a `pass`, remove the label or close-and-reopen the PR draft.
 
-For every PR, apply exactly one label so it lands in the right release-notes section:
+PR titles use conventional-commit prefixes — release-please reads them to pick the next version and to write the CHANGELOG entry (see [Conventional Commits](https://www.conventionalcommits.org/)):
 
-| Label                | Section in release notes |
-|----------------------|--------------------------|
-| `enhancement`        | Features                 |
-| `bug`                | Bug Fixes                |
-| `security`           | Security                 |
-| `refactor`           | Refactor                 |
-| `documentation`      | Documentation            |
-| `test`               | Tests                    |
-| `dependencies`       | Dependencies             |
-| `ci` / `github_actions` | CI & Build            |
-| *(none / unmatched)* | Other Changes            |
-| `ignore-for-release` | Hidden from notes        |
+| Prefix       | Bumps    | CHANGELOG section            |
+|--------------|----------|------------------------------|
+| `feat:`      | minor    | Features                     |
+| `fix:`       | patch    | Bug Fixes                    |
+| `perf:`      | patch    | Performance                  |
+| `revert:`    | patch    | Reverts                      |
+| `refactor:`  | none     | Refactor                     |
+| `docs:`      | none     | Documentation                |
+| `test:`      | none     | hidden                       |
+| `build:`     | none     | hidden                       |
+| `ci:`        | none     | hidden                       |
+| `chore:`     | none     | hidden                       |
+| `feat!:` / `BREAKING CHANGE:` | major | Features (with ⚠ marker) |
 
-The **PR title** becomes the bullet — write it like a user-facing changelog entry (`ofw_sync_messages: resume from saved cursor`), not internal shorthand (`sync tweaks`). Conventional-commit prefixes (`feat:`, `fix:`, `chore:`) are still fine in commit messages, but the PR title should read clean.
+The bullet text in the CHANGELOG is the part after the prefix — write it like a user-facing changelog entry (`ofw_sync_messages: resume from saved cursor`), not internal shorthand (`sync tweaks`).
 
-Open with `gh pr create --label <label>` (or `--label ignore-for-release` for chores not worth a line). You generally don't need to pre-add `ready-to-merge` anymore — let Claude's review verdict do it. If you want to skip the review (e.g. for a trivial chore you've eyeballed yourself), add `ready-to-merge` at PR-create time and it'll arm immediately. Dependabot PRs auto-arm without `ready-to-merge`. The repo blocks squash merges (rebase is allowed at the repo level but unused — every workflow calls `gh pr merge --merge` so all PRs land as merge commits); if you call `gh pr merge` manually, don't pass `--squash` or the call will fail.
+Open with `gh pr create`; you don't need any labels. Let Claude's review verdict add `ready-to-merge` for you. If you want to skip the review on a trivial chore, add `--label ready-to-merge` at PR-create time and it'll arm immediately. Dependabot PRs auto-arm without it. The repo blocks squash merges (rebase is allowed at the repo level but unused — every workflow calls `gh pr merge --merge` so all PRs land as merge commits); if you call `gh pr merge` manually, don't pass `--squash` or the call will fail.
 
 `main` is protected by two rulesets: *Block force-push and deletion on main* and *main protection (PR + ci)* — the latter requires every change to go through a PR and `ci` to pass (strict mode = branch must be up-to-date with main). No bypass actors; admins are not exempt. See `gh api /repos/chrischall/ofw-mcp/rulesets` to inspect.
 

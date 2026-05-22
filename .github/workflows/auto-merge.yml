@@ -6,10 +6,10 @@ name: Auto-merge PRs
 #    draft. Merges when CI is green; no review gating.
 #  - Same-repo (non-fork) PRs with the `ready-to-merge` label: arm
 #    `--auto --merge`. That label is added either:
-#      * by the owner manually (e.g. to override Claude's warn/fail, or
-#        to land tag-and-bump's release PR), OR
+#      * by the owner manually (to override Claude's warn/fail), OR
 #      * automatically by pr-auto-review.yml when Claude's verdict =
-#        `pass` on a same-repo PR.
+#        `pass` on a same-repo PR, OR
+#      * automatically by release-please.yml on the release PR.
 #    Either way, the label is the signal.
 #  - Fork PRs: never auto-armed. Reviewed for advisory value only;
 #    the owner merges those by hand.
@@ -26,8 +26,8 @@ name: Auto-merge PRs
 # RELEASE_PAT (not GITHUB_TOKEN) is used to arm `gh pr merge --auto`.
 # GitHub suppresses workflow runs for events triggered by GITHUB_TOKEN
 # to prevent loops; with the PAT, the merge it eventually performs
-# fires `push` events on main, which is what tag-on-release-merge.yml
-# listens on.
+# fires `push` events on main, which is what release-please.yml
+# listens on (to open / tag / publish the next release).
 
 on:
   pull_request_target:

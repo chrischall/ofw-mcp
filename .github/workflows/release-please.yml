@@ -1,19 +1,67 @@
-name: Release
+name: release-please
+
+# Canonical release-please workflow.
+#
+# On every push to main, run googleapis/release-please-action. It scans
+# Conventional-Commit messages since the last release tag and:
+#
+#   - If new fix:/feat:/etc. commits are present, opens or updates a
+#     "release PR" that bumps every file registered in extra-files (see
+#     release-please-config.json) and updates CHANGELOG.md.
+#   - When that release PR merges, the action creates a `v<VERSION>` tag
+#     and a GitHub Release populated from the CHANGELOG section.
+#
+# The release PR is left open as a human review gate. You merge it
+# (manually via the GitHub UI, or by adding the `ready-to-merge` label so
+# auto-merge.yml arms it) when you're ready to ship.
+#
+# When the release PR merges, this workflow runs again, release_created
+# becomes true, and the `publish` job runs.
+#
+# RELEASE_PAT (not GITHUB_TOKEN) is used so:
+#   - The release PR's `opened` event triggers downstream workflows (CI,
+#     pr-auto-review.yml).
+#   - The `v<VERSION>` tag push, if anything downstream listens for it,
+#     would fire (we don't currently — publish runs in this same workflow).
 
 on:
   push:
-    tags:
-      - 'v*'
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: release-please-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  release:
+  release-please:
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: release
+        with:
+          token: ${{ secrets.RELEASE_PAT }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  publish:
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
       id-token: write
-
     steps:
       - uses: actions/checkout@v6.0.2
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name }}
 
       - uses: actions/setup-node@v6.4.0
         with:
@@ -27,28 +75,9 @@ jobs:
       - run: npm ci
       - run: npm run build
 
-      - name: Extract version
-        run: |
-          VERSION=$(node -p "require('./package.json').version")
-          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+      - name: Set VERSION env
+        run: echo "VERSION=${{ needs.release-please.outputs.version }}" >> "$GITHUB_ENV"
 
-      # Sync in-repo version files to match the tag.
-      - name: Sync version files to $VERSION
-        run: |
-          node -e "
-            const fs = require('fs');
-            for (const f of ['manifest.json', 'server.json', '.claude-plugin/plugin.json', '.claude-plugin/marketplace.json']) {
-              if (!fs.existsSync(f)) continue;
-              const o = JSON.parse(fs.readFileSync(f, 'utf8'));
-              if (o.version !== undefined) o.version = '$VERSION';
-              if (o.metadata?.version !== undefined) o.metadata.version = '$VERSION';
-              if (Array.isArray(o.packages)) o.packages.forEach(p => { if (p.version !== undefined) p.version = '$VERSION'; });
-              if (Array.isArray(o.plugins)) o.plugins.forEach(p => { if (p.version !== undefined) p.version = '$VERSION'; });
-              fs.writeFileSync(f, JSON.stringify(o, null, 2) + '\n');
-            }
-          "
-
-      # Package the .skill file
       - name: Package skill
         run: |
           python3 - <<'EOF'
@@ -69,9 +98,7 @@ jobs:
           npx @anthropic-ai/mcpb pack
           mv ofw-mcp.mcpb "ofw-mcp-${VERSION}.mcpb"
 
-      # Idempotent: skip if this version is already on the registry, so the
-      # workflow can be re-run safely on the same tag (e.g. after a flaky
-      # downstream publish step).
+      # Idempotent: skip if this version is already on the registry.
       - name: Publish to npm
         run: |
           PKG=$(node -p "require('./package.json').name")
@@ -94,6 +121,8 @@ jobs:
         run: ./mcp-publisher publish
 
       # ─── ClawHub (OpenClaw skill registry) — conditional on CLAWHUB_TOKEN ───
+      # GitHub Actions disallows `secrets.*` in step-level `if:`, so the
+      # token check happens inside the run block.
       - name: Publish skill to ClawHub
         continue-on-error: true
         env:
@@ -116,10 +145,14 @@ jobs:
           cp skills/ofw/SKILL.md "$SKILL_DIR/"
           npx --yes clawhub publish "$SKILL_DIR" --version "${VERSION}" --slug ofw-mcp
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v3.0.0
-        with:
-          files: |
-            ofw-mcp-${{ env.VERSION }}.skill
-            ofw-mcp-${{ env.VERSION }}.mcpb
-          generate_release_notes: true
+      # release-please already created the GitHub Release with CHANGELOG
+      # content; just attach the build artifacts. --clobber so re-running
+      # the workflow on the same tag overwrites prior uploads.
+      - name: Attach artifacts to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${{ needs.release-please.outputs.tag_name }}" \
+            "ofw-mcp-${VERSION}.skill" \
+            "ofw-mcp-${VERSION}.mcpb" \
+            --clobber

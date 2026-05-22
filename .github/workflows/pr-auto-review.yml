@@ -38,7 +38,11 @@ name: PR auto-review
 
 on:
   pull_request:
-    types: [opened, reopened, ready_for_review, synchronize]
+    # `labeled` is included so adding `review-with-opus` forces a
+    # re-review with Opus. The job filter scopes that re-fire to *just*
+    # that label so unrelated label changes (auto-review, ready-to-merge,
+    # etc.) don't trigger redundant reviews.
+    types: [opened, reopened, ready_for_review, synchronize, labeled]
 
 permissions:
   contents: read
@@ -56,7 +60,8 @@ jobs:
     if: |
       github.event.pull_request.draft == false &&
       github.event.pull_request.user.type == 'User' &&
-      github.event.pull_request.head.repo.full_name == github.repository
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      (github.event.action != 'labeled' || github.event.label.name == 'review-with-opus')
     steps:
       - name: Apply auto-review label
         env:
@@ -90,11 +95,55 @@ jobs:
         with:
           fetch-depth: 1
 
+      - name: Pick model by PR size (or label override)
+        id: model
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          HAS_OPUS_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'review-with-opus') }}
+        run: |
+          # The Claude CLI's default is `claude-opus-4-7[1m]` — the 1M
+          # context Opus tier, the priciest model. For most PRs that's
+          # overkill. Three-tier ladder by additions+deletions, with a
+          # `review-with-opus` label as a manual escalation knob:
+          #
+          #   `review-with-opus` label present  →  Opus 4.7    (forced)
+          #   ≤50 lines                         →  Haiku 4.5   (~$0.01/PR)
+          #   51-500 lines                      →  Sonnet 4.6  (~$0.05/PR)
+          #   >500 lines                        →  Opus 4.7    (~$0.26/PR)
+          #
+          # Never the [1m] variant — our codebase + diff is well under
+          # 200k tokens. If Sonnet starts missing subtle issues on small
+          # PRs, lower the 500 threshold; if Haiku flags too many false
+          # positives or misses real ones, raise the 50 threshold (or drop
+          # the Haiku tier entirely).
+          CHANGED=$(gh api "/repos/${REPO}/pulls/${PR}" --jq '.additions + .deletions')
+          if [ "$HAS_OPUS_LABEL" = "true" ]; then
+            MODEL="claude-opus-4-7"
+            REASON="\`review-with-opus\` label (forced)"
+          elif [ "$CHANGED" -le 50 ]; then
+            MODEL="claude-haiku-4-5"
+            REASON="${CHANGED} lines (≤50, trivial)"
+          elif [ "$CHANGED" -le 500 ]; then
+            MODEL="claude-sonnet-4-6"
+            REASON="${CHANGED} lines (51-500)"
+          else
+            MODEL="claude-opus-4-7"
+            REASON="${CHANGED} lines (>500, complex)"
+          fi
+          echo "model=$MODEL" >> "$GITHUB_OUTPUT"
+          echo "Selected ${MODEL} — ${REASON}"
+          echo "**Model:** \`${MODEL}\` — ${REASON}" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Claude review with structured verdict
         id: review
         uses: anthropics/claude-code-action@v1
         with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Auth via the user's Claude Max plan (OAuth token from
+          # `claude setup-token`). PR reviews count against the Max
+          # subscription's quota instead of pay-per-token API billing.
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           # No `github_token:` — let the action use the installed Claude
           # App via OIDC so comments are authored by `claude[bot]`.
           # `track_progress: true` posts a live progress comment as Claude
@@ -104,6 +153,7 @@ jobs:
           # at once at the end.
           track_progress: true
           claude_args: |
+            --model ${{ steps.model.outputs.model }}
             --json-schema '{"type":"object","required":["verdict","summary","important_findings"],"properties":{"verdict":{"enum":["pass","warn","fail"]},"summary":{"type":"string"},"important_findings":{"type":"array","items":{"type":"string"}}}}'
             --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(cat:*),Bash(rg:*),Bash(jq:*),Bash(ls:*),Bash(find:*)"
           prompt: |

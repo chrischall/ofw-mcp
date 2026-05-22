@@ -1,5 +1,10 @@
 name: Claude Code
 
+# Ad-hoc dispatch: @claude mentions in issues, PR review threads, or
+# issue comments invoke anthropics/claude-code-action interactively.
+# Automated PR review lives in pr-auto-review.yml; this workflow is the
+# manual escape hatch ("@claude can you look at this specific thing?").
+
 on:
   issue_comment:
     types: [created]
@@ -34,25 +39,7 @@ jobs:
         id: claude
         uses: anthropics/claude-code-action@v1
         with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-
-          # Optional: Customize the trigger phrase (default: @claude)
-          # trigger_phrase: "/claude"
-
-          # Optional: Trigger when specific user is assigned to an issue
-          # assignee_trigger: "claude-bot"
-
-          # Optional: Configure Claude's behavior with CLI arguments
-          # claude_args: |
-          #   --model claude-opus-4-1-20250805
-          #   --max-turns 10
-          #   --allowedTools "Bash(npm install),Bash(npm run build),Bash(npm run test:*),Bash(npm run lint:*)"
-          #   --system-prompt "Follow our coding standards. Ensure all new code has tests. Use TypeScript for new files."
-
-          # Optional: Advanced settings configuration
-          # settings: |
-          #   {
-          #     "env": {
-          #       "NODE_ENV": "test"
-          #     }
-          #   }
+          # Auth via the user's Claude Max plan (OAuth token from
+          # `claude setup-token`). Counts against the Max subscription's
+          # quota instead of pay-per-token API billing.
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
