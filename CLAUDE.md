@@ -114,7 +114,7 @@ Main is always one version ahead of the latest tag. Releases are zero-touch — 
 
 The branch-and-PR shape is required because `main` is protected: direct pushes are blocked, `ci` is a required status check, and admin enforcement is on. The release bot has no escape hatch — every change to main goes through a PR.
 
-<!-- pr-workflow:v2 -->
+<!-- pr-workflow:v3 -->
 ## Pull requests & release notes
 
 **Default workflow: branch + PR. Direct pushes to `main` are blocked by branch protection** (required status check `ci`, required PR flow, admin enforcement on). The PR mechanism is also the only way release notes get generated — `generate_release_notes` (configured in `.github/release.yml`) picks up merged PRs.
@@ -124,10 +124,12 @@ PR handling is **source-aware**:
 | PR author                          | `auto-review` (Claude verdict + Copilot) | Auto-merge                                                                                       |
 |------------------------------------|-------------------------------------------|--------------------------------------------------------------------------------------------------|
 | **You / same-repo collaborators**  | Yes                                       | Yes when Claude verdict = `pass` AND CI is green. `warn` / `fail` → manual `ready-to-merge`.     |
-| **External fork PRs**              | Yes (advisory only)                       | No — you merge manually after reviewing                                                          |
+| **External fork PRs**              | No (workflow skips — fork PRs can't see secrets). Manual: `@claude review this` in a comment triggers `claude.yml`. | No — you merge manually after reviewing |
 | **Dependabot / bots**              | No (skipped to keep noise down)           | Yes, armed immediately; merges when CI is green                                                  |
 
-`pr-auto-review.yml` runs `claude-code-action` with a JSON-schema-bound verdict (`pass` / `warn` / `fail`) on every non-draft PR from a `User` actor. Claude posts findings as a PR comment and emits the verdict to `structured_output`; if `verdict == pass` AND the PR is from a same-repo branch (not a fork), the workflow adds `ready-to-merge` via RELEASE_PAT. `auto-merge.yml` then arms `gh pr merge --auto`. Required status check `ci` still gates the actual merge.
+`pr-auto-review.yml` runs `claude-code-action` on `pull_request` events with a JSON-schema-bound verdict (`pass` / `warn` / `fail`). Claude (posting as `claude[bot]` via the installed Claude GitHub App) leaves inline comments on specific lines plus a top-level summary, and emits the verdict to `structured_output`. On `verdict == pass` the workflow adds `ready-to-merge` via RELEASE_PAT and `auto-merge.yml` arms `gh pr merge --auto`. Required status check `ci` still gates the actual merge.
+
+The workflow uses `pull_request` (not `pull_request_target`) because Anthropic's GitHub App OIDC backend doesn't accept `pull_request_target` events (see [anthropics/claude-code-action#713](https://github.com/anthropics/claude-code-action/issues/713)). The tradeoff is that fork PRs are skipped entirely — for those, mention `@claude` in a PR comment to invoke the ad-hoc dispatch in `claude.yml`.
 
 Verdict semantics (Claude follows the official `code-review` plugin's severity model with confidence ≥80 to count):
 - `pass` — no 🔴 Important findings.

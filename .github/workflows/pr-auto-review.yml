@@ -1,46 +1,50 @@
 name: PR auto-review
 
-# On every non-draft PR from a human (owner OR other collaborators), this
-# workflow:
+# On every non-draft, same-repo, human-authored PR this workflow:
 #
 #  1. Applies the `auto-review` label.
 #  2. Requests GitHub Copilot as a reviewer (best-effort).
 #  3. Runs claude-code-action with a JSON-schema-bound verdict:
 #       pass | warn | fail
-#     Claude posts findings as a PR comment and emits the verdict to
-#     `structured_output`.
-#  4. On `verdict == pass` AND same-repo (non-fork) PRs, adds the
-#     `ready-to-merge` label using RELEASE_PAT, which arms auto-merge.yml.
-#     `warn` and `fail` never auto-arm — those keep a human in the loop.
-#     Fork PRs are reviewed for advisory value only; the label is not added.
+#     Claude posts findings (as claude[bot] via the installed Claude App)
+#     and emits the verdict to `structured_output`.
+#  4. On `verdict == pass`, adds the `ready-to-merge` label using
+#     RELEASE_PAT, which arms auto-merge.yml. `warn` and `fail` never
+#     auto-arm — those keep a human in the loop.
 #
-# Bot-authored PRs (dependabot/renovate/etc.) are skipped — those go
-# straight to CI + auto-merge without per-PR review noise.
+# Why `pull_request` (not `pull_request_target`):
+# Anthropic's GitHub App OIDC backend has an event-name allowlist that
+# rejects `pull_request_target` (see anthropics/claude-code-action#713),
+# so that trigger would force a `github_token`-override workaround and
+# comments would be authored by `github-actions[bot]` instead of
+# `claude[bot]`. `pull_request` is the documented supported event for
+# automated PR review with the installed App.
 #
-# `pull_request_target` is used (not `pull_request`) so the workflow has
-# write permissions and access to secrets even for collaborator-authored
-# branches in this repo. Claude's tool allowlist is restricted to read-only
-# operations; we never execute PR code from this workflow.
+# Tradeoff: fork PRs cannot be auto-reviewed (`pull_request` from a fork
+# has no access to secrets). For those rare cases, `@claude review this`
+# in a PR comment triggers the existing `claude.yml` flow as a manual
+# fallback.
 #
-# The `ready-to-merge` label MUST be added via RELEASE_PAT, not
-# GITHUB_TOKEN — GitHub suppresses workflow runs for events triggered by
-# GITHUB_TOKEN, so a label added that way would not fire auto-merge.yml's
-# `labeled` event.
+# The `head.repo == github.repository` guard is belt-and-braces: even on
+# `pull_request`, GITHUB_TOKEN is read-only for fork PRs, so the label-
+# add step would fail. The guard skips the entire job cleanly for forks.
+#
+# Bot-authored PRs (dependabot/renovate/etc.) are skipped via the
+# `user.type == 'User'` filter — those go straight to CI + auto-merge.
+#
+# `ready-to-merge` MUST be added via RELEASE_PAT, not GITHUB_TOKEN.
+# GitHub suppresses workflow runs for `GITHUB_TOKEN`-triggered events,
+# so a label added that way would not fire auto-merge.yml.
 
 on:
-  pull_request_target:
+  pull_request:
     types: [opened, reopened, ready_for_review, synchronize]
 
 permissions:
   contents: read
   pull-requests: write
   issues: write
-  actions: read
-  # No `id-token: write` — see the `github_token:` override on the
-  # claude-code-action step below. With that override the action skips
-  # the GitHub-App OIDC exchange entirely (which 401s for us because
-  # the `claude[bot]` App is not authorized for our pull_request_target
-  # events), so id-token permission is unnecessary.
+  id-token: write       # Required for the Claude App OIDC token exchange
 
 concurrency:
   group: pr-auto-review-${{ github.event.pull_request.number }}
@@ -51,7 +55,8 @@ jobs:
     runs-on: ubuntu-latest
     if: |
       github.event.pull_request.draft == false &&
-      github.event.pull_request.user.type == 'User'
+      github.event.pull_request.user.type == 'User' &&
+      github.event.pull_request.head.repo.full_name == github.repository
     steps:
       - name: Apply auto-review label
         env:
@@ -80,35 +85,27 @@ jobs:
             cat /tmp/copilot.err
           fi
 
-      - name: Checkout PR merge ref
+      - name: Checkout PR
         uses: actions/checkout@v6
         with:
-          # The merge ref is what would be on main after merge — good base
-          # for Claude to read. Safe under pull_request_target because we
-          # restrict Claude's tools to read-only below; PR code is never
-          # executed by this workflow.
-          ref: refs/pull/${{ github.event.pull_request.number }}/merge
-          fetch-depth: 0
+          fetch-depth: 1
 
       - name: Claude review with structured verdict
         id: review
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          # Short-circuits setupGitHubToken() in the action so it skips the
-          # OIDC → claude[bot] App-token exchange and uses the supplied
-          # token directly. PR comments will be authored by
-          # `github-actions[bot]`, not `claude[bot]` — content unchanged.
-          github_token: ${{ secrets.GITHUB_TOKEN }}
+          # No `github_token:` — let the action use the installed Claude
+          # App via OIDC so comments are authored by `claude[bot]`.
           claude_args: |
             --json-schema '{"type":"object","required":["verdict","summary","important_findings"],"properties":{"verdict":{"enum":["pass","warn","fail"]},"summary":{"type":"string"},"important_findings":{"type":"array","items":{"type":"string"}}}}'
-            --allowedTools "Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr comment:*),Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(cat:*),Bash(rg:*),Bash(jq:*),Bash(ls:*),Bash(find:*),mcp__github_inline_comment__create_inline_comment"
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(cat:*),Bash(rg:*),Bash(jq:*),Bash(ls:*),Bash(find:*)"
           prompt: |
             You are reviewing pull request #${{ github.event.pull_request.number }} in ${{ github.repository }}.
 
             STEPS:
             1. Read CLAUDE.md to learn the project's conventions (versioning rules, ESM `.js` import requirement, testing/coverage requirements, stdio logging rules, etc.).
-            2. Read the PR diff: `gh pr diff ${{ github.event.pull_request.number }}` (or use git/Read on the working tree, which is checked out at the merge ref).
+            2. Read the PR diff: `gh pr diff ${{ github.event.pull_request.number }}` (or read files in the working tree, which is checked out).
             3. Review the changes for:
                - Correctness and edge cases
                - Adherence to CLAUDE.md conventions
@@ -116,12 +113,13 @@ jobs:
                - Security or data-integrity concerns
 
             SEVERITY MODEL (matches the official code-review plugin):
-              🔴 Important — bug, broken behavior, security/data risk, or violation of a CLAUDE.md convention. Confidence must be ≥80 to count.
+              🔴 Important — bug, broken behavior, security/data risk, or violation of a CLAUDE.md convention. Confidence ≥80 to count.
               🟡 Nit       — style, minor improvement, suggestion. Confidence ≥80.
               🟣 Pre-existing — issue already in the codebase, not introduced by this PR. Never blocking.
 
             OUTPUT:
-            - Post ONE top-level PR comment with findings grouped by severity (use `gh pr comment`). If there are no findings worth surfacing, post a short "No issues found — verdict pass" comment.
+            - For line-specific findings, prefer the inline-comment tool (`mcp__github_inline_comment__create_inline_comment`).
+            - Post ONE top-level summary comment with overall judgment (use `gh pr comment`). If there are no findings worth surfacing, post a short "No issues found — verdict pass" comment.
             - Then emit your structured verdict per the JSON schema:
               • `pass` — no 🔴 Important findings.
               • `warn` — no 🔴 Important findings but at least one 🟡 Nit worth surfacing.
@@ -129,7 +127,7 @@ jobs:
               Set `summary` to a 1-2 sentence overall judgment.
               Set `important_findings` to the list of 🔴 Important finding titles (empty array if none).
 
-            DO NOT modify files, push commits, approve the PR formally, or call `gh pr review` / `gh pr edit`. Posting the comment and emitting the verdict is the entire job. The workflow will gate auto-merge based on your verdict.
+            DO NOT modify files, push commits, approve the PR formally, or call `gh pr review` / `gh pr edit`. Posting comments and emitting the verdict is the entire job. The workflow will gate auto-merge based on your verdict.
 
       - name: Surface verdict in run summary
         if: always() && steps.review.outputs.structured_output != ''
@@ -151,15 +149,14 @@ jobs:
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Arm auto-merge on pass (same-repo PRs only)
+      - name: Arm auto-merge on pass
         if: |
           steps.review.outputs.structured_output != '' &&
-          fromJSON(steps.review.outputs.structured_output).verdict == 'pass' &&
-          github.event.pull_request.head.repo.full_name == github.repository
+          fromJSON(steps.review.outputs.structured_output).verdict == 'pass'
         env:
           GH_TOKEN: ${{ secrets.RELEASE_PAT }}
           PR: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
         run: |
           gh pr edit "$PR" --repo "$REPO" --add-label ready-to-merge
-          echo "Verdict=pass and PR is same-repo — added ready-to-merge to arm auto-merge."
+          echo "Verdict=pass — added ready-to-merge to arm auto-merge."
