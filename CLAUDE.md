@@ -103,14 +103,12 @@ Do NOT manually bump versions or create tags unless the user explicitly asks. Ve
 
 ### Release workflow
 
-Main is always one version ahead of the latest tag. To release, run the **Tag & Bump** Action which:
+Main is always one version ahead of the latest tag. Releases are zero-touch — kicking off **Tag & Bump** drives the whole loop:
 
-1. Branches `release/v<NEXT>` off main
-2. Bumps every version field (`package.json`, `package-lock.json`, `src/index.ts`, `manifest.json`, `server.json`, `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json`) on that branch
-3. Rebuilds, commits, pushes the branch, and opens a PR titled `chore: release v<CURRENT> (bump main to v<NEXT>)` with the `ignore-for-release` label
-4. Auto-merge (see `auto-merge.yml`) merges the PR as soon as CI passes
-5. **Tag on release merge** (`.github/workflows/tag-on-release-merge.yml`) detects the version change on the resulting `main` push and tags the *parent* of the merge commit with `v<CURRENT>` — that's the content that was on main *before* the bump, i.e. the released code
-6. The tag push triggers the **Release** workflow (CI + npm publish with provenance, MCP Registry publish, ClawHub skill publish, GitHub release with `.mcpb` + `.skill` assets and `generate_release_notes: true`)
+1. **Tag & Bump** (`.github/workflows/tag-and-bump.yml`, manual `workflow_dispatch`): branches `release/v<NEXT>` off main, bumps every version field (see the list above), rebuilds, pushes the branch, opens a PR titled `chore: release v<CURRENT> (bump main to v<NEXT>)` labeled `ignore-for-release`, then follows up with `gh pr edit --add-label ready-to-merge` to arm auto-merge.
+2. **Auto-merge** (`auto-merge.yml`, `arm-owner-on-ready-label` job): sees `ready-to-merge` on an owner PR and calls `gh pr merge --auto --merge` via `RELEASE_PAT`. (The PAT, not `GITHUB_TOKEN`, so the resulting merge fires downstream workflows.)
+3. **Tag on release merge** (`tag-on-release-merge.yml`, `push: branches: [main]`): compares `HEAD`'s `package.json` version to `HEAD~1`'s. When they differ, tags `HEAD~1` with `v<HEAD~1's version>` — i.e. the released code, before the bump — and pushes the tag via `RELEASE_PAT`. Idempotent: skips if the tag already exists.
+4. **Release** (`release.yml`, `push: tags: ['v*']`): rebuilds, publishes to npm with provenance, publishes to the MCP Registry, publishes the skill to ClawHub (if `CLAWHUB_TOKEN` is set), creates a GitHub Release with the `.mcpb` + `.skill` assets and `generate_release_notes: true`.
 
 The branch-and-PR shape is required because `main` is protected: direct pushes are blocked, `ci` is a required status check, and admin enforcement is on. The release bot has no escape hatch — every change to main goes through a PR.
 
