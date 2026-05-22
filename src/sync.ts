@@ -6,7 +6,7 @@ import {
   upsertAttachmentForMessage,
   type MessageRow, type DraftRow, type FolderName,
 } from './cache.js';
-import { mapRecipients } from './tools/_shared.js';
+import { mapRecipients, type ApiRecipient } from './tools/_shared.js';
 
 // Each OFW message detail returns `files: [fileId, ...]`. We fetch the metadata
 // for each file id (cheap JSON call) so the model can see filenames/mime types
@@ -94,7 +94,7 @@ interface ListItem {
   date: { dateTime: string };
   from?: { name?: string };
   showNeverViewed: boolean;
-  recipients?: Array<{ user: { id: number; name: string }; viewed?: { dateTime: string } | null }>;
+  recipients?: ApiRecipient[];
 }
 
 interface ListResponse { data?: ListItem[] }
@@ -200,7 +200,7 @@ interface DraftListItem {
   subject: string;
   date: { dateTime: string };
   replyToId: number | null;
-  recipients?: Array<{ user: { id: number; name: string }; viewed?: { dateTime: string } | null }>;
+  recipients?: ApiRecipient[];
 }
 interface DraftListResponse { data?: DraftListItem[] }
 interface DraftDetailResponse {

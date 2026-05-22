@@ -9,7 +9,10 @@ export function textResponse(text: string) {
   return { content: [{ type: 'text' as const, text }] };
 }
 
-interface ApiRecipient {
+// OFW API shape for `recipients[]` on message/draft list and detail
+// responses. Used wherever we type the response of a `/pub/v3/messages*`
+// call. Exported so call sites stop inlining `Array<{ user: ..., viewed: ... }>`.
+export interface ApiRecipient {
   user?: { id?: number; name?: string };
   viewed?: { dateTime: string } | null;
 }

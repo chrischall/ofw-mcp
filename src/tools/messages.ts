@@ -11,7 +11,7 @@ import {
 import { getAttachmentsDir, getDefaultInlineAttachments } from '../config.js';
 import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, extname, join } from 'node:path';
-import { expandPath, jsonResponse, mapRecipients, textResponse } from './_shared.js';
+import { expandPath, jsonResponse, mapRecipients, textResponse, type ApiRecipient } from './_shared.js';
 
 // Lightweight mime sniff from extension. OFW re-derives mime from the filename
 // server-side anyway, so this is just a polite Content-Type for the Blob.
@@ -139,7 +139,7 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
       id: number; body?: string; subject: string; from?: { name?: string };
       date: { dateTime: string };
       files?: number[];
-      recipients?: Array<{ user: { id: number; name: string }; viewed?: { dateTime: string } | null }>;
+      recipients?: ApiRecipient[];
     }>('GET', `/pub/v3/messages/${encodeURIComponent(args.messageId)}`);
 
     const folder: 'inbox' | 'sent' = cached?.folder ?? 'inbox';
@@ -216,7 +216,7 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
       const detail = await client.request<{
         id: number; subject?: string; body?: string;
         date?: { dateTime: string }; from?: { name?: string };
-        recipients?: Array<{ user: { id: number; name: string }; viewed?: { dateTime: string } | null }>;
+        recipients?: ApiRecipient[];
       }>('GET', `/pub/v3/messages/${newId}`);
 
       persisted = {
@@ -335,7 +335,7 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
         id: number; subject?: string; body?: string;
         date?: { dateTime: string };
         replyToId?: number | null;
-        recipients?: Array<{ user: { id: number; name: string }; viewed?: { dateTime: string } | null }>;
+        recipients?: ApiRecipient[];
       }>('GET', `/pub/v3/messages/${newId}`);
 
       persisted = {
