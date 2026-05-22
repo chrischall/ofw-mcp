@@ -104,16 +104,21 @@ Do NOT manually bump versions or create tags unless the user explicitly asks. Ve
 
 Main is always one version ahead of the latest tag. To release, run the **Tag & Bump** Action which:
 
-1. Runs CI (build + test)
-2. Tags the current commit with the current version (`vX.Y.Z`)
-3. Bumps patch via `npm version patch` + a node script that walks every JSON version field and `sed`-rewrites `src/index.ts`
-4. Rebuilds, commits, and pushes `main` + tag
-5. The tag push triggers the **Release** workflow (CI + npm publish with provenance, MCP Registry publish, ClawHub skill publish, GitHub release with `.mcpb` + `.skill` assets and `generate_release_notes: true`)
+1. Branches `release/v<NEXT>` off main
+2. Bumps every version field (`package.json`, `package-lock.json`, `src/index.ts`, `manifest.json`, `server.json`, `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json`) on that branch
+3. Rebuilds, commits, pushes the branch, and opens a PR titled `chore: release v<CURRENT> (bump main to v<NEXT>)` with the `ignore-for-release` label
+4. Auto-merge (see `auto-merge.yml`) merges the PR as soon as CI passes
+5. **Tag on release merge** (`.github/workflows/tag-on-release-merge.yml`) detects the version change on the resulting `main` push and tags the *parent* of the merge commit with `v<CURRENT>` — that's the content that was on main *before* the bump, i.e. the released code
+6. The tag push triggers the **Release** workflow (CI + npm publish with provenance, MCP Registry publish, ClawHub skill publish, GitHub release with `.mcpb` + `.skill` assets and `generate_release_notes: true`)
+
+The branch-and-PR shape is required because `main` is protected: direct pushes are blocked, `ci` is a required status check, and admin enforcement is on. The release bot has no escape hatch — every change to main goes through a PR.
 
 <!-- pr-workflow:v1 -->
 ## Pull requests & release notes
 
-**Default workflow: branch + PR, even for solo work.** Direct pushes to `main` skip review *and* skip auto-generated release notes — GitHub's `generate_release_notes` (configured in `.github/release.yml`) only picks up merged PRs. Push directly to `main` only when the user explicitly asks for it (e.g. emergency hotfix).
+**Default workflow: branch + PR. Direct pushes to `main` are blocked by branch protection** (required status check `ci`, required PR flow, admin enforcement on). The PR mechanism is also the only way release notes get generated — `generate_release_notes` (configured in `.github/release.yml`) picks up merged PRs.
+
+Every owner PR is auto-labeled `auto-review` by `pr-auto-review.yml`, which also posts an `@claude` review comment and requests GitHub Copilot as a reviewer. Reviews are informational — the auto-merge path (`auto-merge.yml`) lands the PR as soon as CI is green, without waiting for review approvals.
 
 For every PR, apply exactly one label so it lands in the right release-notes section:
 
@@ -132,7 +137,7 @@ For every PR, apply exactly one label so it lands in the right release-notes sec
 
 The **PR title** becomes the bullet — write it like a user-facing changelog entry (`ofw_sync_messages: resume from saved cursor`), not internal shorthand (`sync tweaks`). Conventional-commit prefixes (`feat:`, `fix:`, `chore:`) are still fine in commit messages, but the PR title should read clean.
 
-Open with `gh pr create --label <label>` (or `--label ignore-for-release` for chores not worth a line), then **immediately** run `gh pr merge <num> --auto --merge` so the PR merges as soon as CI passes. The repo allows merge commits only (no squash, no rebase) — don't pass `--squash`/`--rebase` or the call will fail.
+Open with `gh pr create --label <label>` (or `--label ignore-for-release` for chores not worth a line). `auto-merge.yml` arms `--auto --merge` on every owner / dependabot PR automatically, so you don't need to run `gh pr merge` yourself. The repo allows merge commits only (no squash, no rebase) — if you ever do call `gh pr merge` manually, don't pass `--squash`/`--rebase` or the call will fail.
 
 ## Plugin / Distribution
 

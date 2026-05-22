@@ -1,0 +1,67 @@
+name: Tag on release merge
+
+# When a Tag & Bump PR (or any PR that changes package.json version) merges
+# to main, tag the *parent* of the merge commit with the version that was
+# on main before the bump — i.e. the released content — and push it.
+# The tag push triggers release.yml.
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6.0.2
+        with:
+          fetch-depth: 2
+          # PAT so the tag push triggers Release (GITHUB_TOKEN-driven pushes
+          # do not fire other workflows).
+          token: ${{ secrets.RELEASE_PAT }}
+
+      - name: Detect version change
+        id: detect
+        run: |
+          # If this is the very first commit (no parent), nothing to tag.
+          if ! git rev-parse HEAD~1 >/dev/null 2>&1; then
+            echo "no parent commit — skipping"
+            exit 0
+          fi
+          OLD=$(git show HEAD~1:package.json | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).version))")
+          NEW=$(node -p "require('./package.json').version")
+          echo "old=${OLD}"
+          echo "new=${NEW}"
+          if [ "$OLD" != "$NEW" ]; then
+            echo "release=${OLD}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Skip if no version change
+        if: steps.detect.outputs.release == ''
+        run: echo "package.json version unchanged — not a release merge."
+
+      - name: Skip if tag already exists
+        id: existing
+        if: steps.detect.outputs.release != ''
+        env:
+          TAG: v${{ steps.detect.outputs.release }}
+        run: |
+          # git fetch --tags so we see remote tags too.
+          git fetch --tags --quiet
+          if git rev-parse "refs/tags/${TAG}" >/dev/null 2>&1; then
+            echo "tag ${TAG} already exists — skipping (idempotent re-run)."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Tag and push
+        if: steps.detect.outputs.release != '' && steps.existing.outputs.skip != 'true'
+        env:
+          TAG: v${{ steps.detect.outputs.release }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "$TAG" HEAD~1
+          git push origin "$TAG"
+          echo "Tagged $(git rev-parse HEAD~1) as ${TAG}."

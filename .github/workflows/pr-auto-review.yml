@@ -1,0 +1,72 @@
+name: PR auto-review
+
+# On every non-draft PR from the repo owner, apply the `auto-review` label
+# and trigger automated review from Claude (via @claude mention) and from
+# GitHub Copilot (via the reviewer-request API).
+#
+# Mirrors auto-merge.yml's scope: owner PRs only, so dependabot/renovate
+# PRs aren't pinged. pull_request_target is used (not pull_request) so the
+# workflow has write permissions on the repo even when a future fork PR
+# slips through — we never check out PR code, only call the API.
+
+on:
+  pull_request_target:
+    types: [opened, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: pr-auto-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  request-reviews:
+    runs-on: ubuntu-latest
+    if: |
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.user.login == github.repository_owner
+    steps:
+      - name: Apply auto-review label
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: gh pr edit "$PR" --repo "$REPO" --add-label auto-review
+
+      - name: Post @claude review comment
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh pr comment "$PR" --repo "$REPO" --body "$(cat <<'EOF'
+          @claude please review this PR. Focus on:
+          - correctness and edge cases
+          - adherence to the conventions in `CLAUDE.md`
+          - test coverage of new code paths
+          - any security or data-integrity concerns
+          EOF
+          )"
+
+      - name: Request Copilot reviewer
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          # GitHub Copilot code-review reviewer is the `Copilot` user
+          # (sometimes surfaced as `copilot-pull-request-reviewer[bot]`).
+          # The REST endpoint accepts the bare login. If the repo or org
+          # doesn't have Copilot review enabled, this returns 422 — we
+          # swallow that so the rest of the workflow still succeeds.
+          if gh api --method POST \
+              "/repos/${REPO}/pulls/${PR}/requested_reviewers" \
+              -f 'reviewers[]=Copilot' 2>/tmp/copilot.err; then
+            echo "Requested Copilot as reviewer."
+          else
+            echo "Could not request Copilot reviewer (likely not enabled for this repo):"
+            cat /tmp/copilot.err
+          fi
