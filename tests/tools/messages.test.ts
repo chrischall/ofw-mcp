@@ -275,9 +275,33 @@ describe('ofw_get_message (cache-first)', () => {
   });
 });
 
+// Helper: real OFW POST /pub/v3/messages returns a minimal `{entityId}`; the
+// follow-up GET is what actually populates the cache. Most send_message tests
+// just need a generic detail response to chain after the POST mock.
+function sendMessageMocks(client: OFWClient, opts: {
+  entityId: number;
+  detail?: Partial<{
+    subject: string; body: string;
+    date: { dateTime: string }; from: { name: string };
+    recipients: Array<{ user: { id: number; name: string }; viewed?: { dateTime: string } | null }>;
+  }>;
+}) {
+  return vi.spyOn(client, 'request')
+    .mockResolvedValueOnce({ entityId: opts.entityId })
+    .mockResolvedValueOnce({
+      id: opts.entityId,
+      subject: opts.detail?.subject ?? 'subject',
+      body: opts.detail?.body ?? 'body',
+      date: opts.detail?.date ?? { dateTime: '2026-05-04T00:00:00Z' },
+      from: opts.detail?.from ?? { name: 'Me' },
+      recipients: opts.detail?.recipients ?? [],
+    });
+}
+
 describe('ofw_send_message', () => {
   it('posts to /pub/v3/messages with correct payload', async () => {
-    const client = makeClient({ id: 200, status: 'sent' });
+    const client = new OFWClient();
+    const spy = sendMessageMocks(client, { entityId: 200 });
     setup(client);
 
     const result = await handlers.get('ofw_send_message')!({
@@ -286,7 +310,7 @@ describe('ofw_send_message', () => {
       recipientIds: [123],
     });
 
-    expect(client.request).toHaveBeenCalledWith('POST', '/pub/v3/messages', {
+    expect(spy).toHaveBeenCalledWith('POST', '/pub/v3/messages', {
       subject: 'Re: pickup',
       body: 'I will be there at 3pm',
       recipientIds: [123],
@@ -295,12 +319,16 @@ describe('ofw_send_message', () => {
       includeOriginal: false,
       replyToId: null,
     });
+    // After POST, we GET to populate the cache from authoritative state.
+    expect(spy).toHaveBeenCalledWith('GET', '/pub/v3/messages/200');
+    expect(getMessage(200)?.folder).toBe('sent');
     expect(result.content).toHaveLength(1);
     expect(result.content[0].type).toBe('text');
   });
 
   it('does not delete a draft when draftId is not provided', async () => {
-    const client = makeClient({ id: 200, status: 'sent' });
+    const client = new OFWClient();
+    const spy = sendMessageMocks(client, { entityId: 200 });
     setup(client);
 
     await handlers.get('ofw_send_message')!({
@@ -309,12 +337,14 @@ describe('ofw_send_message', () => {
       recipientIds: [123],
     });
 
-    expect(client.request).toHaveBeenCalledTimes(1);
-    expect(client.request).not.toHaveBeenCalledWith('DELETE', expect.anything(), expect.anything());
+    // POST + GET, no DELETE.
+    expect(spy).toHaveBeenCalledTimes(2);
+    expect(spy).not.toHaveBeenCalledWith('DELETE', expect.anything(), expect.anything());
   });
 
   it('sends reply with replyToId and includeOriginal true to thread message history', async () => {
-    const client = makeClient({ id: 201, status: 'sent' });
+    const client = new OFWClient();
+    const spy = sendMessageMocks(client, { entityId: 201 });
     setup(client);
 
     await handlers.get('ofw_send_message')!({
@@ -324,7 +354,7 @@ describe('ofw_send_message', () => {
       replyToId: 55,
     });
 
-    expect(client.request).toHaveBeenCalledWith('POST', '/pub/v3/messages', {
+    expect(spy).toHaveBeenCalledWith('POST', '/pub/v3/messages', {
       subject: 'Re: pickup',
       body: 'I will be there at 3pm',
       recipientIds: [123],
@@ -338,7 +368,11 @@ describe('ofw_send_message', () => {
   it('deletes the draft after sending when draftId is provided', async () => {
     const c = new OFWClient();
     const spy = vi.spyOn(c, 'request')
-      .mockResolvedValueOnce({ id: 200, status: 'sent' })
+      .mockResolvedValueOnce({ entityId: 200 })
+      .mockResolvedValueOnce({
+        id: 200, subject: 'Hello', body: 'World',
+        date: { dateTime: '2026-05-04T00:00:00Z' }, from: { name: 'Me' }, recipients: [],
+      })
       .mockResolvedValueOnce({});
 
     const localHandlers = setupWithClient(c);
@@ -350,7 +384,8 @@ describe('ofw_send_message', () => {
       draftId: 42,
     });
 
-    expect(spy).toHaveBeenCalledTimes(2);
+    // POST + GET + DELETE
+    expect(spy).toHaveBeenCalledTimes(3);
     expect(spy).toHaveBeenNthCalledWith(1, 'POST', '/pub/v3/messages', {
       subject: 'Hello',
       body: 'World',
@@ -360,8 +395,9 @@ describe('ofw_send_message', () => {
       includeOriginal: false,
       replyToId: null,
     });
-    expect(spy).toHaveBeenNthCalledWith(2, 'DELETE', '/pub/v1/messages', expect.any(FormData));
-    const deleteForm = spy.mock.calls[1][2] as FormData;
+    expect(spy).toHaveBeenNthCalledWith(2, 'GET', '/pub/v3/messages/200');
+    expect(spy).toHaveBeenNthCalledWith(3, 'DELETE', '/pub/v1/messages', expect.any(FormData));
+    const deleteForm = spy.mock.calls[2][2] as FormData;
     expect(deleteForm.get('messageIds')).toBe('42');
     expect(result.content[0].text).toContain('"id": 200');
   });
@@ -382,11 +418,13 @@ describe('ofw_send_message (thread-tip + cache write)', () => {
     });
 
     const client = new OFWClient();
-    const spy = vi.spyOn(client, 'request').mockResolvedValueOnce({
-      id: 200, subject: 'Re: Original', body: 'second reply',
-      date: { dateTime: '2026-05-03T00:00:00Z' }, from: { name: 'Me' },
-      recipients: [{ user: { id: 1, name: 'Alice' }, viewed: null }],
-    });
+    const spy = vi.spyOn(client, 'request')
+      .mockResolvedValueOnce({ entityId: 200 })
+      .mockResolvedValueOnce({
+        id: 200, subject: 'Re: Original', body: 'second reply',
+        date: { dateTime: '2026-05-03T00:00:00Z' }, from: { name: 'Me' },
+        recipients: [{ user: { id: 1, name: 'Alice' }, viewed: null }],
+      });
     setup(client);
 
     const result = await handlers.get('ofw_send_message')!({
@@ -405,6 +443,7 @@ describe('ofw_send_message (thread-tip + cache write)', () => {
     expect(newRow?.chainRootId).toBe(100);
     expect(newRow?.replyToId).toBe(142);
     expect(newRow?.folder).toBe('sent');
+    expect(newRow?.body).toBe('second reply');
   });
 
   it('does not rewrite when replyToId is the chain tip', async () => {
@@ -415,10 +454,12 @@ describe('ofw_send_message (thread-tip + cache write)', () => {
     });
 
     const client = new OFWClient();
-    const spy = vi.spyOn(client, 'request').mockResolvedValueOnce({
-      id: 200, subject: 'Re: Original', body: 'reply',
-      date: { dateTime: '2026-05-03T00:00:00Z' }, from: { name: 'Me' }, recipients: [],
-    });
+    const spy = vi.spyOn(client, 'request')
+      .mockResolvedValueOnce({ entityId: 200 })
+      .mockResolvedValueOnce({
+        id: 200, subject: 'Re: Original', body: 'reply',
+        date: { dateTime: '2026-05-03T00:00:00Z' }, from: { name: 'Me' }, recipients: [],
+      });
     setup(client);
 
     const result = await handlers.get('ofw_send_message')!({
@@ -432,10 +473,12 @@ describe('ofw_send_message (thread-tip + cache write)', () => {
 
   it('passes through replyToId unchanged when parent not in cache', async () => {
     const client = new OFWClient();
-    const spy = vi.spyOn(client, 'request').mockResolvedValueOnce({
-      id: 200, subject: 'Re: Unknown', body: 'reply',
-      date: { dateTime: '2026-05-03T00:00:00Z' }, from: { name: 'Me' }, recipients: [],
-    });
+    const spy = vi.spyOn(client, 'request')
+      .mockResolvedValueOnce({ entityId: 200 })
+      .mockResolvedValueOnce({
+        id: 200, subject: 'Re: Unknown', body: 'reply',
+        date: { dateTime: '2026-05-03T00:00:00Z' }, from: { name: 'Me' }, recipients: [],
+      });
     setup(client);
 
     await handlers.get('ofw_send_message')!({
@@ -449,6 +492,7 @@ describe('ofw_send_message (thread-tip + cache write)', () => {
   it('removes draft from cache when draftId is provided', async () => {
     const client = new OFWClient();
     vi.spyOn(client, 'request')
+      .mockResolvedValueOnce({ entityId: 200 })
       .mockResolvedValueOnce({
         id: 200, subject: 'Re', body: 'b', date: { dateTime: '2026-05-03T00:00:00Z' },
         from: { name: 'Me' }, recipients: [],
@@ -466,6 +510,28 @@ describe('ofw_send_message (thread-tip + cache write)', () => {
     });
 
     expect(getDraft(50)).toBeNull();
+  });
+
+  it('falls back to data.id when OFW returns the legacy {id} shape on the POST response', async () => {
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce({ id: 200 })
+      .mockResolvedValueOnce({
+        id: 200, subject: 's', body: 'b',
+        date: { dateTime: '2026-05-03T00:00:00Z' }, from: { name: 'Me' }, recipients: [],
+      });
+    setup(client);
+    await handlers.get('ofw_send_message')!({ subject: 's', body: 'b', recipientIds: [1] });
+    expect(getMessage(200)?.folder).toBe('sent');
+  });
+
+  it('does not refetch or write cache when POST returns neither id nor entityId', async () => {
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request')
+      .mockResolvedValueOnce({ error: 'boom' });
+    setup(client);
+    await handlers.get('ofw_send_message')!({ subject: 's', body: 'b', recipientIds: [1] });
+    expect(spy).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -537,7 +603,7 @@ describe('ofw_save_draft', () => {
 });
 
 describe('ofw_save_draft (thread-tip + cache upsert)', () => {
-  it('rewrites replyToId to the chain tip and upserts cache', async () => {
+  it('rewrites replyToId to the chain tip and upserts cache from GET detail (not from POST response)', async () => {
     upsertMessage({
       id: 100, folder: 'inbox', subject: 'Original', fromUser: 'Alice',
       sentAt: '2026-05-01T00:00:00Z', recipients: [], body: 'orig',
@@ -550,11 +616,15 @@ describe('ofw_save_draft (thread-tip + cache upsert)', () => {
     });
 
     const client = new OFWClient();
-    const spy = vi.spyOn(client, 'request').mockResolvedValueOnce({
-      id: 50, subject: 'Re: Original', body: 'draft body',
-      date: { dateTime: '2026-05-04T00:00:00Z' },
-      replyToId: 142,
-    });
+    // OFW's real POST shape is minimal (`{entityId: X}`); the body comes
+    // from the follow-up GET on the detail endpoint.
+    const spy = vi.spyOn(client, 'request')
+      .mockResolvedValueOnce({ entityId: 50 })
+      .mockResolvedValueOnce({
+        id: 50, subject: 'Re: Original', body: 'draft body',
+        date: { dateTime: '2026-05-04T00:00:00Z' },
+        replyToId: 142,
+      });
     setup(client);
 
     const result = await handlers.get('ofw_save_draft')!({
@@ -565,6 +635,7 @@ describe('ofw_save_draft (thread-tip + cache upsert)', () => {
 
     const postCall = spy.mock.calls.find((c) => c[0] === 'POST');
     expect((postCall![2] as { replyToId: number | null }).replyToId).toBe(142);
+    expect(spy.mock.calls[1]).toEqual(['GET', '/pub/v3/messages/50']);
     expect(result.content[0].text).toMatch(/replyToId rewritten from 100 to 142/);
 
     expect(getDraft(50)?.body).toBe('draft body');
@@ -573,15 +644,72 @@ describe('ofw_save_draft (thread-tip + cache upsert)', () => {
 
   it('passes through replyToId unchanged when nothing to rewrite', async () => {
     const client = new OFWClient();
-    const spy = vi.spyOn(client, 'request').mockResolvedValueOnce({
-      id: 50, subject: 'New', body: 'b',
-      date: { dateTime: '2026-05-04T00:00:00Z' },
-    });
+    const spy = vi.spyOn(client, 'request')
+      .mockResolvedValueOnce({ entityId: 50 })
+      .mockResolvedValueOnce({
+        id: 50, subject: 'New', body: 'b',
+        date: { dateTime: '2026-05-04T00:00:00Z' },
+      });
     setup(client);
     await handlers.get('ofw_save_draft')!({ subject: 'New', body: 'b' });
     const postCall = spy.mock.calls.find((c) => c[0] === 'POST');
     expect((postCall![2] as { replyToId: number | null }).replyToId).toBeNull();
     expect(getDraft(50)?.body).toBe('b');
+  });
+
+  it('falls back to data.id when OFW returns the legacy {id} shape instead of {entityId}', async () => {
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce({ id: 77 })
+      .mockResolvedValueOnce({
+        id: 77, subject: 'Legacy', body: 'legacy body',
+        date: { dateTime: '2026-05-04T00:00:00Z' },
+      });
+    setup(client);
+    await handlers.get('ofw_save_draft')!({ subject: 'Legacy', body: 'legacy body' });
+    expect(getDraft(77)?.body).toBe('legacy body');
+  });
+
+  it('emits a no-op warning when updating a draft and OFW returns a body that does not match the requested body', async () => {
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce({ entityId: 60 })
+      // Server returned the OLD body — the update silently no-opped.
+      .mockResolvedValueOnce({
+        id: 60, subject: 'Weekly', body: 'old-body',
+        date: { dateTime: '2026-05-04T00:00:00Z' },
+      });
+    setup(client);
+    const result = await handlers.get('ofw_save_draft')!({
+      subject: 'Weekly',
+      body: 'new-body',
+      messageId: 60,
+    });
+    expect(result.content[0].text).toMatch(/silently no-op/);
+    expect(result.content[0].text).toMatch(/ofw_delete_draft/);
+    // Cache reflects what OFW actually has, not what we asked for.
+    expect(getDraft(60)?.body).toBe('old-body');
+  });
+
+  it('does not emit the no-op warning on a brand-new draft (no messageId), even if the server body would not match', async () => {
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce({ entityId: 70 })
+      .mockResolvedValueOnce({ id: 70, subject: 'X', body: 'munged body' });
+    setup(client);
+    const result = await handlers.get('ofw_save_draft')!({
+      subject: 'X', body: 'sent body',
+    });
+    expect(result.content[0].text).not.toMatch(/silently no-op/);
+  });
+
+  it('does not refetch when OFW returns a non-2xx error response shape (no id and no entityId)', async () => {
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request')
+      .mockResolvedValueOnce({ error: 'something went wrong' });
+    setup(client);
+    await handlers.get('ofw_save_draft')!({ subject: 'X', body: 'y' });
+    expect(spy).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -745,10 +873,12 @@ describe('ofw_upload_attachment', () => {
 describe('ofw_send_message with attachments', () => {
   it('passes myFileIDs through to the OFW payload', async () => {
     const client = new OFWClient();
-    const spy = vi.spyOn(client, 'request').mockResolvedValueOnce({
-      id: 200, subject: 'with attach', body: 'see attached',
-      date: { dateTime: '2026-05-14T00:00:00Z' }, from: { name: 'Me' }, recipients: [],
-    });
+    const spy = vi.spyOn(client, 'request')
+      .mockResolvedValueOnce({ entityId: 200 })
+      .mockResolvedValueOnce({
+        id: 200, subject: 'with attach', body: 'see attached',
+        date: { dateTime: '2026-05-14T00:00:00Z' }, from: { name: 'Me' }, recipients: [],
+      });
     setup(client);
     await handlers.get('ofw_send_message')!({
       subject: 'with attach', body: 'see attached', recipientIds: [1],
@@ -758,17 +888,19 @@ describe('ofw_send_message with attachments', () => {
     expect((post![2] as { attachments: { myFileIDs: number[] } }).attachments.myFileIDs).toEqual([50015547, 99887766]);
   });
 
-  it('links attachment cache rows to the new sent message', async () => {
+  it('links attachment cache rows to the new sent message (using the id from the GET, not POST)', async () => {
     // Pre-cache the attachment metadata as if it had been uploaded earlier
     upsertAttachmentForMessage({
       fileId: 50015547, fileName: 'doc.pdf', label: 'doc', mimeType: 'application/pdf',
       sizeBytes: 1024, metadata: {}, messageId: 0,
     });
     const client = new OFWClient();
-    vi.spyOn(client, 'request').mockResolvedValueOnce({
-      id: 200, subject: 'x', body: 'y',
-      date: { dateTime: '2026-05-14T00:00:00Z' }, from: { name: 'Me' }, recipients: [],
-    });
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce({ entityId: 200 })
+      .mockResolvedValueOnce({
+        id: 200, subject: 'x', body: 'y',
+        date: { dateTime: '2026-05-14T00:00:00Z' }, from: { name: 'Me' }, recipients: [],
+      });
     setup(client);
     await handlers.get('ofw_send_message')!({
       subject: 'x', body: 'y', recipientIds: [1], myFileIDs: [50015547],

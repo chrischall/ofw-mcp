@@ -414,7 +414,28 @@ describe('syncDrafts', () => {
     expect(getDraft(1)?.modifiedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
   });
 
-  it('skips refetching a draft whose modifiedAt is unchanged', async () => {
+  it('always refetches detail even when the list modifiedAt is unchanged (OFW list date.dateTime does not reflect UI edits)', async () => {
+    upsertDraft({
+      id: 1, subject: 'Same', body: 'stale-body',
+      recipients: [], replyToId: null,
+      modifiedAt: '2026-05-04T00:00:00Z', listData: {},
+    });
+
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request')
+      .mockResolvedValueOnce(draftListResponse([{ id: 1, subject: 'Same', modifiedAt: '2026-05-04T00:00:00Z' }]))
+      .mockResolvedValueOnce({ body: 'fresh-body', subject: 'Same', recipientIds: [] });
+
+    const result = await syncDrafts(client, '333');
+
+    expect(spy).toHaveBeenCalledTimes(2);
+    expect(spy.mock.calls[1]).toEqual(['GET', '/pub/v3/messages/1']);
+    expect(getDraft(1)?.body).toBe('fresh-body');
+    // synced counts as 1 because the body actually changed
+    expect(result.synced).toBe(1);
+  });
+
+  it('does not count unchanged drafts toward synced even though it refetches them', async () => {
     upsertDraft({
       id: 1, subject: 'Same', body: 'same-body',
       recipients: [], replyToId: null,
@@ -422,13 +443,12 @@ describe('syncDrafts', () => {
     });
 
     const client = new OFWClient();
-    const spy = vi.spyOn(client, 'request')
-      .mockResolvedValueOnce(draftListResponse([{ id: 1, subject: 'Same', modifiedAt: '2026-05-04T00:00:00Z' }]));
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce(draftListResponse([{ id: 1, subject: 'Same', modifiedAt: '2026-05-04T00:00:00Z' }]))
+      .mockResolvedValueOnce({ body: 'same-body', subject: 'Same', recipientIds: [] });
 
-    await syncDrafts(client, '333');
-
-    expect(spy).toHaveBeenCalledTimes(1);
-    expect(getDraft(1)?.body).toBe('same-body');
+    const result = await syncDrafts(client, '333');
+    expect(result.synced).toBe(0);
   });
 });
 
