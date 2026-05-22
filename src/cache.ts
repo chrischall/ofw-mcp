@@ -197,6 +197,17 @@ export function getMessage(id: number): MessageRow | null {
   return r ? rowFromDb(r) : null;
 }
 
+/**
+ * Remove a row from the `messages` table. Used by syncDrafts to evict
+ * stale rows that were cached when a draft was previously read through
+ * `ofw_get_message` (which would have wrongly classified it as `inbox`)
+ * — the drafts table is the authoritative source for that id now.
+ */
+export function deleteMessage(id: number): void {
+  const { db } = openCache();
+  db.prepare('DELETE FROM messages WHERE id = ?').run(id);
+}
+
 export interface ListMessagesOptions {
   folder?: 'inbox' | 'sent';   // omit to search both
   page: number;

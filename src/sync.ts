@@ -1,7 +1,7 @@
 import type { OFWClient } from './client.js';
 import {
   setMeta,
-  upsertMessage, getMessage, setSyncState,
+  upsertMessage, getMessage, deleteMessage, setSyncState,
   upsertDraft, getDraft, deleteDraft, listDraftIds,
   upsertAttachmentForMessage,
   type MessageRow, type DraftRow, type FolderName,
@@ -235,6 +235,11 @@ export async function syncDrafts(client: OFWClient, draftsFolderId: string): Pro
       listData: item,
     };
     upsertDraft(row);
+    // If a stale `messages` row exists for this id (cached by a prior
+    // ofw_get_message call before the drafts table knew about this id),
+    // evict it. The drafts table is the source of truth for drafts; we
+    // don't want ofw_get_message returning a stale messages-table copy.
+    if (getMessage(item.id)) deleteMessage(item.id);
     if (!existing
         || existing.body !== row.body
         || existing.subject !== row.subject
