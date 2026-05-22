@@ -49,12 +49,11 @@ export async function fetchAttachmentMetaForMessage(
   messageId: number,
   fileIds: number[],
 ): Promise<void> {
-  for (const fid of fileIds) {
-    // Best-effort: a single bad attachment shouldn't break the surrounding
-    // sync. The file id stays in the message's listData; the model can
-    // retry later via ofw_download_attachment, which surfaces the real error.
-    try { await fetchAttachmentMeta(client, fid, messageId); } catch { /* swallow */ }
-  }
+  // Fan out in parallel — each fetch is independent and the file id stays
+  // in listData on failure (model can retry via ofw_download_attachment,
+  // which surfaces the real error). Promise.allSettled so one bad
+  // attachment doesn't break the surrounding sync.
+  await Promise.allSettled(fileIds.map((fid) => fetchAttachmentMeta(client, fid, messageId)));
 }
 
 export interface FolderIds {
