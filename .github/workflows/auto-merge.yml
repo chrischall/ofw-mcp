@@ -3,12 +3,16 @@ name: Auto-merge PRs
 # Source-aware auto-merge:
 #
 #  - dependabot[bot] PRs: arm `--auto --merge` as soon as the PR is non-
-#    draft. Merges as soon as CI is green; no review gating.
-#  - owner PRs: arm `--auto --merge` when the owner adds the `ready-to-
-#    merge` label. That label is the owner's deliberate "I've read the
-#    @claude comment and the Copilot review and I'm satisfied" signal.
-#  - everyone else (other humans, forks): never auto-armed. The owner
-#    merges those by hand after reviewing.
+#    draft. Merges when CI is green; no review gating.
+#  - Same-repo (non-fork) PRs with the `ready-to-merge` label: arm
+#    `--auto --merge`. That label is added either:
+#      * by the owner manually (e.g. to override Claude's warn/fail, or
+#        to land tag-and-bump's release PR), OR
+#      * automatically by pr-auto-review.yml when Claude's verdict =
+#        `pass` on a same-repo PR.
+#    Either way, the label is the signal.
+#  - Fork PRs: never auto-armed. Reviewed for advisory value only;
+#    the owner merges those by hand.
 #
 # The merge still waits for branch protection's required status check
 # (`ci`), so this is "merge as soon as CI is green," not "merge without
@@ -54,15 +58,17 @@ jobs:
           PR_URL: ${{ github.event.pull_request.html_url }}
         run: gh pr merge --auto --merge "$PR_URL"
 
-  arm-owner-on-ready-label:
+  arm-on-ready-label:
     runs-on: ubuntu-latest
+    # Same-repo PRs only (excludes forks). The label may be added by the
+    # owner manually or by pr-auto-review.yml on Claude's `verdict=pass`.
     if: |
       github.event.action == 'labeled' &&
       github.event.label.name == 'ready-to-merge' &&
       github.event.pull_request.draft == false &&
-      github.event.pull_request.user.login == github.repository_owner
+      github.event.pull_request.head.repo.full_name == github.repository
     steps:
-      - name: Arm auto-merge after owner adds ready-to-merge
+      - name: Arm auto-merge on ready-to-merge label
         env:
           GH_TOKEN: ${{ secrets.RELEASE_PAT }}
           PR_URL: ${{ github.event.pull_request.html_url }}

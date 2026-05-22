@@ -113,22 +113,27 @@ Main is always one version ahead of the latest tag. To release, run the **Tag & 
 
 The branch-and-PR shape is required because `main` is protected: direct pushes are blocked, `ci` is a required status check, and admin enforcement is on. The release bot has no escape hatch — every change to main goes through a PR.
 
-<!-- pr-workflow:v1 -->
+<!-- pr-workflow:v2 -->
 ## Pull requests & release notes
 
 **Default workflow: branch + PR. Direct pushes to `main` are blocked by branch protection** (required status check `ci`, required PR flow, admin enforcement on). The PR mechanism is also the only way release notes get generated — `generate_release_notes` (configured in `.github/release.yml`) picks up merged PRs.
 
 PR handling is **source-aware**:
 
-| PR author              | `auto-review` (label, @claude, Copilot) | Auto-merge                                              |
-|------------------------|------------------------------------------|---------------------------------------------------------|
-| **You (owner)**        | Yes                                      | Only after you add the **`ready-to-merge`** label       |
-| **Other humans**       | Yes                                      | No — you merge manually after reviewing                 |
-| **Dependabot / bots**  | No (skipped to keep noise down)          | Yes, armed immediately; merges when CI is green         |
+| PR author                          | `auto-review` (Claude verdict + Copilot) | Auto-merge                                                                                       |
+|------------------------------------|-------------------------------------------|--------------------------------------------------------------------------------------------------|
+| **You / same-repo collaborators**  | Yes                                       | Yes when Claude verdict = `pass` AND CI is green. `warn` / `fail` → manual `ready-to-merge`.     |
+| **External fork PRs**              | Yes (advisory only)                       | No — you merge manually after reviewing                                                          |
+| **Dependabot / bots**              | No (skipped to keep noise down)           | Yes, armed immediately; merges when CI is green                                                  |
 
-`pr-auto-review.yml` fires on any PR whose author is type `User` (so it includes both you and any future collaborators). `auto-merge.yml` is split into two jobs: one arms on dependabot PR open, the other arms on owner PRs only when the `ready-to-merge` label is added. Other-human PRs never auto-arm — you decide when to land them.
+`pr-auto-review.yml` runs `claude-code-action` with a JSON-schema-bound verdict (`pass` / `warn` / `fail`) on every non-draft PR from a `User` actor. Claude posts findings as a PR comment and emits the verdict to `structured_output`; if `verdict == pass` AND the PR is from a same-repo branch (not a fork), the workflow adds `ready-to-merge` via RELEASE_PAT. `auto-merge.yml` then arms `gh pr merge --auto`. Required status check `ci` still gates the actual merge.
 
-Workflow for your own PRs: open the PR → it gets auto-labeled and reviewed → skim the `@claude` comment and the Copilot review → add `ready-to-merge` when you're satisfied → CI green → merges. If reviewers flag something, push fixes; CI restarts; once you re-add `ready-to-merge` (if it was dismissed) auto-merge re-arms.
+Verdict semantics (Claude follows the official `code-review` plugin's severity model with confidence ≥80 to count):
+- `pass` — no 🔴 Important findings.
+- `warn` — at least one 🟡 Nit but no 🔴 Important.
+- `fail` — at least one 🔴 Important finding.
+
+Override: if you want to merge through a `warn` or `fail`, add `ready-to-merge` by hand — it still arms auto-merge. To suppress auto-merge on a `pass`, remove the label or close-and-reopen the PR draft.
 
 For every PR, apply exactly one label so it lands in the right release-notes section:
 
@@ -147,7 +152,7 @@ For every PR, apply exactly one label so it lands in the right release-notes sec
 
 The **PR title** becomes the bullet — write it like a user-facing changelog entry (`ofw_sync_messages: resume from saved cursor`), not internal shorthand (`sync tweaks`). Conventional-commit prefixes (`feat:`, `fix:`, `chore:`) are still fine in commit messages, but the PR title should read clean.
 
-Open with `gh pr create --label <label>` (or `--label ignore-for-release` for chores not worth a line). For your own PRs, add `--label ready-to-merge` if you already want it to auto-merge as soon as CI passes — otherwise add the label later through the GitHub UI once you've read the auto-review feedback. Dependabot PRs auto-arm without `ready-to-merge`. The repo allows merge commits only (no squash, no rebase) — if you ever do call `gh pr merge` manually, don't pass `--squash`/`--rebase` or the call will fail.
+Open with `gh pr create --label <label>` (or `--label ignore-for-release` for chores not worth a line). You generally don't need to pre-add `ready-to-merge` anymore — let Claude's review verdict do it. If you want to skip the review (e.g. for a trivial chore you've eyeballed yourself), add `ready-to-merge` at PR-create time and it'll arm immediately. Dependabot PRs auto-arm without `ready-to-merge`. The repo allows merge commits only (no squash, no rebase) — if you ever do call `gh pr merge` manually, don't pass `--squash`/`--rebase` or the call will fail.
 
 ## Plugin / Distribution
 
