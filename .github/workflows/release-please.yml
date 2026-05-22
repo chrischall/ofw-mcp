@@ -1,0 +1,53 @@
+name: release-please
+
+# On every push to main, run googleapis/release-please-action. It scans
+# Conventional-Commit messages since the last release tag and:
+#
+#   - If new fix:/feat:/etc. commits are present, opens or updates a
+#     "release PR" titled "chore: release <next-version>" that bumps
+#     `package.json`/`package-lock.json` (via release-type: node) plus
+#     every file listed in `extra-files` of release-please-config.json,
+#     and updates CHANGELOG.md.
+#   - When that release PR merges, the action creates a `v<VERSION>` tag
+#     and a GitHub Release populated from the CHANGELOG section.
+#
+# We add `ready-to-merge` to the release PR via a follow-up gh call (not
+# via release-please's `labels` config) so the `labeled` event fires and
+# auto-merge.yml arms. (Labels passed at PR creation are bundled into the
+# `opened` event and don't fire a separate `labeled` event.)
+#
+# All operations use RELEASE_PAT, not GITHUB_TOKEN, so:
+#   - The release PR's `opened` event triggers downstream workflows
+#     (CI, pr-auto-review, auto-merge.yml's arm-on-ready-label).
+#   - The `v<VERSION>` tag push triggers release.yml.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: release-please-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: release
+        with:
+          token: ${{ secrets.RELEASE_PAT }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+      - name: Add ready-to-merge to release PR
+        if: steps.release.outputs.pr != ''
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PAT }}
+          PR: ${{ fromJSON(steps.release.outputs.pr).number }}
+          REPO: ${{ github.repository }}
+        run: gh pr edit "$PR" --repo "$REPO" --add-label ready-to-merge

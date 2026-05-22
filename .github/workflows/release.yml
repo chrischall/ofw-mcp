@@ -1,5 +1,15 @@
 name: Release
 
+# Triggered by the tag push that release-please creates when its release
+# PR merges. release-please has already authored the GitHub Release with
+# the CHANGELOG content; this workflow:
+#   1. Verifies every version file matches the tag (failing fast if
+#      release-please's bump logic ever drifted).
+#   2. Builds and packages the .mcpb bundle and .skill artifact.
+#   3. Publishes to npm (with provenance, idempotent), the MCP Registry
+#      (OIDC), and ClawHub (optional).
+#   4. Attaches the .mcpb and .skill artifacts to the existing release.
+
 on:
   push:
     tags:
@@ -32,20 +42,40 @@ jobs:
           VERSION=$(node -p "require('./package.json').version")
           echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
 
-      # Sync in-repo version files to match the tag.
-      - name: Sync version files to $VERSION
+      # Defensive: fail loudly if any tracked version file disagrees with
+      # package.json's version. release-please should keep these in lockstep
+      # via its extra-files config — this assertion catches the case where
+      # a new file with a `version` field was added without registering it
+      # in release-please-config.json.
+      - name: Assert all version files match
         run: |
           node -e "
             const fs = require('fs');
-            for (const f of ['manifest.json', 'server.json', '.claude-plugin/plugin.json', '.claude-plugin/marketplace.json']) {
-              if (!fs.existsSync(f)) continue;
-              const o = JSON.parse(fs.readFileSync(f, 'utf8'));
-              if (o.version !== undefined) o.version = '$VERSION';
-              if (o.metadata?.version !== undefined) o.metadata.version = '$VERSION';
-              if (Array.isArray(o.packages)) o.packages.forEach(p => { if (p.version !== undefined) p.version = '$VERSION'; });
-              if (Array.isArray(o.plugins)) o.plugins.forEach(p => { if (p.version !== undefined) p.version = '$VERSION'; });
-              fs.writeFileSync(f, JSON.stringify(o, null, 2) + '\n');
+            const expected = '$VERSION';
+            const checks = [
+              { path: 'manifest.json',                  get: o => o.version },
+              { path: 'server.json',                    get: o => o.version },
+              { path: 'server.json',                    get: o => o.packages?.[0]?.version },
+              { path: '.claude-plugin/plugin.json',     get: o => o.version },
+              { path: '.claude-plugin/marketplace.json', get: o => o.metadata?.version },
+              { path: '.claude-plugin/marketplace.json', get: o => o.plugins?.[0]?.version },
+            ];
+            let bad = 0;
+            for (const c of checks) {
+              if (!fs.existsSync(c.path)) continue;
+              const actual = c.get(JSON.parse(fs.readFileSync(c.path, 'utf8')));
+              if (actual !== expected) {
+                console.error('MISMATCH', c.path, 'expected', expected, 'got', actual);
+                bad++;
+              }
             }
+            // src/index.ts — check the line tagged with x-release-please-version
+            const idx = fs.readFileSync('src/index.ts', 'utf8');
+            const m = idx.match(/version:\s*'([^']+)'.*x-release-please-version/);
+            if (!m) { console.error('src/index.ts: x-release-please-version sentinel not found'); bad++; }
+            else if (m[1] !== expected) { console.error('MISMATCH src/index.ts expected', expected, 'got', m[1]); bad++; }
+            if (bad > 0) { console.error('FAIL: ' + bad + ' version mismatches'); process.exit(1); }
+            console.log('OK: all version files match', expected);
           "
 
       # Package the .skill file
@@ -94,6 +124,8 @@ jobs:
         run: ./mcp-publisher publish
 
       # ─── ClawHub (OpenClaw skill registry) — conditional on CLAWHUB_TOKEN ───
+      # GitHub Actions disallows `secrets.*` in step-level `if:`, so the
+      # token check happens inside the run block.
       - name: Publish skill to ClawHub
         continue-on-error: true
         env:
@@ -116,10 +148,14 @@ jobs:
           cp skills/ofw/SKILL.md "$SKILL_DIR/"
           npx --yes clawhub publish "$SKILL_DIR" --version "${VERSION}" --slug ofw-mcp
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v3.0.0
-        with:
-          files: |
-            ofw-mcp-${{ env.VERSION }}.skill
-            ofw-mcp-${{ env.VERSION }}.mcpb
-          generate_release_notes: true
+      # release-please already created the GitHub Release with CHANGELOG
+      # content; just attach the build artifacts. --clobber so re-running
+      # the workflow on the same tag overwrites prior uploads.
+      - name: Attach artifacts to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "v${VERSION}" \
+            "ofw-mcp-${VERSION}.skill" \
+            "ofw-mcp-${VERSION}.mcpb" \
+            --clobber

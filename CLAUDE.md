@@ -89,30 +89,33 @@ npm test           # vitest run
 
 ## Versioning
 
-Version appears in SEVEN places — all must match:
+Driven by **release-please** (`googleapis/release-please-action@v4`). Authoritative state lives in `.release-please-manifest.json`; release-please bumps every file registered in `release-please-config.json`'s `extra-files`:
 
-1. `package.json` → `"version"`
-2. `package-lock.json` → `npm install --package-lock-only` after changing package.json (or `npm version` does it automatically)
-3. `src/index.ts` → `McpServer` constructor `version` field
-4. `manifest.json` → `"version"`
-5. `server.json` → `"version"` and `packages[].version` (two entries)
-6. `.claude-plugin/plugin.json` → `"version"`
-7. `.claude-plugin/marketplace.json` → `plugins[].version` and `metadata.version`
+- `package.json` / `package-lock.json` — handled by `release-type: node`
+- `src/index.ts` — the `version: '…'` literal on the line marked `// x-release-please-version`
+- `manifest.json` — `$.version`
+- `server.json` — `$.version` and `$.packages[*].version`
+- `.claude-plugin/plugin.json` — `$.version`
+- `.claude-plugin/marketplace.json` — `$.plugins[*].version` and `$.metadata.version`
+
+If you add a new file with a `version` field, register it in `release-please-config.json`. `release.yml` has an assertion step that fails the publish job if any registered file drifts from `package.json` — so an un-registered file would silently drift until the next release, at which point the guard catches it.
 
 ### Important
 
-Do NOT manually bump versions or create tags unless the user explicitly asks. Versioning is handled by the **Tag & Bump** GitHub Action (`.github/workflows/tag-and-bump.yml`).
+Do NOT manually bump versions or create tags. Conventional-commit PR titles tell release-please what to do: `fix:` → patch, `feat:` → minor, `feat!:` / `BREAKING CHANGE` → major. `chore:`, `docs:`, `ci:`, `test:`, `build:`, `refactor:` don't trigger a release on their own.
 
 ### Release workflow
 
-Main is always one version ahead of the latest tag. Releases are zero-touch — kicking off **Tag & Bump** drives the whole loop:
+Main is always at the latest released version (not "one ahead" — that was the old `tag-and-bump` model). The loop is fully driven by `release-please`:
 
-1. **Tag & Bump** (`.github/workflows/tag-and-bump.yml`, manual `workflow_dispatch`): branches `release/v<NEXT>` off main, bumps every version field (see the list above), rebuilds, pushes the branch, opens a PR titled `chore: release v<CURRENT> (bump main to v<NEXT>)` labeled `ignore-for-release`, then follows up with `gh pr edit --add-label ready-to-merge` to arm auto-merge.
-2. **Auto-merge** (`auto-merge.yml`, `arm-owner-on-ready-label` job): sees `ready-to-merge` on an owner PR and calls `gh pr merge --auto --merge` via `RELEASE_PAT`. (The PAT, not `GITHUB_TOKEN`, so the resulting merge fires downstream workflows.)
-3. **Tag on release merge** (`tag-on-release-merge.yml`, `push: branches: [main]`): compares `HEAD`'s `package.json` version to `HEAD~1`'s. When they differ, tags `HEAD~1` with `v<HEAD~1's version>` — i.e. the released code, before the bump — and pushes the tag via `RELEASE_PAT`. Idempotent: skips if the tag already exists.
-4. **Release** (`release.yml`, `push: tags: ['v*']`): rebuilds, publishes to npm with provenance, publishes to the MCP Registry, publishes the skill to ClawHub (if `CLAWHUB_TOKEN` is set), creates a GitHub Release with the `.mcpb` + `.skill` assets and `generate_release_notes: true`.
+1. **release-please.yml** runs on every push to main. When it sees commits since the last release that warrant a bump, it opens (or updates) a release PR titled `chore: release v<NEXT>`, bumps every file in `extra-files`, and writes the new entry into `CHANGELOG.md`. The PR is auto-labeled `ready-to-merge` (via a follow-up `gh pr edit --add-label` step, using `RELEASE_PAT` so the `labeled` event actually fires).
+2. **auto-merge.yml** (`arm-on-ready-label`) sees the label and calls `gh pr merge --auto --merge` via `RELEASE_PAT`. CI gates the merge.
+3. When the release PR merges, `release-please-action` runs again on the new main push, creates the `v<NEXT>` tag, and creates a GitHub Release with the CHANGELOG section as the body.
+4. The tag push (using `RELEASE_PAT`) fires **release.yml**: asserts all version files match the tag (defensive — should always pass), builds + packages the `.mcpb` bundle and `.skill` archive, publishes to npm (provenance, idempotent), the MCP Registry (OIDC), and ClawHub (gated on `secrets.CLAWHUB_TOKEN`), then attaches the `.mcpb` and `.skill` to the existing release via `gh release upload --clobber`.
 
-The branch-and-PR shape is required because `main` is protected: direct pushes are blocked, `ci` is a required status check, and admin enforcement is on. The release bot has no escape hatch — every change to main goes through a PR.
+To skip a release temporarily, close release-please's PR — it'll re-open with more content the next time something warrants a bump. To force a release for content release-please thinks doesn't warrant one, see release-please's `release-as` / `--release-as` options.
+
+The branch-and-PR shape is still required because `main` is protected by the *main protection (PR + ci)* ruleset.
 
 <!-- pr-workflow:v3 -->
 ## Pull requests & release notes

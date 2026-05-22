@@ -6,10 +6,10 @@ name: Auto-merge PRs
 #    draft. Merges when CI is green; no review gating.
 #  - Same-repo (non-fork) PRs with the `ready-to-merge` label: arm
 #    `--auto --merge`. That label is added either:
-#      * by the owner manually (e.g. to override Claude's warn/fail, or
-#        to land tag-and-bump's release PR), OR
+#      * by the owner manually (to override Claude's warn/fail), OR
 #      * automatically by pr-auto-review.yml when Claude's verdict =
-#        `pass` on a same-repo PR.
+#        `pass` on a same-repo PR, OR
+#      * automatically by release-please.yml on the release PR.
 #    Either way, the label is the signal.
 #  - Fork PRs: never auto-armed. Reviewed for advisory value only;
 #    the owner merges those by hand.
