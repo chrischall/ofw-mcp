@@ -251,6 +251,40 @@ describe('OFWClient', () => {
     expect(init.body).toBe(form);
   });
 
+  it('re-authenticates when the cached token enters the expiry skew window', async () => {
+    // Six-hour TTL with a five-minute skew: once we're within five
+    // minutes of expiry, the next request should trigger a fresh login
+    // (init + login + api), not reuse the cached token.
+    vi.useFakeTimers();
+    try {
+      const start = new Date('2026-06-01T00:00:00Z');
+      vi.setSystemTime(start);
+
+      const spy = mockFetch([
+        LOGIN_INIT,
+        LOGIN_SUCCESS,
+        { status: 200, body: { ok: 1 } },
+        // Second request, after expiry, triggers a fresh login pair:
+        LOGIN_INIT,
+        LOGIN_SUCCESS,
+        { status: 200, body: { ok: 2 } },
+      ]);
+
+      const client = new OFWClient();
+      await client.request('GET', '/pub/v1/test');
+      expect(spy).toHaveBeenCalledTimes(3); // init + login + api
+
+      // Move 5h 56m into the future — past the 5-min skew, so the token
+      // is "expiring soon" and the client should re-auth on next call.
+      vi.setSystemTime(new Date(start.getTime() + (5 * 60 + 56) * 60 * 1000));
+
+      await client.request('GET', '/pub/v1/test');
+      expect(spy).toHaveBeenCalledTimes(6); // re-init + re-login + api
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('sends ofw-client and ofw-version headers', async () => {
     const spy = mockFetch([
       LOGIN_INIT,
