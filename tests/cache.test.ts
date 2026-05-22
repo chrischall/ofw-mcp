@@ -73,22 +73,7 @@ describe('openCache', () => {
   });
 });
 
-function sampleRow(overrides: Partial<MessageRow> = {}): MessageRow {
-  return {
-    id: 100,
-    folder: 'inbox',
-    subject: 'Hello',
-    fromUser: 'Alice',
-    sentAt: '2026-05-04T12:00:00Z',
-    recipients: [{ userId: 1, name: 'Bob', viewedAt: null }],
-    body: 'Body text',
-    fetchedBodyAt: '2026-05-04T12:01:00Z',
-    replyToId: null,
-    chainRootId: null,
-    listData: { id: 100, raw: true },
-    ...overrides,
-  };
-}
+import { sampleMessageRow as sampleRow } from './_fixtures.js';
 
 describe('messages CRUD', () => {
   it('upsertMessage + getMessage round-trips', () => {
