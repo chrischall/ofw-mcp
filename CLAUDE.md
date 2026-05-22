@@ -46,6 +46,7 @@ OFW_CACHE_IDENTITY        Optional. Explicit cache-key label; overrides OFW_USER
 OFW_CACHE_DIR             Optional. Overrides cache dir (default ~/.cache/ofw-mcp)
 OFW_ATTACHMENTS_DIR       Optional. Where ofw_download_attachment writes (default ~/Downloads/ofw-mcp)
 OFW_INLINE_ATTACHMENTS    Optional. "1|true|yes|on" → return attachments as MCP content blocks by default
+OFW_DEBUG_LOG             Optional. "1|true|yes|on" → log every OFW request/response to stderr (Authorization redacted). Diagnostic only.
 ```
 
 `auth.ts` ignores blank values, the strings `"undefined"`/`"null"`, and unsubstituted `${VAR}` placeholders — defensive against MCP hosts passing the env block through unexpanded.
@@ -66,7 +67,7 @@ The split into `auth.ts` + `auth-password.ts` is deliberate: tests mock `auth-pa
 
 - SQLite at `~/.cache/ofw-mcp/<sha256(OFW_USERNAME).slice(0,16)>.db`. Requires Node ≥22.5 for `node:sqlite` (an `ExperimentalWarning` for SQLite is suppressed in `src/index.ts`)
 - All message reads (`ofw_list_messages`, `ofw_get_message`, `ofw_list_drafts`, `ofw_get_unread_sent`) are served from the cache. `ofw_sync_messages` is the only path that walks OFW for new content
-- `ofw_send_message` and `ofw_save_draft` resolve `replyToId` to the latest sent reply in the same chain via the cache (transparency note included in the response when rewritten); the new sent/draft row is written through to the cache after the OFW POST succeeds
+- `ofw_send_message` and `ofw_save_draft` resolve `replyToId` to the latest sent reply in the same chain via the cache (transparency note included in the response when rewritten); after the OFW POST succeeds they immediately `GET /pub/v3/messages/{id}` to repopulate the cache from authoritative state. (OFW's POST response is minimal — typically `{entityId: X}` — and can silently no-op on draft updates, so we don't trust it.) `ofw_save_draft` additionally emits a `WARNING` note when updating and the persisted body doesn't match what was requested.
 - Drafts folder ID is resolved dynamically via `/pub/v1/messageFolders` and persisted in the `meta` table
 
 ## OFW API Notes
@@ -102,14 +103,12 @@ Do NOT manually bump versions or create tags unless the user explicitly asks. Ve
 
 ### Release workflow
 
-Main is always one version ahead of the latest tag. To release, run the **Tag & Bump** Action which:
+Main is always one version ahead of the latest tag. Releases are zero-touch — kicking off **Tag & Bump** drives the whole loop:
 
-1. Branches `release/v<NEXT>` off main
-2. Bumps every version field (`package.json`, `package-lock.json`, `src/index.ts`, `manifest.json`, `server.json`, `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json`) on that branch
-3. Rebuilds, commits, pushes the branch, and opens a PR titled `chore: release v<CURRENT> (bump main to v<NEXT>)` with the `ignore-for-release` label
-4. Auto-merge (see `auto-merge.yml`) merges the PR as soon as CI passes
-5. **Tag on release merge** (`.github/workflows/tag-on-release-merge.yml`) detects the version change on the resulting `main` push and tags the *parent* of the merge commit with `v<CURRENT>` — that's the content that was on main *before* the bump, i.e. the released code
-6. The tag push triggers the **Release** workflow (CI + npm publish with provenance, MCP Registry publish, ClawHub skill publish, GitHub release with `.mcpb` + `.skill` assets and `generate_release_notes: true`)
+1. **Tag & Bump** (`.github/workflows/tag-and-bump.yml`, manual `workflow_dispatch`): branches `release/v<NEXT>` off main, bumps every version field (see the list above), rebuilds, pushes the branch, opens a PR titled `chore: release v<CURRENT> (bump main to v<NEXT>)` labeled `ignore-for-release`, then follows up with `gh pr edit --add-label ready-to-merge` to arm auto-merge.
+2. **Auto-merge** (`auto-merge.yml`, `arm-owner-on-ready-label` job): sees `ready-to-merge` on an owner PR and calls `gh pr merge --auto --merge` via `RELEASE_PAT`. (The PAT, not `GITHUB_TOKEN`, so the resulting merge fires downstream workflows.)
+3. **Tag on release merge** (`tag-on-release-merge.yml`, `push: branches: [main]`): compares `HEAD`'s `package.json` version to `HEAD~1`'s. When they differ, tags `HEAD~1` with `v<HEAD~1's version>` — i.e. the released code, before the bump — and pushes the tag via `RELEASE_PAT`. Idempotent: skips if the tag already exists.
+4. **Release** (`release.yml`, `push: tags: ['v*']`): rebuilds, publishes to npm with provenance, publishes to the MCP Registry, publishes the skill to ClawHub (if `CLAWHUB_TOKEN` is set), creates a GitHub Release with the `.mcpb` + `.skill` assets and `generate_release_notes: true`.
 
 The branch-and-PR shape is required because `main` is protected: direct pushes are blocked, `ci` is a required status check, and admin enforcement is on. The release bot has no escape hatch — every change to main goes through a PR.
 
@@ -166,7 +165,7 @@ skills/ofw/SKILL.md Claude Code skill describing when/how to use the tools
 - **ESM + NodeNext**: imports must use `.js` extensions even for `.ts` sources (e.g. `import { client } from './client.js'`)
 - **Node ≥22.5 required**: `node:sqlite` is the cache backend. The startup `ExperimentalWarning` for SQLite is suppressed by a `process.emit` shim at the top of `src/index.ts`
 - **stdio transport**: stdout is reserved for JSON-RPC. All logging goes to **stderr** (`console.error`). `dotenv` is loaded inside a try/catch and the entry point shim filters warnings
-- **Cache write-through**: write tools (`ofw_send_message`, `ofw_save_draft`, `ofw_delete_draft`) update the local cache after the OFW POST succeeds, so the next read sees the new row without resyncing
+- **Cache refresh from GET**: `ofw_send_message` and `ofw_save_draft` GET `/pub/v3/messages/{id}` after the POST returns and populate the cache from the detail response — OFW's POST response is minimal (typically `{entityId: X}`) and can silently no-op on subsequent draft updates, so we don't trust the POST echo. `ofw_delete_draft` updates the cache directly after the OFW DELETE succeeds (no GET needed)
 - **replyToId rewriting**: send/save_draft transparently re-target stale `replyToId`s to the latest sent reply in the chain (via `findLatestReplyTip`) and include a transparency note in the response
 - **Attachment download paths**: in sandboxed MCP hosts (Claude Desktop) the model often can't read files written under `~/.cache`. Default download dir is `~/Downloads/ofw-mcp/`; set `OFW_INLINE_ATTACHMENTS=true` (or per-call `inline: true`) to return bytes as MCP content blocks instead
 - **AI-maintained**: README warns this codebase is built and maintained by Claude; `src/index.ts` prints the same notice to stderr on startup

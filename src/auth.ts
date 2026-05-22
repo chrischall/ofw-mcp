@@ -48,6 +48,7 @@
 
 import { bootstrap } from '@fetchproxy/bootstrap';
 import { loginWithPassword } from './auth-password.js';
+import { parseBoolEnv } from './config.js';
 import pkg from '../package.json' with { type: 'json' };
 
 /** Result of resolving auth, regardless of which path was taken. */
@@ -77,9 +78,7 @@ function readEnv(key: string): string | undefined {
 
 /** True if the user has explicitly disabled the fetchproxy fallback. */
 function fetchproxyDisabled(): boolean {
-  const raw = readEnv('OFW_DISABLE_FETCHPROXY');
-  if (raw === undefined) return false;
-  return ['1', 'true', 'yes', 'on'].includes(raw.toLowerCase());
+  return parseBoolEnv('OFW_DISABLE_FETCHPROXY');
 }
 
 /**

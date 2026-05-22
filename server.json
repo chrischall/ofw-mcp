@@ -18,14 +18,14 @@
       "environmentVariables": [
         {
           "name": "OFW_USERNAME",
-          "description": "Your OurFamilyWizard login email address",
-          "isRequired": true,
+          "description": "Your OurFamilyWizard login email address. Optional — if omitted, the server falls back to the fetchproxy browser extension (requires being signed in to ourfamilywizard.com).",
+          "isRequired": false,
           "format": "string"
         },
         {
           "name": "OFW_PASSWORD",
-          "description": "Your OurFamilyWizard password",
-          "isRequired": true,
+          "description": "Your OurFamilyWizard password. Optional — see OFW_USERNAME.",
+          "isRequired": false,
           "format": "string",
           "isSecret": true
         }

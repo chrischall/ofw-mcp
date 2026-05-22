@@ -73,22 +73,7 @@ describe('openCache', () => {
   });
 });
 
-function sampleRow(overrides: Partial<MessageRow> = {}): MessageRow {
-  return {
-    id: 100,
-    folder: 'inbox',
-    subject: 'Hello',
-    fromUser: 'Alice',
-    sentAt: '2026-05-04T12:00:00Z',
-    recipients: [{ userId: 1, name: 'Bob', viewedAt: null }],
-    body: 'Body text',
-    fetchedBodyAt: '2026-05-04T12:01:00Z',
-    replyToId: null,
-    chainRootId: null,
-    listData: { id: 100, raw: true },
-    ...overrides,
-  };
-}
+import { sampleMessageRow as sampleRow } from './_fixtures.js';
 
 describe('messages CRUD', () => {
   it('upsertMessage + getMessage round-trips', () => {
@@ -231,6 +216,20 @@ describe('drafts CRUD', () => {
     upsertDraft(sampleDraft({ id: 1 }));
     upsertDraft(sampleDraft({ id: 2 }));
     expect(listDraftIds().sort()).toEqual([1, 2]);
+  });
+});
+
+describe('upsertMessage NOT-NULL guards', () => {
+  it('throws with the field name when subject is undefined', () => {
+    expect(() => upsertMessage(sampleRow({ subject: undefined as unknown as string }))).toThrow(
+      /messages\.subject is required \(got undefined\)/,
+    );
+  });
+
+  it('throws with the field name when fromUser is null', () => {
+    expect(() => upsertMessage(sampleRow({ fromUser: null as unknown as string }))).toThrow(
+      /messages\.fromUser is required \(got null\)/,
+    );
   });
 });
 

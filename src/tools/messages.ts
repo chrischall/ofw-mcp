@@ -11,7 +11,7 @@ import {
 import { getAttachmentsDir, getDefaultInlineAttachments } from '../config.js';
 import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, extname, join } from 'node:path';
-import { expandPath, jsonResponse, mapRecipients, textResponse } from './_shared.js';
+import { expandPath, jsonResponse, mapRecipients, postMessageAndRefetch, textResponse, type ApiRecipient } from './_shared.js';
 
 // Lightweight mime sniff from extension. OFW re-derives mime from the filename
 // server-side anyway, so this is just a polite Content-Type for the Blob.
@@ -139,7 +139,7 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
       id: number; body?: string; subject: string; from?: { name?: string };
       date: { dateTime: string };
       files?: number[];
-      recipients?: Array<{ user: { id: number; name: string }; viewed?: { dateTime: string } | null }>;
+      recipients?: ApiRecipient[];
     }>('GET', `/pub/v3/messages/${encodeURIComponent(args.messageId)}`);
 
     const folder: 'inbox' | 'sent' = cached?.folder ?? 'inbox';
@@ -191,12 +191,11 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
     }
 
     const myFileIDs = args.myFileIDs ?? [];
-    // OFW's POST /pub/v3/messages response is minimal — typically just
-    // `{entityId: <id>}` — so the cache write needs to fetch detail
-    // afterwards (same shape as ofw_save_draft).
-    const data = await client.request<{
-      id?: number; entityId?: number;
-    } & Record<string, unknown>>('POST', '/pub/v3/messages', {
+    const { id: newId, detail, raw } = await postMessageAndRefetch<{
+      id: number; subject?: string; body?: string;
+      date?: { dateTime: string }; from?: { name?: string };
+      recipients?: ApiRecipient[];
+    }>(client, {
       subject: args.subject,
       body: args.body,
       recipientIds: args.recipientIds,
@@ -206,19 +205,8 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
       replyToId: resolvedReplyTo,
     });
 
-    const newId: number | null =
-      typeof data?.id === 'number' ? data.id
-      : typeof data?.entityId === 'number' ? data.entityId
-      : null;
-
     let persisted: MessageRow | null = null;
     if (newId !== null) {
-      const detail = await client.request<{
-        id: number; subject?: string; body?: string;
-        date?: { dateTime: string }; from?: { name?: string };
-        recipients?: Array<{ user: { id: number; name: string }; viewed?: { dateTime: string } | null }>;
-      }>('GET', `/pub/v3/messages/${newId}`);
-
       persisted = {
         id: newId,
         folder: 'sent',
@@ -255,7 +243,7 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
       deleteDraft(args.draftId);
     }
 
-    const responseObj = persisted ?? data;
+    const responseObj = persisted ?? raw;
     const text = responseObj ? JSON.stringify(responseObj, null, 2) : 'Message sent successfully.';
     return textResponse(rewriteNote ? `${rewriteNote}\n\n${text}` : text);
   });
@@ -312,32 +300,17 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
     };
     if (args.messageId !== undefined) payload.messageId = args.messageId;
 
-    // OFW's POST /pub/v3/messages response for drafts is minimal — typically
-    // just `{entityId: <id>}` — and worse, it returns the same success shape
-    // even when the server silently no-ops on a subsequent update to the
-    // same draft. Don't trust the POST response: extract the id from it,
-    // then GET the detail endpoint to repopulate the cache from
-    // authoritative server state.
-    const data = await client.request<{
-      id?: number; entityId?: number;
-    } & Record<string, unknown>>('POST', '/pub/v3/messages', payload);
-
-    const newId: number | null =
-      typeof data?.id === 'number' ? data.id
-      : typeof data?.entityId === 'number' ? data.entityId
-      : null;
+    const { id: newId, detail, raw } = await postMessageAndRefetch<{
+      id: number; subject?: string; body?: string;
+      date?: { dateTime: string };
+      replyToId?: number | null;
+      recipients?: ApiRecipient[];
+    }>(client, payload);
 
     let persisted: DraftRow | null = null;
     let noOpWarning: string | null = null;
 
     if (newId !== null) {
-      const detail = await client.request<{
-        id: number; subject?: string; body?: string;
-        date?: { dateTime: string };
-        replyToId?: number | null;
-        recipients?: Array<{ user: { id: number; name: string }; viewed?: { dateTime: string } | null }>;
-      }>('GET', `/pub/v3/messages/${newId}`);
-
       persisted = {
         id: newId,
         subject: detail.subject ?? args.subject,
@@ -358,7 +331,7 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
       }
     }
 
-    const responseObj = persisted ?? data;
+    const responseObj = persisted ?? raw;
     const text = responseObj ? JSON.stringify(responseObj, null, 2) : 'Draft saved.';
     const notes = [rewriteNote, noOpWarning].filter((n): n is string => n !== null).join('\n\n');
     return textResponse(notes ? `${notes}\n\n${text}` : text);

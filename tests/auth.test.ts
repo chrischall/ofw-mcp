@@ -156,27 +156,28 @@ describe('resolveAuth', () => {
   });
 
   describe('env-var sanitization', () => {
-    // Matches the readVar() helper hardening that used to live in client.ts:
-    // defenses against MCP hosts that pass through unexpanded `${VAR}` or
-    // serialize undefined/null as a string.
-    it.each(['undefined', 'null', '${OFW_PASSWORD}', '   ', ''])(
-      'treats OFW_PASSWORD=%j as unset and falls through to fetchproxy',
-      async (val) => {
+    // readEnv() in auth.ts treats blanks, the literal strings 'undefined' /
+    // 'null', and unsubstituted `${VAR}` placeholders as unset — defends
+    // against MCP hosts that pass env blocks through without expansion.
+    it('treats each sanitized OFW_PASSWORD value as unset and falls through to fetchproxy', async () => {
+      const sanitized = ['undefined', 'null', '${OFW_PASSWORD}', '   ', ''];
+      for (const val of sanitized) {
         process.env.OFW_USERNAME = 'me@example.com';
         process.env.OFW_PASSWORD = val;
-        bootstrapMock.mockResolvedValue({
+        bootstrapMock.mockReset().mockResolvedValue({
           cookies: {},
           localStorage: { auth: 'tok' },
           sessionStorage: {},
           capturedHeaders: {},
         });
+        loginWithPasswordMock.mockReset();
 
         const result = await resolveAuth();
 
-        expect(loginWithPasswordMock).not.toHaveBeenCalled();
-        expect(result.source).toBe('fetchproxy');
-      },
-    );
+        expect(loginWithPasswordMock, `value ${JSON.stringify(val)}`).not.toHaveBeenCalled();
+        expect(result.source, `value ${JSON.stringify(val)}`).toBe('fetchproxy');
+      }
+    });
   });
 
   describe('error handling', () => {

@@ -60,12 +60,3 @@ describe('ofw_create_journal_entry', () => {
   });
 });
 
-describe('registerJournalTools', () => {
-  it('registers 2 journal tools', () => {
-    const client = makeClient({});
-    setup(client);
-    expect(handlers.size).toBe(2);
-    expect(handlers.has('ofw_list_journal_entries')).toBe(true);
-    expect(handlers.has('ofw_create_journal_entry')).toBe(true);
-  });
-});

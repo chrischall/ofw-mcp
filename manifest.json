@@ -46,14 +46,14 @@
     "ofw_username": {
       "type": "string",
       "title": "OFW Email",
-      "description": "Your OurFamilyWizard login email address",
-      "required": true
+      "description": "Your OurFamilyWizard login email address. Optional — if omitted, the server falls back to the fetchproxy browser extension (requires being signed in to ourfamilywizard.com in your browser).",
+      "required": false
     },
     "ofw_password": {
       "type": "string",
       "title": "OFW Password",
-      "description": "Your OurFamilyWizard password",
-      "required": true,
+      "description": "Your OurFamilyWizard password. Optional — see ofw_username.",
+      "required": false,
       "sensitive": true
     },
     "ofw_inline_attachments": {
