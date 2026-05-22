@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   openCache, closeCache,
-  upsertMessage, getMessage, listMessages, countMessages, type MessageRow,
+  upsertMessage, getMessage, deleteMessage, listMessages, countMessages, type MessageRow,
   upsertDraft, getDraft, listDrafts, deleteDraft, listDraftIds, type DraftRow,
   getSyncState, setSyncState, getMeta, setMeta,
   findLatestReplyTip,
@@ -94,6 +94,17 @@ describe('messages CRUD', () => {
   it('getMessage returns null for unknown id', () => {
     openCache();
     expect(getMessage(999)).toBeNull();
+  });
+
+  it('deleteMessage removes a row and is a no-op for unknown ids', () => {
+    openCache();
+    upsertMessage(sampleRow({ id: 7 }));
+    expect(getMessage(7)).not.toBeNull();
+    deleteMessage(7);
+    expect(getMessage(7)).toBeNull();
+    // Idempotent: deleting again doesn't throw.
+    expect(() => deleteMessage(7)).not.toThrow();
+    expect(() => deleteMessage(99999)).not.toThrow();
   });
 
   it('listMessages filters by folder and sorts by sentAt desc', () => {

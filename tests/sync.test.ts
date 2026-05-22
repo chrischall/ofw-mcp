@@ -449,6 +449,29 @@ describe('syncDrafts', () => {
     const result = await syncDrafts(client, '333');
     expect(result.synced).toBe(0);
   });
+
+  it('evicts a stale messages-table row when a draft with the same id is synced', async () => {
+    // Bug 2 cleanup: an earlier ofw_get_message call may have cached this
+    // draft id as a `folder: 'inbox'` row. Once the drafts table owns the
+    // id (sync wrote it), the messages-table copy is stale and should
+    // be evicted so the drafts-routing path in ofw_get_message wins
+    // unambiguously.
+    upsertMessage({
+      id: 1, folder: 'inbox', subject: 'Stale (cached as message)', fromUser: '',
+      sentAt: '2026-05-01T00:00:00Z', recipients: [], body: 'STALE',
+      fetchedBodyAt: '2026-05-01T00:01:00Z', replyToId: null, chainRootId: null, listData: {},
+    });
+
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce(draftListResponse([{ id: 1, subject: 'Fresh', modifiedAt: '2026-05-04T00:00:00Z' }]))
+      .mockResolvedValueOnce({ body: 'fresh-body', subject: 'Fresh', recipientIds: [] });
+
+    await syncDrafts(client, '333');
+
+    expect(getMessage(1)).toBeNull();        // evicted
+    expect(getDraft(1)?.body).toBe('fresh-body');
+  });
 });
 
 function foldersResponse() {

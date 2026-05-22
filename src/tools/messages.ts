@@ -4,8 +4,9 @@ import type { OFWClient } from '../client.js';
 import { syncAll, fetchAttachmentMeta, fetchAttachmentMetaForMessage } from '../sync.js';
 import {
   listMessages, countMessages, listDrafts, getMessage, upsertMessage,
-  upsertDraft, deleteDraft, findLatestReplyTip,
+  upsertDraft, deleteDraft, deleteMessage, findLatestReplyTip,
   listAttachmentsForMessage, getAttachment, upsertAttachmentForMessage, markAttachmentDownloaded,
+  getDraft,
   type MessageRow, type DraftRow,
 } from '../cache.js';
 import { getAttachmentsDir, getDefaultInlineAttachments } from '../config.js';
@@ -104,13 +105,41 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
   });
 
   server.registerTool('ofw_get_message', {
-    description: 'Get a single OurFamilyWizard message by ID. Reads from local cache when available; otherwise fetches from OFW (which will mark unread inbox messages as read on OFW).',
+    description: 'Get a single OurFamilyWizard message OR draft by ID. Reads from local cache when available; otherwise fetches from OFW (which will mark unread inbox messages as read on OFW). For ids that match a draft (in the drafts cache), the response carries folder="drafts" and the body/subject/recipients reflect the drafts cache (which ofw_sync_messages keeps fresh) — drafts have no `fromUser`, and `sentAt`/`fetchedBodyAt` mirror the draft\'s `modifiedAt`. For inbox/sent messages, folder is "inbox" or "sent" as before.',
     annotations: { readOnlyHint: false },
     inputSchema: {
-      messageId: z.string().describe('Message ID'),
+      messageId: z.string().describe('Message ID (also accepts draft IDs — drafts are routed via the drafts cache)'),
     },
   }, async (args) => {
     const id = Number(args.messageId);
+
+    // Draft routing: if this id is in the drafts cache, return a
+    // MessageRow-shaped synthesis built from the draft. The drafts table
+    // is the source of truth for draft bodies (sync keeps it fresh);
+    // the messages-table cache for the same id is stale by construction
+    // when ofw_get_message was called on a draft id before sync caught
+    // up — see syncDrafts, which also evicts these stale rows.
+    const draftRow = getDraft(id);
+    if (draftRow !== null) {
+      return jsonResponse({
+        id: draftRow.id,
+        folder: 'drafts',
+        subject: draftRow.subject,
+        fromUser: '',
+        sentAt: draftRow.modifiedAt,
+        recipients: draftRow.recipients,
+        body: draftRow.body,
+        // Best approximation: drafts don't separately track when the body
+        // was last *fetched* — we last wrote it on the last sync, which
+        // also updates modifiedAt.
+        fetchedBodyAt: draftRow.modifiedAt,
+        replyToId: draftRow.replyToId,
+        chainRootId: null,
+        listData: draftRow.listData,
+        attachments: [],
+      });
+    }
+
     const cached = getMessage(id);
     if (cached && cached.body !== null) {
       let attachments = listAttachmentsForMessage(id);
@@ -266,13 +295,13 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
   });
 
   server.registerTool('ofw_save_draft', {
-    description: 'Save a message as a draft in OurFamilyWizard. Recipients are optional. To update an existing draft, provide its messageId. If replyToId is provided, the cache may rewrite it to the latest reply in the thread (note included in response). Attach files by passing their fileIds (from ofw_upload_attachment) in myFileIDs. After saving, the tool re-fetches the draft from OFW to populate the local cache and verify what was actually persisted; if OFW silently no-ops an update (a known issue with repeated updates to the same draft), the response includes a WARNING note with a workaround.',
+    description: 'Save a message as a draft in OurFamilyWizard. Recipients are optional. Pass messageId to replace an existing draft — note that under the hood this creates a NEW draft and deletes the old one (OFW\'s update-in-place endpoint silently no-ops while echoing the posted body, so we don\'t use it); the response.id will be the NEW id, not the messageId you passed, and the change is documented in a transparency NOTE in the response. If replyToId is provided, the cache may rewrite it to the latest reply in the thread (note included in response). Attach files by passing their fileIds (from ofw_upload_attachment) in myFileIDs. After saving, the tool re-fetches the draft from OFW to populate the local cache from authoritative server state.',
     annotations: { readOnlyHint: false },
     inputSchema: {
       subject: z.string().describe('Message subject'),
       body: z.string().describe('Message body text'),
       recipientIds: z.array(z.number()).describe('Array of recipient user IDs (optional for drafts)').optional(),
-      messageId: z.number().describe('ID of an existing draft to update (omit to create a new draft)').optional(),
+      messageId: z.number().describe('ID of an existing draft to replace (the new draft will have a new id; the old is deleted)').optional(),
       replyToId: z.number().describe('ID of the message this draft replies to').optional(),
       myFileIDs: z.array(z.number()).describe('Attachment file ids (from ofw_upload_attachment)').optional(),
     },
@@ -289,6 +318,12 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
     }
 
     const myFileIDs = args.myFileIDs ?? [];
+    // Deliberately do NOT pass `args.messageId` to OFW's POST payload.
+    // OFW's update-by-messageId path silently no-ops on subsequent
+    // updates while echoing the posted body in the immediate GET — so
+    // there is no honest way to detect a failure from the response.
+    // We always create a fresh draft; if the caller provided a
+    // messageId, we delete the old draft afterward (the "replace" path).
     const payload: Record<string, unknown> = {
       subject: args.subject,
       body: args.body,
@@ -298,7 +333,6 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
       includeOriginal: resolvedReplyTo !== null,
       replyToId: resolvedReplyTo,
     };
-    if (args.messageId !== undefined) payload.messageId = args.messageId;
 
     const { id: newId, detail, raw } = await postMessageAndRefetch<{
       id: number; subject?: string; body?: string;
@@ -308,7 +342,7 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
     }>(client, payload);
 
     let persisted: DraftRow | null = null;
-    let noOpWarning: string | null = null;
+    let replaceNote: string | null = null;
 
     if (newId !== null) {
       persisted = {
@@ -322,18 +356,22 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
       };
       upsertDraft(persisted);
 
-      // If this was an update (messageId provided) and OFW's reported body
-      // doesn't match what we asked it to save, the server silently
-      // dropped the change. Warn the caller so the model can take the
-      // create-then-delete fallback.
-      if (args.messageId !== undefined && persisted.body !== args.body) {
-        noOpWarning = 'WARNING: OFW reported success but the draft body it returned does not match the requested update. The OFW POST /pub/v3/messages endpoint can silently no-op on subsequent updates to the same draft. Workaround: delete this draft (ofw_delete_draft) and create a new one (ofw_save_draft without messageId).';
+      // Replace-path: caller passed messageId, so they want the old draft
+      // gone. Delete it after the new one is safely created+cached.
+      if (args.messageId !== undefined && args.messageId !== newId) {
+        try {
+          await deleteOFWMessages(client, [args.messageId]);
+          deleteDraft(args.messageId);
+          replaceNote = `NOTE: ofw_save_draft replaced draft ${args.messageId} via create-then-delete. The new draft id is ${newId}; the old draft has been deleted. (OFW's update-in-place endpoint silently no-ops on subsequent updates, so we never use it. If you cached the old id anywhere, replace it with the new one.)`;
+        } catch (e) {
+          replaceNote = `WARNING: New draft ${newId} created successfully, but failed to delete the old draft (${args.messageId}): ${(e as Error).message}. You may want to clean it up manually with ofw_delete_draft.`;
+        }
       }
     }
 
     const responseObj = persisted ?? raw;
     const text = responseObj ? JSON.stringify(responseObj, null, 2) : 'Draft saved.';
-    const notes = [rewriteNote, noOpWarning].filter((n): n is string => n !== null).join('\n\n');
+    const notes = [rewriteNote, replaceNote].filter((n): n is string => n !== null).join('\n\n');
     return textResponse(notes ? `${notes}\n\n${text}` : text);
   });
 
