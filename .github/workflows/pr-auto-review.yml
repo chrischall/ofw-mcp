@@ -97,6 +97,12 @@ jobs:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           # No `github_token:` — let the action use the installed Claude
           # App via OIDC so comments are authored by `claude[bot]`.
+          # `track_progress: true` posts a live progress comment as Claude
+          # works (recommended by the action's pr-review-comprehensive.yml
+          # example). In automation mode this is off by default; we enable
+          # it so reviews are visibly "in flight" rather than appearing all
+          # at once at the end.
+          track_progress: true
           claude_args: |
             --json-schema '{"type":"object","required":["verdict","summary","important_findings"],"properties":{"verdict":{"enum":["pass","warn","fail"]},"summary":{"type":"string"},"important_findings":{"type":"array","items":{"type":"string"}}}}'
             --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(cat:*),Bash(rg:*),Bash(jq:*),Bash(ls:*),Bash(find:*)"
