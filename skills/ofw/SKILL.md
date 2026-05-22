@@ -92,11 +92,11 @@ Always pass `--config ~/.mcporter/mcporter.json` unless a local `config/mcporter
 | `ofw_sync_messages(folders?, deep?, fetchUnreadBodies?)` | Sync OFW → local cache. **Call first if the cache might be stale.** Returns unread inbox hints (bodies not fetched, to avoid mark-as-read). |
 | `ofw_list_message_folders` | List OFW folders with unread counts. Most reads use the cache; this is mainly for folder IDs and live unread counts. |
 | `ofw_list_messages(folderId?, since?, until?, q?, page?, size?)` | Cache-backed list. Supports folder ("inbox"/"sent"/"both"), date range, and substring search. |
-| `ofw_get_message(messageId)` | Read a message body. Cache-first. ⚠️ Falls through to OFW for unread inbox messages, which marks them as read. |
+| `ofw_get_message(messageId)` | Read a message OR draft body. Cache-first. Ids in the drafts cache return `folder: "drafts"`. ⚠️ Falls through to OFW for unread inbox messages, which marks them as read. |
 | `ofw_send_message(subject, body, recipientIds[], replyToId?, draftId?, myFileIDs?)` | Send a message. Pass `replyToId` to thread original history. Pass `draftId` to auto-delete the draft after sending. Pass `myFileIDs` (from `ofw_upload_attachment`) to attach files. |
 | `ofw_get_unread_sent` | Sent messages your co-parent hasn't read yet (from cache). |
 | `ofw_list_drafts` | List saved drafts (cache-backed). |
-| `ofw_save_draft(subject, body, recipientIds?, messageId?, replyToId?, myFileIDs?)` | Create or update a draft. Re-fetches from OFW after save to verify; emits a `WARNING` if an update was silently no-op'd. |
+| `ofw_save_draft(subject, body, recipientIds?, messageId?, replyToId?, myFileIDs?)` | Create a new draft. Pass `messageId` to **replace** an existing draft: the tool creates a fresh draft and deletes the old one (OFW's update-in-place endpoint silently no-ops). The returned `id` is the NEW id; the response includes a `NOTE` documenting the swap. |
 | `ofw_delete_draft(messageId)` | Delete a draft. |
 | `ofw_upload_attachment(path, shareClass?, label?, description?)` | Upload a local file to My Files; returns a fileId to pass into `myFileIDs`. |
 | `ofw_download_attachment(fileId, inline?, saveTo?, force?)` | Download an attachment. `inline:true` returns bytes as MCP content; default writes to `~/Downloads/ofw-mcp/`. |
