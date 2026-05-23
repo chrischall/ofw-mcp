@@ -1,5 +1,14 @@
 # Changelog
 
+## [2.0.18](https://github.com/chrischall/ofw-mcp/compare/v2.0.17...v2.0.18) (2026-05-23)
+
+
+### Documentation
+
+* add Acknowledgement of Terms section to README ([#43](https://github.com/chrischall/ofw-mcp/issues/43)) ([7163909](https://github.com/chrischall/ofw-mcp/commit/71639092d6b313d07407e072ad2ff1c9c3298ddf))
+* **claude-md:** call out 100-char limit on server.json description ([a3a02e7](https://github.com/chrischall/ofw-mcp/commit/a3a02e773991e8112b7b68f2f531de46b5d5a72a))
+* **claude-md:** call out 100-char limit on server.json description ([02c10a6](https://github.com/chrischall/ofw-mcp/commit/02c10a6e9c3740d5320748e77fce227f371e185a))
+
 ## [2.0.17](https://github.com/chrischall/ofw-mcp/compare/v2.0.16...v2.0.17) (2026-05-22)
 
 
