@@ -11,7 +11,6 @@
 * **pr-auto-review:** drop id-token:write to avoid OIDC token exchange failure ([1e10203](https://github.com/chrischall/ofw-mcp/commit/1e10203109d5399dccf22ee54ee56c2b2487e351))
 * **pr-auto-review:** drop id-token:write to fix OIDC 401 ([b2f340c](https://github.com/chrischall/ofw-mcp/commit/b2f340ca37398bee5341bd1e917a4442613bbb69))
 * **pr-auto-review:** pass github_token to skip OIDC App exchange ([f046f68](https://github.com/chrischall/ofw-mcp/commit/f046f6846ef17ed1364640cffebf005584cd6664))
-* **pr-auto-review:** pass github_token to skip OIDC App exchange ([e5405a1](https://github.com/chrischall/ofw-mcp/commit/e5405a1fc6e04fcad2612d1acb06b7b663720e60))
 
 
 ### Performance

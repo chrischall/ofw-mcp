@@ -2,10 +2,10 @@ name: Auto-merge PRs
 
 # Source-aware auto-merge:
 #
-#  - dependabot[bot] PRs: arm `--auto --merge` as soon as the PR is non-
+#  - dependabot[bot] PRs: arm `--auto --squash` as soon as the PR is non-
 #    draft. Merges when CI is green; no review gating.
 #  - Same-repo (non-fork) PRs with the `ready-to-merge` label: arm
-#    `--auto --merge`. That label is added either:
+#    `--auto --squash`. That label is added either:
 #      * by the owner manually (to override Claude's warn/fail), OR
 #      * automatically by pr-auto-review.yml when Claude's verdict =
 #        `pass` on a same-repo PR, OR
@@ -56,7 +56,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.RELEASE_PAT }}
           PR_URL: ${{ github.event.pull_request.html_url }}
-        run: gh pr merge --auto --merge "$PR_URL"
+        run: gh pr merge --auto --squash "$PR_URL"
 
   arm-on-ready-label:
     runs-on: ubuntu-latest
@@ -72,4 +72,4 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.RELEASE_PAT }}
           PR_URL: ${{ github.event.pull_request.html_url }}
-        run: gh pr merge --auto --merge "$PR_URL"
+        run: gh pr merge --auto --squash "$PR_URL"
