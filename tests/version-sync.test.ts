@@ -42,7 +42,11 @@ describe('version sync', () => {
         const match = line.match(
           /['"]([0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9.]+)?)['"]/
         );
-        const ver = match?.[1] ?? '<no version literal found>';
+        // Lines that mention the marker but carry no version literal
+        // (e.g. a docstring explaining the convention) are not real
+        // declarations — skip them.
+        if (!match) return;
+        const ver = match[1];
         if (ver !== pkg.version) {
           mismatches.push(
             `${relative(ROOT, f)}:${i + 1} → ${ver} (expected ${pkg.version})`
