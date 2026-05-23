@@ -21,6 +21,28 @@ Ask Claude things like:
 - [Node.js](https://nodejs.org) 22.5 or later (`node:sqlite` is the cache backend)
 - An active OurFamilyWizard account
 
+## Acknowledgement of Terms
+
+By using this MCP server, you acknowledge and agree to the following:
+
+**1. This server accesses your own OurFamilyWizard account.** Auth happens via your own credentials. It does not — and cannot — access your co-parent's account, your children's accounts, or anyone else's.
+
+**2. [OurFamilyWizard's Terms](https://www.ourfamilywizard.com/legal/terms) govern your use of this server**, just as they govern your direct use of OFW. There is no explicit anti-scraping clause; the governing language is broader:
+
+> Users may not obtain or attempt to obtain any materials or information through any means not intentionally made available.
+
+And on credentials: *"You are solely responsible for (1) maintaining the strict confidentiality of assigned Authentication Methods, (2) instructing any individual to whom the assigned Authentication Method is shared ('Authorized User') to not allow another person to use the Authentication Method."* OFW does contemplate "Authorized Users" and third-party-enabled integrations — but the account holder remains responsible.
+
+You are agreeing to those terms — read by the maintainer 2026-05-23 — every time you invoke a tool in this server.
+
+**3. Personal, family use only.** This project is not affiliated with, endorsed by, sponsored by, or in partnership with OurFamilyWizard, LLC or its parent. It is a personal automation tool for the named account holder. Do not use it on behalf of a co-parent without their consent, do not share credentials with anyone, and do not use it to bulk-extract another family's data.
+
+**4. OFW is a court-of-record platform.** Messages, expenses, calendar entries, and journal entries on OFW may be entered into legal proceedings — including custody, divorce, and parenting-plan-modification cases. Anything this server writes to OFW (drafts you save, events you create, expenses you log) will appear with the same legal weight as if you had typed it yourself. **Do not let this MCP send a message, create an event, or log an expense that you have not read and approved.** Review every write operation before confirming.
+
+**5. You accept full responsibility** for any consequences — both technical (account warnings, suspension) and legal (anything OFW records about your account activity). The MCP author is not your attorney; if you're using OFW in connection with an active legal matter, talk to your actual attorney before automating anything.
+
+This section is the maintainer's good-faith summary of the terms — it is not legal advice and does not modify or supersede OurFamilyWizard's actual ToS.
+
 ## Installation
 
 ### 1. Clone and build
