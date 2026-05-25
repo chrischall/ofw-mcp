@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.0.19](https://github.com/chrischall/ofw-mcp/compare/v2.0.18...v2.0.19) (2026-05-25)
+
+
+### Bug Fixes
+
+* **ci:** prevent labeled event from cancelling auto-review ([#48](https://github.com/chrischall/ofw-mcp/issues/48)) ([025c3d1](https://github.com/chrischall/ofw-mcp/commit/025c3d1e5a8f8517f270bbf4f717be70ba6309f9))
+
 ## [2.0.18](https://github.com/chrischall/ofw-mcp/compare/v2.0.17...v2.0.18) (2026-05-23)
 
 
