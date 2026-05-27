@@ -135,14 +135,7 @@ export async function resolveAuth(): Promise<ResolvedAuth> {
         source: 'fetchproxy',
       };
     } catch (e) {
-      // 0.8.0+ typed-error discrimination. The fetchproxy server already
-      // retries once on SW eviction (bridgeReviveDelayMs=2000 default), so
-      // a thrown FetchproxyBridgeDownError means the retry also failed —
-      // the extension's service worker is genuinely down and the user
-      // needs to wake it. The `.hint` is the actionable copy
-      // ("click the extension toolbar icon...") that we'd otherwise have
-      // to hand-write here. Surface it verbatim so users in path 2 get
-      // the same self-service guidance as path 3.
+      // FetchproxyBridgeDownError only escapes bootstrap() after the lazy-revive retry fails — surface .hint verbatim (actionable "click toolbar icon" copy).
       if (classifyBridgeError(e) === 'bridge_down') {
         const downErr = e as FetchproxyBridgeDownError;
         throw new Error(
