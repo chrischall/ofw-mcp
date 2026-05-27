@@ -47,6 +47,7 @@
 //     selection logic independent of either implementation.
 
 import { bootstrap } from '@fetchproxy/bootstrap';
+import { classifyBridgeError, FetchproxyBridgeDownError } from '@fetchproxy/server';
 import { loginWithPassword } from './auth-password.js';
 import { parseBoolEnv } from './config.js';
 import pkg from '../package.json' with { type: 'json' };
@@ -134,6 +135,20 @@ export async function resolveAuth(): Promise<ResolvedAuth> {
         source: 'fetchproxy',
       };
     } catch (e) {
+      // 0.8.0+ typed-error discrimination. The fetchproxy server already
+      // retries once on SW eviction (bridgeReviveDelayMs=2000 default), so
+      // a thrown FetchproxyBridgeDownError means the retry also failed —
+      // the extension's service worker is genuinely down and the user
+      // needs to wake it. The `.hint` is the actionable copy
+      // ("click the extension toolbar icon...") that we'd otherwise have
+      // to hand-write here. Surface it verbatim so users in path 2 get
+      // the same self-service guidance as path 3.
+      if (classifyBridgeError(e) === 'bridge_down') {
+        const downErr = e as FetchproxyBridgeDownError;
+        throw new Error(
+          `OFW auth: fetchproxy bridge is down (extension service worker unreachable after retry). ${downErr.hint}`,
+        );
+      }
       const msg = e instanceof Error ? e.message : String(e);
       throw new Error(
         `OFW auth: no OFW_USERNAME/OFW_PASSWORD set, and fetchproxy fallback failed: ${msg}`,
