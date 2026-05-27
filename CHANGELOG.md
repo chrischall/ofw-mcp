@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.1.0](https://github.com/chrischall/ofw-mcp/compare/v2.0.19...v2.1.0) (2026-05-27)
+
+
+### Features
+
+* **deps:** adopt @fetchproxy/bootstrap 0.8.0 for SW-eviction-resilient startup capture ([#52](https://github.com/chrischall/ofw-mcp/issues/52)) ([9f01ebf](https://github.com/chrischall/ofw-mcp/commit/9f01ebf9a47cdd07109c023aa81e65dc53856b67))
+
 ## [2.0.19](https://github.com/chrischall/ofw-mcp/compare/v2.0.18...v2.0.19) (2026-05-25)
 
 
