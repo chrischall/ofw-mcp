@@ -409,6 +409,89 @@ describe('OFWClient', () => {
         vi.useRealTimers();
       }
     });
+
+    it('propagates non-abort fetch errors (e.g. ECONNREFUSED) unchanged', async () => {
+      let call = 0;
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+        call++;
+        if (call === 1) {
+          return {
+            ok: false, status: 303, statusText: '303',
+            headers: { get: (k: string) => k.toLowerCase() === 'set-cookie' ? 'SESSION=x' : null },
+            text: async () => '', json: async () => null,
+          } as unknown as Response;
+        }
+        if (call === 2) {
+          return {
+            ok: true, status: 200, statusText: '200',
+            headers: { get: (k: string) => k.toLowerCase() === 'content-type' ? 'application/json' : null },
+            text: async () => JSON.stringify({ auth: MOCK_TOKEN }),
+            json: async () => ({ auth: MOCK_TOKEN }),
+          } as unknown as Response;
+        }
+        throw new Error('connect ECONNREFUSED');
+      });
+      const client = new OFWClient();
+      await expect(client.request('GET', '/pub/v1/test')).rejects.toThrow('connect ECONNREFUSED');
+    });
+
+    it('logs the timeout and error paths via OFW_DEBUG_LOG when enabled', async () => {
+      const originalDebug = process.env.OFW_DEBUG_LOG;
+      process.env.OFW_DEBUG_LOG = '1';
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      vi.useFakeTimers();
+      try {
+        mockLoginThenHang();
+        const client = new OFWClient();
+        const promise = client.request('GET', '/pub/v1/timeout-check');
+        promise.catch(() => undefined);
+        await vi.advanceTimersByTimeAsync(30_000);
+        await expect(promise).rejects.toThrow(/timed out after 30000ms/);
+
+        const lines = errSpy.mock.calls.map((c) => String(c[0]));
+        expect(lines.some((l) => l.includes('⏱ TIMEOUT after') && l.includes('/pub/v1/timeout-check'))).toBe(true);
+      } finally {
+        vi.useRealTimers();
+        if (originalDebug === undefined) delete process.env.OFW_DEBUG_LOG;
+        else process.env.OFW_DEBUG_LOG = originalDebug;
+      }
+    });
+
+    it('logs non-abort fetch errors via OFW_DEBUG_LOG when enabled', async () => {
+      const originalDebug = process.env.OFW_DEBUG_LOG;
+      process.env.OFW_DEBUG_LOG = '1';
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      try {
+        let call = 0;
+        vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+          call++;
+          if (call === 1) {
+            return {
+              ok: false, status: 303, statusText: '303',
+              headers: { get: (k: string) => k.toLowerCase() === 'set-cookie' ? 'SESSION=x' : null },
+              text: async () => '', json: async () => null,
+            } as unknown as Response;
+          }
+          if (call === 2) {
+            return {
+              ok: true, status: 200, statusText: '200',
+              headers: { get: (k: string) => k.toLowerCase() === 'content-type' ? 'application/json' : null },
+              text: async () => JSON.stringify({ auth: MOCK_TOKEN }),
+              json: async () => ({ auth: MOCK_TOKEN }),
+            } as unknown as Response;
+          }
+          throw new Error('socket hang up');
+        });
+        const client = new OFWClient();
+        await expect(client.request('GET', '/pub/v1/err-check')).rejects.toThrow('socket hang up');
+
+        const lines = errSpy.mock.calls.map((c) => String(c[0]));
+        expect(lines.some((l) => l.includes('✗ socket hang up') && l.includes('/pub/v1/err-check'))).toBe(true);
+      } finally {
+        if (originalDebug === undefined) delete process.env.OFW_DEBUG_LOG;
+        else process.env.OFW_DEBUG_LOG = originalDebug;
+      }
+    });
   });
 
   describe('OFW_DEBUG_LOG', () => {
