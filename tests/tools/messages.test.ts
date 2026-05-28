@@ -584,6 +584,130 @@ describe('ofw_send_message (thread-tip + cache write)', () => {
   });
 });
 
+describe('ofw_send_message with messageId (send-existing-draft)', () => {
+  it('sends an existing draft by messageId alone, defaulting subject/body/recipientIds from the cached draft and deleting the draft after send', async () => {
+    upsertDraft({
+      id: 519117394,
+      subject: 'Re: Weekly of 5/15 - 5/22',
+      body: 'Hi Alison,\n\nI adjusted some account settings on my end.',
+      recipients: [{ userId: 3039202, name: 'Alison', viewedAt: null }],
+      replyToId: null,
+      modifiedAt: '2026-05-27T12:00:00Z',
+      listData: {},
+    });
+
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request')
+      .mockResolvedValueOnce({ entityId: 519117514 })
+      .mockResolvedValueOnce({
+        id: 519117514,
+        subject: 'Re: Weekly of 5/15 - 5/22',
+        body: 'Hi Alison,\n\nI adjusted some account settings on my end.',
+        date: { dateTime: '2026-05-28T09:03:28Z' },
+        from: { name: 'Me' },
+        recipients: [{ user: { id: 3039202, name: 'Alison' }, viewed: null }],
+      })
+      .mockResolvedValueOnce({});
+    setup(client);
+
+    const result = await handlers.get('ofw_send_message')!({ messageId: 519117394 });
+
+    const postCall = spy.mock.calls.find((c) => c[0] === 'POST');
+    expect(postCall![2]).toEqual({
+      subject: 'Re: Weekly of 5/15 - 5/22',
+      body: 'Hi Alison,\n\nI adjusted some account settings on my end.',
+      recipientIds: [3039202],
+      attachments: { myFileIDs: [] },
+      draft: false,
+      includeOriginal: false,
+      replyToId: null,
+    });
+
+    const deleteCall = spy.mock.calls.find((c) => c[0] === 'DELETE');
+    expect(deleteCall).toBeDefined();
+    const form = deleteCall![2] as FormData;
+    expect(form.get('messageIds')).toBe('519117394');
+
+    expect(getDraft(519117394)).toBeNull();
+    expect(getMessage(519117514)?.folder).toBe('sent');
+    expect(result.content[0].text).toContain('"id": 519117514');
+  });
+
+  it('uses provided fields as overrides on top of the cached draft', async () => {
+    upsertDraft({
+      id: 50,
+      subject: 'Cached subject',
+      body: 'Cached body',
+      recipients: [{ userId: 1, name: 'A', viewedAt: null }],
+      replyToId: null,
+      modifiedAt: '2026-05-01T00:00:00Z',
+      listData: {},
+    });
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request')
+      .mockResolvedValueOnce({ entityId: 99 })
+      .mockResolvedValueOnce({
+        id: 99, subject: 'Overridden subject', body: 'Cached body',
+        date: { dateTime: '2026-05-02T00:00:00Z' }, from: { name: 'Me' }, recipients: [],
+      })
+      .mockResolvedValueOnce({});
+    setup(client);
+
+    await handlers.get('ofw_send_message')!({ messageId: 50, subject: 'Overridden subject' });
+
+    const postCall = spy.mock.calls.find((c) => c[0] === 'POST');
+    const sent = postCall![2] as { subject: string; body: string; recipientIds: number[] };
+    expect(sent.subject).toBe('Overridden subject');
+    expect(sent.body).toBe('Cached body');
+    expect(sent.recipientIds).toEqual([1]);
+  });
+
+  it('errors clearly when messageId references a draft not in the cache and the missing fields are not supplied', async () => {
+    const client = new OFWClient();
+    // mockResolvedValue so a stray call (which the test asserts does not
+    // happen) won't trigger real-network auth and confuse the failure.
+    const spy = vi.spyOn(client, 'request').mockResolvedValue({});
+    setup(client);
+
+    await expect(handlers.get('ofw_send_message')!({ messageId: 99999 }))
+      .rejects.toThrow(/draft 99999 not found/i);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('errors when neither messageId nor the required fields are provided', async () => {
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request').mockResolvedValue({});
+    setup(client);
+
+    await expect(handlers.get('ofw_send_message')!({}))
+      .rejects.toThrow(/subject|body|recipient/i);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('still accepts the legacy call shape (all three fields, no messageId)', async () => {
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request')
+      .mockResolvedValueOnce({ entityId: 700 })
+      .mockResolvedValueOnce({
+        id: 700, subject: 's', body: 'b',
+        date: { dateTime: '2026-05-04T00:00:00Z' }, from: { name: 'Me' }, recipients: [],
+      });
+    setup(client);
+
+    await handlers.get('ofw_send_message')!({ subject: 's', body: 'b', recipientIds: [1] });
+    expect(spy).toHaveBeenCalledTimes(2); // POST + GET, no DELETE
+  });
+
+  it('errors when messageId and draftId are both set to different ids', async () => {
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request').mockResolvedValue({});
+    setup(client);
+    await expect(handlers.get('ofw_send_message')!({ messageId: 1, draftId: 2 }))
+      .rejects.toThrow(/refer to different drafts/);
+    expect(spy).not.toHaveBeenCalled();
+  });
+});
+
 describe('ofw_save_draft', () => {
   it('creates a new draft without messageId', async () => {
     const client = makeClient({ entityId: 42 });

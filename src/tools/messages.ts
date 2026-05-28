@@ -194,17 +194,54 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
   });
 
   server.registerTool('ofw_send_message', {
-    description: 'Send a message via OurFamilyWizard. If sending from a draft, pass draftId to delete the draft after sending. If replyToId is provided, the cache may rewrite it to the latest reply in the same thread (a note is included in the response when this happens). Attach files by passing their fileIds (from ofw_upload_attachment) in myFileIDs. After sending, the tool re-fetches the message from OFW to populate the local cache and link attachments to the new message id.',
+    description: 'Send a message via OurFamilyWizard. To send an existing draft, pass messageId — subject/body/recipientIds become optional overrides (missing fields default to the draft\'s cached values) and the draft is deleted after sending. To send a fresh message, supply subject/body/recipientIds directly. draftId is the legacy spelling of messageId and works the same way. If replyToId is provided, the cache may rewrite it to the latest reply in the same thread (a note is included in the response when this happens). Attach files by passing their fileIds (from ofw_upload_attachment) in myFileIDs. After sending, the tool re-fetches the message from OFW to populate the local cache and link attachments to the new message id.',
     annotations: { destructiveHint: true },
     inputSchema: {
-      subject: z.string().describe('Message subject'),
-      body: z.string().describe('Message body text'),
-      recipientIds: z.array(z.number()).describe('Array of recipient user IDs (get from ofw_get_profile)'),
+      subject: z.string().describe('Message subject. Required unless messageId/draftId references a cached draft.').optional(),
+      body: z.string().describe('Message body text. Required unless messageId/draftId references a cached draft.').optional(),
+      recipientIds: z.array(z.number()).describe('Array of recipient user IDs (get from ofw_get_profile). Required unless messageId/draftId references a cached draft.').optional(),
       replyToId: z.number().describe('ID of the message being replied to').optional(),
-      draftId: z.number().describe('ID of the draft to delete after sending (omit if not sending from a draft)').optional(),
+      messageId: z.number().describe('ID of an existing draft to send. When set, missing subject/body/recipientIds default to the draft\'s cached values, and the draft is deleted after sending.').optional(),
+      draftId: z.number().describe('Legacy synonym for messageId. If both are passed they must be equal.').optional(),
       myFileIDs: z.array(z.number()).describe('Attachment file ids (from ofw_upload_attachment) to attach to the message').optional(),
     },
   }, async (args) => {
+    if (args.messageId !== undefined && args.draftId !== undefined && args.messageId !== args.draftId) {
+      throw new Error(`messageId (${args.messageId}) and draftId (${args.draftId}) refer to different drafts; pass only one.`);
+    }
+    const draftRef = args.messageId ?? args.draftId;
+
+    // Only consult the drafts cache if the caller didn't fully specify the
+    // outgoing payload. This keeps the legacy draftId-as-delete-target path
+    // working when the cache happens to be empty: a caller supplying all
+    // three fields just wants the draft cleaned up post-send.
+    const needsDefaults =
+      args.subject === undefined || args.body === undefined || args.recipientIds === undefined;
+    let subject = args.subject;
+    let body = args.body;
+    let recipientIds = args.recipientIds;
+    if (needsDefaults && draftRef !== undefined) {
+      const draft = getDraft(draftRef);
+      if (draft === null) {
+        throw new Error(
+          `draft ${draftRef} not found in local cache. Call ofw_sync_messages first, or supply subject/body/recipientIds explicitly.`,
+        );
+      }
+      subject = subject ?? draft.subject;
+      body = body ?? draft.body;
+      recipientIds = recipientIds ?? draft.recipients.map((r) => r.userId);
+    }
+    if (subject === undefined || body === undefined || recipientIds === undefined) {
+      const missing = [
+        subject === undefined ? 'subject' : null,
+        body === undefined ? 'body' : null,
+        recipientIds === undefined ? 'recipientIds' : null,
+      ].filter((n): n is string => n !== null).join(', ');
+      throw new Error(
+        `ofw_send_message requires ${missing}. Pass it directly, or pass messageId to default missing fields from a cached draft.`,
+      );
+    }
+
     const requestedReplyTo = args.replyToId ?? null;
     let resolvedReplyTo = requestedReplyTo;
     let chainRootId: number | null = null;
@@ -225,9 +262,9 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
       date?: { dateTime: string }; from?: { name?: string };
       recipients?: ApiRecipient[];
     }>(client, {
-      subject: args.subject,
-      body: args.body,
-      recipientIds: args.recipientIds,
+      subject,
+      body,
+      recipientIds,
       attachments: { myFileIDs },
       draft: false,
       includeOriginal: resolvedReplyTo !== null,
@@ -239,11 +276,11 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
       persisted = {
         id: newId,
         folder: 'sent',
-        subject: detail.subject ?? args.subject,
+        subject: detail.subject ?? subject,
         fromUser: detail.from?.name ?? '',
         sentAt: detail.date?.dateTime ?? new Date().toISOString(),
         recipients: mapRecipients(detail.recipients),
-        body: detail.body ?? args.body,
+        body: detail.body ?? body,
         fetchedBodyAt: new Date().toISOString(),
         replyToId: resolvedReplyTo,
         chainRootId,
@@ -267,9 +304,9 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
       }
     }
 
-    if (args.draftId !== undefined) {
-      await deleteOFWMessages(client, [args.draftId]);
-      deleteDraft(args.draftId);
+    if (draftRef !== undefined) {
+      await deleteOFWMessages(client, [draftRef]);
+      deleteDraft(draftRef);
     }
 
     const responseObj = persisted ?? raw;
