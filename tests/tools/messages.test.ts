@@ -706,6 +706,68 @@ describe('ofw_send_message with messageId (send-existing-draft)', () => {
       .rejects.toThrow(/refer to different drafts/);
     expect(spy).not.toHaveBeenCalled();
   });
+
+  it('propagates the draft\'s replyToId so a reply-draft sent via messageId still threads', async () => {
+    // The parent inbox message anchors the thread; the draft was saved as
+    // a reply to it. Without propagation the sent message becomes a new
+    // top-level conversation in OFW.
+    upsertMessage({
+      id: 100, folder: 'inbox', subject: 'Original', fromUser: 'Alice',
+      sentAt: '2026-05-01T00:00:00Z', recipients: [], body: 'orig',
+      fetchedBodyAt: '2026-05-01T00:01:00Z', replyToId: null, chainRootId: null, listData: {},
+    });
+    upsertDraft({
+      id: 42,
+      subject: 'Re: Original',
+      body: 'reply body',
+      recipients: [{ userId: 1, name: 'Alice', viewedAt: null }],
+      replyToId: 100,
+      modifiedAt: '2026-05-02T00:00:00Z',
+      listData: {},
+    });
+
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request')
+      .mockResolvedValueOnce({ entityId: 200 })
+      .mockResolvedValueOnce({
+        id: 200, subject: 'Re: Original', body: 'reply body',
+        date: { dateTime: '2026-05-03T00:00:00Z' }, from: { name: 'Me' }, recipients: [],
+      })
+      .mockResolvedValueOnce({});
+    setup(client);
+
+    await handlers.get('ofw_send_message')!({ messageId: 42 });
+
+    const postCall = spy.mock.calls.find((c) => c[0] === 'POST');
+    const payload = postCall![2] as { replyToId: number | null; includeOriginal: boolean };
+    expect(payload.replyToId).toBe(100);
+    expect(payload.includeOriginal).toBe(true);
+    expect(getMessage(200)?.replyToId).toBe(100);
+    expect(getMessage(200)?.chainRootId).toBe(100);
+  });
+
+  it('caller-supplied replyToId still overrides the draft\'s replyToId', async () => {
+    upsertDraft({
+      id: 42, subject: 's', body: 'b',
+      recipients: [{ userId: 1, name: 'A', viewedAt: null }],
+      replyToId: 100,
+      modifiedAt: '2026-05-02T00:00:00Z', listData: {},
+    });
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request')
+      .mockResolvedValueOnce({ entityId: 200 })
+      .mockResolvedValueOnce({
+        id: 200, subject: 's', body: 'b',
+        date: { dateTime: '2026-05-03T00:00:00Z' }, from: { name: 'Me' }, recipients: [],
+      })
+      .mockResolvedValueOnce({});
+    setup(client);
+
+    await handlers.get('ofw_send_message')!({ messageId: 42, replyToId: 999 });
+
+    const postCall = spy.mock.calls.find((c) => c[0] === 'POST');
+    expect((postCall![2] as { replyToId: number | null }).replyToId).toBe(999);
+  });
 });
 
 describe('ofw_save_draft', () => {

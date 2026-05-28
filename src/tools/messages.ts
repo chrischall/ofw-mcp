@@ -211,27 +211,34 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
     }
     const draftRef = args.messageId ?? args.draftId;
 
-    // Only consult the drafts cache if the caller didn't fully specify the
-    // outgoing payload. This keeps the legacy draftId-as-delete-target path
-    // working when the cache happens to be empty: a caller supplying all
-    // three fields just wants the draft cleaned up post-send.
-    const needsDefaults =
-      args.subject === undefined || args.body === undefined || args.recipientIds === undefined;
+    // Best-effort draft lookup: when draftRef points at a cached draft, use
+    // its stored fields (including replyToId) as defaults for anything the
+    // caller didn't supply. The "missing draft" case only matters when we
+    // actually NEED the defaults — a caller passing all fields explicitly
+    // can use draftId as a pure delete-target even on an empty cache.
     let subject = args.subject;
     let body = args.body;
     let recipientIds = args.recipientIds;
-    if (needsDefaults && draftRef !== undefined) {
+    let draftReplyToId: number | null = null;
+    let draftLookupAttempted = false;
+    let draftFound = false;
+    if (draftRef !== undefined) {
+      draftLookupAttempted = true;
       const draft = getDraft(draftRef);
-      if (draft === null) {
+      if (draft !== null) {
+        draftFound = true;
+        subject = subject ?? draft.subject;
+        body = body ?? draft.body;
+        recipientIds = recipientIds ?? draft.recipients.map((r) => r.userId);
+        draftReplyToId = draft.replyToId;
+      }
+    }
+    if (subject === undefined || body === undefined || recipientIds === undefined) {
+      if (draftLookupAttempted && !draftFound) {
         throw new Error(
           `draft ${draftRef} not found in local cache. Call ofw_sync_messages first, or supply subject/body/recipientIds explicitly.`,
         );
       }
-      subject = subject ?? draft.subject;
-      body = body ?? draft.body;
-      recipientIds = recipientIds ?? draft.recipients.map((r) => r.userId);
-    }
-    if (subject === undefined || body === undefined || recipientIds === undefined) {
       const missing = [
         subject === undefined ? 'subject' : null,
         body === undefined ? 'body' : null,
@@ -242,7 +249,10 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
       );
     }
 
-    const requestedReplyTo = args.replyToId ?? null;
+    // Inherit the draft's replyToId when the caller didn't supply one. A
+    // reply-draft saved with replyToId would otherwise be sent as a
+    // top-level message — silently losing the thread.
+    const requestedReplyTo = args.replyToId ?? draftReplyToId ?? null;
     let resolvedReplyTo = requestedReplyTo;
     let chainRootId: number | null = null;
     let rewriteNote: string | null = null;
