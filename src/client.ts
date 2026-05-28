@@ -45,6 +45,19 @@ function redactHeaders(h: Record<string, string>): Record<string, string> {
   return out;
 }
 
+// Per-request timeout. Overridable via OFW_REQUEST_TIMEOUT_MS. The default
+// (30s) is comfortably above OFW's typical p99 but low enough that a stuck
+// upstream fails fast instead of burning the MCP client-side budget — which
+// is what produced the multi-minute hangs we've seen on ofw_list_messages
+// and ofw_save_draft. Each retry (401/429 replay) gets its own fresh window.
+const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+function getRequestTimeoutMs(): number {
+  const raw = process.env.OFW_REQUEST_TIMEOUT_MS;
+  if (typeof raw !== 'string' || raw.trim().length === 0) return DEFAULT_REQUEST_TIMEOUT_MS;
+  const n = Number(raw.trim());
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_REQUEST_TIMEOUT_MS;
+}
+
 export class OFWClient {
   private token: string | null = null;
   private tokenExpiry: Date | null = null;
@@ -100,14 +113,42 @@ export class OFWClient {
       console.error(`[ofw-debug]   body: ${bodyPreview}`);
     }
 
-    const response = await fetch(url, {
-      method,
-      headers,
-      ...(body !== undefined ? { body: isFormData ? body : JSON.stringify(body) } : {}),
-    });
+    // AbortController + setTimeout (not AbortSignal.timeout) so vitest fake
+    // timers can drive the timeout in tests, and so we can attach a clear
+    // error message instead of a bare DOMException on the abort path.
+    const timeoutMs = getRequestTimeoutMs();
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), timeoutMs);
+    const startedAt = Date.now();
+
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        method,
+        headers,
+        signal: ac.signal,
+        ...(body !== undefined ? { body: isFormData ? body : JSON.stringify(body) } : {}),
+      });
+    } catch (err) {
+      const elapsed = Date.now() - startedAt;
+      if (ac.signal.aborted) {
+        if (debugLogEnabled()) {
+          console.error(`[ofw-debug] ⏱ TIMEOUT after ${elapsed}ms: ${method} ${url}`);
+        }
+        throw new Error(
+          `OFW API request timed out after ${timeoutMs}ms: ${method} ${path}`,
+        );
+      }
+      if (debugLogEnabled()) {
+        console.error(`[ofw-debug] ✗ ${(err as Error).message} after ${elapsed}ms: ${method} ${url}`);
+      }
+      throw err;
+    } finally {
+      clearTimeout(timer);
+    }
 
     if (debugLogEnabled()) {
-      console.error(`[ofw-debug] ← ${response.status} ${response.statusText}`);
+      console.error(`[ofw-debug] ← ${response.status} ${response.statusText} (${Date.now() - startedAt}ms)`);
     }
 
     if (response.status === 401 && !isRetry) {

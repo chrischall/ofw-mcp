@@ -301,6 +301,116 @@ describe('OFWClient', () => {
     expect(h['ofw-version']).toBe('1.0.0');
   });
 
+  describe('request timeout', () => {
+    // Helper: handle the login fetches normally, then hang on subsequent
+    // calls until the request's AbortSignal fires. This is the shape of a
+    // stuck upstream — fetch never resolves, and prior to the timeout fix
+    // it would burn the entire client-side budget.
+    function mockLoginThenHang(): ReturnType<typeof vi.spyOn> {
+      let call = 0;
+      return vi.spyOn(globalThis, 'fetch').mockImplementation((_url, init) => {
+        call++;
+        if (call === 1) {
+          // LOGIN_INIT
+          return Promise.resolve({
+            ok: false, status: 303, statusText: '303',
+            headers: { get: (k: string) => k.toLowerCase() === 'set-cookie' ? 'SESSION=x' : null },
+            text: async () => '', json: async () => null,
+          } as unknown as Response);
+        }
+        if (call === 2) {
+          // LOGIN_SUCCESS
+          return Promise.resolve({
+            ok: true, status: 200, statusText: '200',
+            headers: { get: (k: string) => k.toLowerCase() === 'content-type' ? 'application/json' : null },
+            text: async () => JSON.stringify({ auth: MOCK_TOKEN }),
+            json: async () => ({ auth: MOCK_TOKEN }),
+          } as unknown as Response);
+        }
+        // Hang until aborted. Fetch contract: rejects with the signal's
+        // reason (or a DOMException) when the signal aborts.
+        return new Promise((_resolve, reject) => {
+          const signal = (init as RequestInit | undefined)?.signal;
+          if (!signal) return; // hang forever — test will time itself out
+          signal.addEventListener('abort', () => {
+            const err: Error & { name?: string } = new Error(
+              (signal.reason as Error | undefined)?.message ?? 'aborted',
+            );
+            err.name = 'AbortError';
+            reject(err);
+          });
+        });
+      });
+    }
+
+    afterEach(() => {
+      delete process.env.OFW_REQUEST_TIMEOUT_MS;
+    });
+
+    it('aborts a hung request after the default 30s timeout with a clear error', async () => {
+      vi.useFakeTimers();
+      try {
+        mockLoginThenHang();
+        const client = new OFWClient();
+        const promise = client.request('GET', '/pub/v3/messages?folders=42&page=1&size=50');
+        promise.catch(() => undefined);
+        await vi.advanceTimersByTimeAsync(30_000);
+        await expect(promise).rejects.toThrow(
+          /OFW API request timed out after 30000ms.*GET \/pub\/v3\/messages/,
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('respects OFW_REQUEST_TIMEOUT_MS override', async () => {
+      process.env.OFW_REQUEST_TIMEOUT_MS = '5000';
+      vi.useFakeTimers();
+      try {
+        mockLoginThenHang();
+        const client = new OFWClient();
+        const promise = client.request('GET', '/pub/v3/messages');
+        promise.catch(() => undefined);
+        await vi.advanceTimersByTimeAsync(5_000);
+        await expect(promise).rejects.toThrow(/timed out after 5000ms/);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('does not fire the timeout when the request completes promptly', async () => {
+      vi.useFakeTimers();
+      try {
+        mockFetch([
+          LOGIN_INIT,
+          LOGIN_SUCCESS,
+          { status: 200, body: { ok: true } },
+        ]);
+        const client = new OFWClient();
+        const result = await client.request<{ ok: boolean }>('GET', '/pub/v1/test');
+        // Advance well past the default timeout to prove the timer is cleared.
+        await vi.advanceTimersByTimeAsync(60_000);
+        expect(result).toEqual({ ok: true });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('binaries also respect the timeout', async () => {
+      vi.useFakeTimers();
+      try {
+        mockLoginThenHang();
+        const client = new OFWClient();
+        const promise = client.requestBinary('GET', '/pub/v1/myfiles/1/data');
+        promise.catch(() => undefined);
+        await vi.advanceTimersByTimeAsync(30_000);
+        await expect(promise).rejects.toThrow(/timed out after 30000ms/);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
   describe('OFW_DEBUG_LOG', () => {
     let originalDebug: string | undefined;
     let errSpy: ReturnType<typeof vi.spyOn>;
