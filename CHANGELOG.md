@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.2.0](https://github.com/chrischall/ofw-mcp/compare/v2.1.0...v2.2.0) (2026-05-28)
+
+
+### Features
+
+* **send-message:** accept messageId to send an existing draft ([#55](https://github.com/chrischall/ofw-mcp/issues/55)) ([c8c20cb](https://github.com/chrischall/ofw-mcp/commit/c8c20cba6fa7f3d81eaf120a2ccdf7203dee8fcc))
+
+
+### Bug Fixes
+
+* **client:** add per-request timeout to prevent multi-minute hangs ([#54](https://github.com/chrischall/ofw-mcp/issues/54)) ([77376fe](https://github.com/chrischall/ofw-mcp/commit/77376fe737695eb038a38b42ab12efee206ebac2))
+
 ## [2.1.0](https://github.com/chrischall/ofw-mcp/compare/v2.0.19...v2.1.0) (2026-05-27)
 
 
