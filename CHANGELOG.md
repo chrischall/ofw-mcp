@@ -1,5 +1,18 @@
 # Changelog
 
+## [2.3.0](https://github.com/chrischall/ofw-mcp/compare/v2.2.0...v2.3.0) (2026-05-29)
+
+
+### Features
+
+* adopt @fetchproxy/server 0.11.0 ([#61](https://github.com/chrischall/ofw-mcp/issues/61)) ([062d412](https://github.com/chrischall/ofw-mcp/commit/062d41200c36852bfe33d08df27f4d88a455cfc7))
+
+
+### Bug Fixes
+
+* **ci:** arm auto-merge from verdict comment when structured_output is empty ([#60](https://github.com/chrischall/ofw-mcp/issues/60)) ([3eed592](https://github.com/chrischall/ofw-mcp/commit/3eed592c769a8a8951e22e0533db0c770a6ff43a))
+* **ci:** treat instant-merge race as success in auto-merge arm ([#58](https://github.com/chrischall/ofw-mcp/issues/58)) ([f3ce06b](https://github.com/chrischall/ofw-mcp/commit/f3ce06bbf075581d84d28947c24e999715d751d4))
+
 ## [2.2.0](https://github.com/chrischall/ofw-mcp/compare/v2.1.0...v2.2.0) (2026-05-28)
 
 
