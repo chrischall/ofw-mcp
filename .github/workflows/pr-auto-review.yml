@@ -218,13 +218,28 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Arm auto-merge on pass
-        if: |
-          steps.review.outputs.structured_output != '' &&
-          fromJSON(steps.review.outputs.structured_output).verdict == 'pass'
+        if: ${{ !cancelled() && github.event.pull_request.head.repo.full_name == github.repository }}
         env:
           GH_TOKEN: ${{ secrets.RELEASE_PAT }}
           PR: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
+          OUT: ${{ steps.review.outputs.structured_output }}
         run: |
-          gh pr edit "$PR" --repo "$REPO" --add-label ready-to-merge
-          echo "Verdict=pass — added ready-to-merge to arm auto-merge."
+          verdict=""
+          [ -n "$OUT" ] && verdict=$(echo "$OUT" | jq -r '.verdict // empty')
+          # Fallback: claude-code-action intermittently returns an empty
+          # structured_output even on a clean pass (the verdict comment still
+          # posts). Re-derive the verdict from the latest claude[bot] verdict
+          # marker. ONLY an explicit `pass` arms; warn/fail/anything-else keeps
+          # a human in the loop.
+          if [ -z "$verdict" ]; then
+            body=$(gh pr view "$PR" --repo "$REPO" --json comments --jq '[.comments[]|select(.author.login=="claude")]|last|.body' 2>/dev/null || echo "")
+            vline=$(printf '%s' "$body" | grep -ioE 'verdict[^a-z]{0,6}(pass|warn|fail)' | tail -1)
+            case "$vline" in *[Pp]ass*) verdict="pass";; esac
+          fi
+          if [ "$verdict" = "pass" ]; then
+            gh pr edit "$PR" --repo "$REPO" --add-label ready-to-merge
+            echo "Verdict=pass — added ready-to-merge to arm auto-merge."
+          else
+            echo "Verdict=${verdict:-unknown} — not arming (human-in-the-loop preserved)."
+          fi
