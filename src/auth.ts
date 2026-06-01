@@ -46,6 +46,7 @@
 //     specifically so it can be mocked here too. This keeps the
 //     selection logic independent of either implementation.
 
+import { readEnvVar } from '@chrischall/mcp-utils';
 import { bootstrap } from '@fetchproxy/bootstrap';
 import { classifyBridgeError, FetchproxyBridgeDownError } from '@fetchproxy/server';
 import { loginWithPassword } from './auth-password.js';
@@ -65,16 +66,12 @@ export interface ResolvedAuth {
 /**
  * Read an env var, trim, and treat blank / `${UNEXPANDED}` placeholders as
  * unset. Defends against MCP hosts that pass `.mcp.json` env blocks through
- * without variable expansion.
+ * without variable expansion. Delegates to @chrischall/mcp-utils' `readEnvVar`,
+ * which applies the identical sanitization (blank, `undefined`/`null`,
+ * `${...}` placeholder → unset).
  */
 function readEnv(key: string): string | undefined {
-  const raw = process.env[key];
-  if (typeof raw !== 'string') return undefined;
-  const trimmed = raw.trim();
-  if (trimmed.length === 0) return undefined;
-  if (trimmed === 'undefined' || trimmed === 'null') return undefined;
-  if (/^\$\{[^}]*\}$/.test(trimmed)) return undefined;
-  return trimmed;
+  return readEnvVar(key);
 }
 
 /** True if the user has explicitly disabled the fetchproxy fallback. */
