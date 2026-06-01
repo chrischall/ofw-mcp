@@ -67,3 +67,8 @@ scripts/
 # Don't recursively pack the bundle into itself
 *.mcpb
 *.skill
+
+# Release tooling (release-please) — build/release metadata, not runtime
+release-please-config.json
+.release-please-manifest.json
+CHANGELOG.md
