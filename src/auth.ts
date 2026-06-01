@@ -48,7 +48,7 @@
 
 import { readEnvVar } from '@chrischall/mcp-utils';
 import { bootstrap } from '@fetchproxy/bootstrap';
-import { classifyBridgeError, FetchproxyBridgeDownError } from '@fetchproxy/server';
+import { classifyBridgeError, FetchproxyBridgeDownError } from '@chrischall/mcp-utils/fetchproxy';
 import { loginWithPassword } from './auth-password.js';
 import { parseBoolEnv } from './config.js';
 import pkg from '../package.json' with { type: 'json' };

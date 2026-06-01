@@ -193,7 +193,7 @@ describe('resolveAuth', () => {
       // `.hint` so users see the actionable "click the extension toolbar
       // icon" message in path 2, matching the self-service guidance in
       // path 3.
-      const { FetchproxyBridgeDownError } = await import('@fetchproxy/server');
+      const { FetchproxyBridgeDownError } = await import('@chrischall/mcp-utils/fetchproxy');
       const downErr = new FetchproxyBridgeDownError({
         originalError: 'content_script_unreachable',
         retryAttempted: true,
