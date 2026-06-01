@@ -180,10 +180,19 @@ jobs:
                - Test coverage of new code paths (note: vitest enforces 100% coverage in CI)
                - Security or data-integrity concerns
 
+            CONVENTIONS ARE GROUNDED, NOT INVENTED:
+            A "convention" exists only if it is (a) written in CLAUDE.md, (b) enforced by a repo config (eslint/prettier/tsconfig), or (c) consistently followed by the surrounding code. Before citing a CLAUDE.md rule you MUST be able to quote its exact text — if it is not in CLAUDE.md, it is NOT a CLAUDE.md rule. Never infer an unwritten style rule.
+
             SEVERITY MODEL (matches the official code-review plugin):
-              🔴 Important — bug, broken behavior, security/data risk, or violation of a CLAUDE.md convention. Confidence ≥80 to count.
-              🟡 Nit       — style, minor improvement, suggestion. Confidence ≥80.
+              🔴 Important — bug, broken behavior, security/data risk, or violation of a convention you can QUOTE from CLAUDE.md. Confidence ≥80 to count.
+              🟡 Nit       — a concrete, actionable minor issue grounded in CLAUDE.md, a linter/formatter config, or a clear inconsistency with adjacent code. Confidence ≥80.
               🟣 Pre-existing — issue already in the codebase, not introduced by this PR. Never blocking.
+
+            OUT OF SCOPE — never a finding, never affects the verdict:
+              - Formatting taste a formatter would own: comment length, single- vs multi-line comments, blank lines, line breaks, import order not enforced by a config.
+              - Rephrasing comments/identifiers that are already clear.
+              - Anything you cannot ground in CLAUDE.md, a repo config, or adjacent-code style.
+            If your only findings are out-of-scope, the verdict is `pass`.
 
             OUTPUT:
             - For line-specific findings, prefer the inline-comment tool (`mcp__github_inline_comment__create_inline_comment`).
