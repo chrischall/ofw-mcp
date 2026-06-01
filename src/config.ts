@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { parseBoolEnv as parseBoolEnvUtil } from '@chrischall/mcp-utils';
 
 // Cache identity drives the per-user SQLite DB filename. Order of preference:
 //   1. OFW_CACHE_IDENTITY — explicit override for users who want to label the
@@ -46,11 +47,13 @@ export function getAttachmentsDir(): string {
  * (case-insensitive, trimmed). Anything else — unset, empty, or other
  * values — is false. Used for OFW_INLINE_ATTACHMENTS, OFW_DISABLE_FETCHPROXY,
  * OFW_DEBUG_LOG, etc.
+ *
+ * Delegates to @chrischall/mcp-utils' `parseBoolEnv` (which also recognizes
+ * the falsy set 0/false/no/off — behavior-equivalent here since callers only
+ * care about the truthy case and everything else defaults to false).
  */
 export function parseBoolEnv(name: string): boolean {
-  const raw = process.env[name];
-  if (typeof raw !== 'string') return false;
-  return ['1', 'true', 'yes', 'on'].includes(raw.trim().toLowerCase());
+  return parseBoolEnvUtil(name);
 }
 
 // Default for ofw_download_attachment's `inline` arg when the caller doesn't

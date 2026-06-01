@@ -1,17 +1,15 @@
+import { loadDotenvSafely } from '@chrischall/mcp-utils';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import { resolveAuth } from './auth.js';
 import { parseBoolEnv } from './config.js';
 import { BASE_URL, OFW_PROTOCOL_HEADERS, OFW_TOKEN_TTL_MS, OFW_TOKEN_EXPIRY_SKEW_MS } from './protocol.js';
 
-// Load .env for local dev; silently skip if dotenv is unavailable (e.g. mcpb bundle)
-try {
-  const { config } = await import('dotenv');
-  const __dirname = dirname(fileURLToPath(import.meta.url));
-  config({ path: join(__dirname, '..', '.env'), override: false, quiet: true });
-} catch {
-  // not available — rely on process.env (mcpb sets credentials via mcp_config.env)
-}
+// Load .env for local dev; silently skip if dotenv is unavailable (e.g. mcpb
+// bundle). loadDotenvSafely applies override:false + quiet:true and swallows a
+// missing dotenv module, matching the prior inline try/catch exactly.
+const __dirname = dirname(fileURLToPath(import.meta.url));
+await loadDotenvSafely({ path: join(__dirname, '..', '.env') });
 
 export interface BinaryResponse {
   body: Buffer;

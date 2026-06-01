@@ -1,14 +1,13 @@
-import { isAbsolute, join, resolve } from 'node:path';
+import { expandPath as expandPathUtil, rawTextResult, textResult } from '@chrischall/mcp-utils';
 import type { Recipient } from '../cache.js';
 import type { OFWClient } from '../client.js';
 
-export function jsonResponse(payload: unknown) {
-  return { content: [{ type: 'text' as const, text: JSON.stringify(payload, null, 2) }] };
-}
+// Pretty-printed JSON tool result. Thin wrapper over @chrischall/mcp-utils'
+// `textResult` so the rest of the codebase keeps the local name.
+export const jsonResponse = textResult;
 
-export function textResponse(text: string) {
-  return { content: [{ type: 'text' as const, text }] };
-}
+// Raw-string tool result. Wrapper over @chrischall/mcp-utils' `rawTextResult`.
+export const textResponse = rawTextResult;
 
 // OFW API shape for `recipients[]` on message/draft list and detail
 // responses. Used wherever we type the response of a `/pub/v3/messages*`
@@ -29,11 +28,9 @@ export function mapRecipients(items: ApiRecipient[] | undefined | null): Recipie
   }));
 }
 
-// Expand a user-provided path: ~ → $HOME, relative → absolute.
-export function expandPath(p: string): string {
-  const expanded = p.startsWith('~/') ? join(process.env.HOME ?? '', p.slice(2)) : p;
-  return isAbsolute(expanded) ? expanded : resolve(expanded);
-}
+// Expand a user-provided path: ~ → home, relative → absolute. Re-exports
+// @chrischall/mcp-utils' `expandPath`.
+export const expandPath = expandPathUtil;
 
 /**
  * POST a payload to /pub/v3/messages, then immediately GET the detail
