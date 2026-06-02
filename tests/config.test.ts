@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { getAttachmentsDir, getCacheDbPath, getDefaultInlineAttachments } from '../src/config.js';
+import { getAttachmentsDir, getCacheDbPath, getDefaultInlineAttachments, getCacheDir } from '../src/config.js';
 
 describe('getCacheDbPath', () => {
   let tmp: string;
@@ -123,5 +123,20 @@ describe('getDefaultInlineAttachments', () => {
   it.each(['false', '0', 'no', 'off', '', 'maybe'])('treats %j as false', (val) => {
     process.env.OFW_INLINE_ATTACHMENTS = val;
     expect(getDefaultInlineAttachments()).toBe(false);
+  });
+});
+
+describe('getCacheDir', () => {
+  it('honors OFW_CACHE_DIR when set, else falls back to ~/.cache/ofw-mcp', () => {
+    const orig = process.env.OFW_CACHE_DIR;
+    try {
+      process.env.OFW_CACHE_DIR = '/tmp/custom-cache';
+      expect(getCacheDir()).toBe('/tmp/custom-cache');
+      delete process.env.OFW_CACHE_DIR;
+      expect(getCacheDir()).toBe(join(homedir(), '.cache', 'ofw-mcp'));
+    } finally {
+      if (orig === undefined) delete process.env.OFW_CACHE_DIR;
+      else process.env.OFW_CACHE_DIR = orig;
+    }
   });
 });

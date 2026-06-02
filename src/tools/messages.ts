@@ -537,6 +537,7 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
       // sentinel — gets re-linked if a message later references this file.
       await fetchAttachmentMeta(client, fileId, 0);
       cached = getAttachment(fileId);
+      /* v8 ignore next -- fetchAttachmentMeta persists the row it just fetched; a still-null read here is an unreachable storage failure */
       if (!cached) throw new Error(`failed to fetch metadata for fileId ${fileId}`);
     }
 

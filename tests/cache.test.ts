@@ -8,6 +8,7 @@ import {
   upsertDraft, getDraft, listDrafts, deleteDraft, listDraftIds, type DraftRow,
   getSyncState, setSyncState, getMeta, setMeta,
   findLatestReplyTip,
+  upsertAttachmentForMessage, getAttachment,
 } from '../src/cache.js';
 
 let tmp: string;
@@ -326,5 +327,39 @@ describe('findLatestReplyTip', () => {
       sentAt: '2026-05-04T14:00:00Z',
     }));
     expect(findLatestReplyTip(142)).toBe(200);
+  });
+});
+
+describe('cache null/fallback branches', () => {
+  it('upsertMessage stores nulls for omitted optional fields (recipients/body/listData)', () => {
+    openCache();
+    upsertMessage(sampleRow({ recipients: undefined, body: undefined, fetchedBodyAt: undefined, replyToId: undefined, chainRootId: undefined, listData: undefined }));
+    const got = getMessage(100);
+    expect(got?.recipients).toEqual([]);
+    expect(got?.body).toBeNull();
+    expect(got?.listData).toBeNull();
+  });
+
+  it('upsertDraft stores nulls for omitted optional fields (recipients/listData)', () => {
+    openCache();
+    upsertDraft(sampleDraft({ recipients: undefined, listData: undefined }));
+    const got = getDraft(200);
+    expect(got?.recipients).toEqual([]);
+    expect(got?.listData).toBeNull();
+  });
+
+  it('upsertAttachmentForMessage: re-linking the same messageId does not duplicate it', () => {
+    openCache();
+    const base = { fileId: 9, fileName: 'a.pdf', label: 'A', mimeType: 'application/pdf', sizeBytes: 10, metadata: { x: 1 } };
+    upsertAttachmentForMessage({ ...base, messageId: 5 });
+    upsertAttachmentForMessage({ ...base, messageId: 5 }); // prior already includes 5
+    expect(getAttachment(9)!.messageIds).toEqual([5]);
+  });
+
+  it('upsertAttachmentForMessage stores nulls for omitted size/metadata', () => {
+    openCache();
+    upsertAttachmentForMessage({ fileId: 11, fileName: 'b.txt', label: 'B', mimeType: 'text/plain', sizeBytes: null, metadata: undefined, messageId: 0 });
+    const got = getAttachment(11);
+    expect(got?.sizeBytes).toBeNull();
   });
 });
