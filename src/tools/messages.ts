@@ -10,8 +10,9 @@ import {
   type MessageRow, type DraftRow,
 } from '../cache.js';
 import { getAttachmentsDir, getDefaultInlineAttachments } from '../config.js';
-import { mkdirSync, openAsBlob, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, extname, join } from 'node:path';
+import { fileBlob } from '@chrischall/mcp-utils';
 import { expandPath, jsonResponse, mapRecipients, postMessageAndRefetch, textResponse, type ApiRecipient } from './_shared.js';
 
 // Lightweight mime sniff from extension. OFW re-derives mime from the filename
@@ -482,8 +483,8 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
 
     // Build the multipart payload matching the OFW web UI's request shape.
     const form = new FormData();
-    // Stream the file off disk (a file-backed Blob) instead of buffering it.
-    form.append('file', await openAsBlob(abs, { type: mime }), fileName);
+    // fileBlob streams the file off disk (a file-backed Blob) instead of buffering it.
+    form.append('file', await fileBlob(abs, { type: mime }), fileName);
     form.append('source', 'message');
     form.append('description', args.description ?? fileName);
     form.append('label', args.label ?? fileName);
