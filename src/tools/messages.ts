@@ -10,7 +10,7 @@ import {
   type MessageRow, type DraftRow,
 } from '../cache.js';
 import { getAttachmentsDir, getDefaultInlineAttachments } from '../config.js';
-import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, openAsBlob, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, extname, join } from 'node:path';
 import { expandPath, jsonResponse, mapRecipients, postMessageAndRefetch, textResponse, type ApiRecipient } from './_shared.js';
 
@@ -477,13 +477,13 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
     const abs = expandPath(args.path);
     const stat = statSync(abs); // throws if missing
     if (!stat.isFile()) throw new Error(`Not a file: ${abs}`);
-    const buf = readFileSync(abs);
     const fileName = basename(abs);
     const mime = mimeFromName(fileName);
 
     // Build the multipart payload matching the OFW web UI's request shape.
     const form = new FormData();
-    form.append('file', new Blob([new Uint8Array(buf)], { type: mime }), fileName);
+    // Stream the file off disk (a file-backed Blob) instead of buffering it.
+    form.append('file', await openAsBlob(abs, { type: mime }), fileName);
     form.append('source', 'message');
     form.append('description', args.description ?? fileName);
     form.append('label', args.label ?? fileName);
@@ -503,7 +503,7 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
       fileName: meta.fileName ?? fileName,
       label: meta.label ?? args.label ?? fileName,
       mimeType: meta.fileType ?? mime,
-      sizeBytes: typeof meta.sizeInBytes === 'number' ? meta.sizeInBytes : buf.length,
+      sizeBytes: typeof meta.sizeInBytes === 'number' ? meta.sizeInBytes : stat.size,
       metadata: meta,
       messageId: 0,
     });
@@ -512,7 +512,7 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
       fileId: meta.fileId,
       fileName: meta.fileName ?? fileName,
       mimeType: meta.fileType ?? mime,
-      sizeBytes: meta.sizeInBytes ?? buf.length,
+      sizeBytes: meta.sizeInBytes ?? stat.size,
       shareClass: meta.shareClass ?? args.shareClass ?? 'PRIVATE',
       note: 'Pass this fileId to ofw_send_message or ofw_save_draft in myFileIDs to attach it.',
     });
