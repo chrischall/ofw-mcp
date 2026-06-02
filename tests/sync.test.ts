@@ -525,6 +525,35 @@ describe('syncAll', () => {
     expect(result.note).toMatch(/unread inbox/);
   });
 
+  it('silently skips a folder outside the known set (defensive no-op)', async () => {
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request').mockResolvedValueOnce(foldersResponse());
+    // The tool layer constrains folders via a zod enum; at this layer an
+    // unknown folder matches none of the branches and is skipped.
+    const result = await syncAll(client, { folders: ['bogus' as never] });
+    expect(result.synced).toEqual({});
+    expect(spy).toHaveBeenCalledTimes(1); // only resolveFolderIds
+  });
+
+  it('threads deep:true through to the inbox and sent folder walks', async () => {
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce(foldersResponse())
+      // inbox: one read item, body, then empty (deep walks to the empty page)
+      .mockResolvedValueOnce(listResponse([{ id: 10, unread: false }]))
+      .mockResolvedValueOnce({ body: 'inbox-10' })
+      .mockResolvedValueOnce(listResponse([]))
+      // sent: one item, body, then empty
+      .mockResolvedValueOnce(listResponse([{ id: 20 }]))
+      .mockResolvedValueOnce({ body: 'sent-20' })
+      .mockResolvedValueOnce(listResponse([]))
+      .mockResolvedValueOnce(draftListResponse([])); // drafts empty
+
+    const result = await syncAll(client, { deep: true }); // sync.ts:290 opts.deep present
+
+    expect(result.synced).toEqual({ inbox: 1, sent: 1, drafts: 0 });
+  });
+
   it('respects an explicit folders subset', async () => {
     const client = new OFWClient();
     const spy = vi.spyOn(client, 'request')
@@ -538,5 +567,58 @@ describe('syncAll', () => {
     const sentCalls = spy.mock.calls.filter((c) => (c[1] as string).includes('folders=222'));
     expect(inboxCalls).toHaveLength(0);
     expect(sentCalls).toHaveLength(0);
+  });
+});
+
+describe('sync — missing-optional-field fallbacks', () => {
+  it('syncMessageFolder fills defaults for bare items, empty body, and a bare attachment meta', async () => {
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce({ data: [
+        { id: 10, showNeverViewed: false, recipients: [] },                                    // read, no subject/from/date
+        { id: 11, showNeverViewed: true, date: { dateTime: '2026-05-04T12:00:00Z' }, recipients: [] }, // unread, no from
+      ] })
+      .mockResolvedValueOnce({ files: [777] })  // detail for 10: no body, has a file attachment
+      .mockResolvedValueOnce({})                // /myfiles/777: bare meta → all ?? fallbacks
+      .mockResolvedValueOnce({ data: [] });     // page 2 empty → break
+
+    const result = await syncMessageFolder(client, 'inbox', '111', { fetchUnreadBodies: false });
+    expect(result.synced).toBe(2);
+    expect(getMessage(10)?.subject).toBe('(no subject)');
+    expect(getMessage(10)?.fromUser).toBe('');
+    expect(getMessage(10)?.body).toBe('');
+    expect(result.unread).toEqual([{ id: 11, subject: undefined, from: '', sentAt: '2026-05-04T12:00:00Z' }]);
+    const atts = listAttachmentsForMessage(10);
+    expect(atts[0]?.fileName).toBe('file-777');
+  });
+
+  it('resolveFolderIds throws when the response has no systemFolders array', async () => {
+    const client = new OFWClient();
+    vi.spyOn(client, 'request').mockResolvedValue({} as never); // no systemFolders → `?? []`
+    await expect(resolveFolderIds(client)).rejects.toThrow();
+  });
+
+  it('syncDrafts fills defaults for a bare draft (no date/subject/body)', async () => {
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce({ data: [{ id: 50, recipients: [] }] }) // no date/subject
+      .mockResolvedValueOnce({}); // detail: no subject/body
+    const result = await syncDrafts(client, '333');
+    expect(result.synced).toBe(1);
+    expect(getDraft(50)?.subject).toBe('(no subject)');
+    expect(getDraft(50)?.body).toBe('');
+  });
+});
+
+describe('sync — empty/missing data arrays', () => {
+  it('syncMessageFolder treats a missing data array as an empty page', async () => {
+    const client = new OFWClient();
+    vi.spyOn(client, 'request').mockResolvedValueOnce({} as never); // no `data` → `?? []` → break
+    expect((await syncMessageFolder(client, 'inbox', '111', { fetchUnreadBodies: false })).synced).toBe(0);
+  });
+  it('syncDrafts treats a missing data array as no drafts', async () => {
+    const client = new OFWClient();
+    vi.spyOn(client, 'request').mockResolvedValueOnce({} as never);
+    expect((await syncDrafts(client, '333')).synced).toBe(0);
   });
 });

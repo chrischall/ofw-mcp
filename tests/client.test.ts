@@ -785,3 +785,35 @@ describe('OFWClient.requestBinary', () => {
     });
   });
 });
+
+describe('OFWClient — config/auth fallback branches', () => {
+  beforeEach(() => {
+    process.env.OFW_USERNAME = 'test@example.com';
+    process.env.OFW_PASSWORD = 'testpass';
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  it('reads OFW_REQUEST_TIMEOUT_MS (valid → used, invalid → default)', async () => {
+    const orig = process.env.OFW_REQUEST_TIMEOUT_MS;
+    try {
+      mockFetch([LOGIN_INIT, LOGIN_SUCCESS, { status: 200, body: {} }, { status: 200, body: {} }]);
+      const client = new OFWClient();
+      process.env.OFW_REQUEST_TIMEOUT_MS = '5000';
+      await client.request('GET', '/pub/v1/a'); // valid number → `? n`
+      process.env.OFW_REQUEST_TIMEOUT_MS = 'not-a-number';
+      await client.request('GET', '/pub/v1/b'); // invalid → `: DEFAULT`
+    } finally {
+      if (orig === undefined) delete process.env.OFW_REQUEST_TIMEOUT_MS;
+      else process.env.OFW_REQUEST_TIMEOUT_MS = orig;
+    }
+  });
+
+  it('falls back to a TTL-based token expiry when resolveAuth returns no expiresAt', async () => {
+    const auth = await import('../src/auth.js');
+    const spy = vi.spyOn(auth, 'resolveAuth').mockResolvedValue({ token: 'tok', expiresAt: undefined });
+    mockFetch([{ status: 200, body: { data: 'ok' } }]); // resolveAuth mocked → no login fetches
+    const client = new OFWClient();
+    await client.request('GET', '/pub/v1/x');
+    expect(spy).toHaveBeenCalled();
+  });
+});

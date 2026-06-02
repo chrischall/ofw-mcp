@@ -16,4 +16,5 @@ jobs:
 
       - run: npm ci
       - run: npm run build
-      - run: npm test
+      # Coverage-enforced: vitest.config.ts declares 100% thresholds, so this fails on a regression.
+      - run: npm run test:coverage

@@ -1532,3 +1532,157 @@ describe('ofw_get_message attachments', () => {
   });
 });
 
+
+describe('messages.ts — coverage backfill', () => {
+  it('upload_attachment: unknown extension + bare meta → octet-stream + filename fallbacks', async () => {
+    const file = join(tmpDir, 'note.unknownext');
+    writeFileSync(file, 'X');
+    const c = new OFWClient();
+    vi.spyOn(c, 'request').mockResolvedValue({ fileId: 8 }); // bare meta → 504–517
+    setup(c);
+    const out = JSON.parse((await handlers.get('ofw_upload_attachment')!({ path: file })).content[0].text);
+    expect(out.fileId).toBe(8);
+    expect(out.fileName).toBe('note.unknownext');
+    expect(out.mimeType).toBe('application/octet-stream'); // mimeFromName fallback (43)
+  });
+
+  it('upload_attachment: rejects a non-file path', async () => {
+    const c = new OFWClient();
+    vi.spyOn(c, 'request').mockResolvedValue({});
+    setup(c);
+    await expect(handlers.get('ofw_upload_attachment')!({ path: tmpDir })).rejects.toThrow(/Not a file/); // 480
+  });
+
+  it('download_attachment: fetches metadata when uncached and writes into a saveTo directory', async () => {
+    const c = new OFWClient();
+    vi.spyOn(c, 'request').mockResolvedValue({ fileId: 50, fileName: 'f.bin', fileType: 'application/octet-stream', fileSize: 3 });
+    vi.spyOn(c, 'requestBinary').mockResolvedValue({ body: Buffer.from('abc'), contentType: 'application/octet-stream', suggestedFileName: 'f.bin' } as never);
+    setup(c);
+    const out = JSON.parse((await handlers.get('ofw_download_attachment')!({ fileId: 50, saveTo: join(tmpDir, 'dl') + '/' })).content[0].text);
+    expect(out.path).toContain('50-f.bin'); // 540 (uncached) + dir branch (574–577)
+  });
+
+  it('download_attachment: writes to an explicit saveTo file path (binary fallbacks)', async () => {
+    upsertAttachmentForMessage({ fileId: 51, fileName: 'g.bin', label: 'g', mimeType: 'application/octet-stream', sizeBytes: 3, metadata: {}, messageId: 0 });
+    const c = new OFWClient();
+    vi.spyOn(c, 'requestBinary').mockResolvedValue({ body: Buffer.from('xyz') } as never); // no contentType/suggestedFileName → fallbacks
+    setup(c);
+    const dest = join(tmpDir, 'explicit.bin');
+    const out = JSON.parse((await handlers.get('ofw_download_attachment')!({ fileId: 51, saveTo: dest })).content[0].text);
+    expect(out.path).toBe(dest); // file-path branch (578)
+  });
+
+  it('list_messages: folderId "sent" + a paged note when results exceed the page', async () => {
+    for (let i = 1; i <= 5; i++) upsertMessage({ id: i, folder: 'sent', subject: `s${i}`, fromUser: 'A', sentAt: `2026-05-0${i}T00:00:00Z`, recipients: [], body: 'b', fetchedBodyAt: 't', replyToId: null, chainRootId: null, listData: {} });
+    const c = new OFWClient(); vi.spyOn(c, 'request').mockResolvedValue({}); setup(c);
+    const out = JSON.parse((await handlers.get('ofw_list_messages')!({ folderId: 'sent', size: 2, page: 1 })).content[0].text);
+    expect(out.total).toBe(5);
+    expect(out.note).toMatch(/Showing 1–2 of 5/); // 85 (sent) + 102 (paged note)
+  });
+
+  it('get_message: detail fetch with missing optional fields fills defaults', async () => {
+    const c = new OFWClient();
+    vi.spyOn(c, 'request').mockResolvedValue({ id: 77, subject: 'S', files: [] }); // detail: no subject/from/date/body
+    setup(c);
+    const out = JSON.parse((await handlers.get('ofw_get_message')!({ messageId: 77 })).content[0].text);
+    expect(out.fromUser).toBe('');  // 180
+    expect(out.body).toBe('');      // 183
+  });
+
+  it('send_message: reports the missing required fields for a fresh send', async () => {
+    const c = new OFWClient(); vi.spyOn(c, 'request').mockResolvedValue({}); setup(c);
+    await expect(handlers.get('ofw_send_message')!({})).rejects.toThrow(/subject|body|recipientIds/); // 244–246
+  });
+});
+
+describe('messages.ts — attachment-backfill branches', () => {
+  const M = (over: Record<string, unknown>) => ({ id: 0, folder: 'inbox', subject: 's', fromUser: 'A', sentAt: 't', recipients: [], body: 'b', fetchedBodyAt: 't', replyToId: null, chainRootId: null, listData: {}, ...over });
+
+  it('get_message: cached message with non-object listData skips backfill', async () => {
+    upsertMessage(M({ id: 60, listData: 'not-an-object' }) as never);
+    const c = new OFWClient(); vi.spyOn(c, 'request').mockResolvedValue({}); setup(c);
+    expect(JSON.parse((await handlers.get('ofw_get_message')!({ messageId: 60 })).content[0].text).id).toBe(60); // 51
+  });
+
+  it('get_message: cached listData.files array triggers attachment backfill', async () => {
+    upsertMessage(M({ id: 61, listData: { files: [9] } }) as never);
+    const c = new OFWClient();
+    vi.spyOn(c, 'request').mockResolvedValueOnce({ files: [9] }).mockResolvedValueOnce({ fileId: 9, fileName: 'x.pdf' });
+    setup(c);
+    expect(JSON.parse((await handlers.get('ofw_get_message')!({ messageId: 61 })).content[0].text).attachments).toHaveLength(1); // 54
+  });
+
+  it('get_message: non-cached detail with files harvests attachment metadata', async () => {
+    const c = new OFWClient();
+    vi.spyOn(c, 'request').mockResolvedValueOnce({ id: 62, subject: 'S', files: [12] }).mockResolvedValueOnce({ fileId: 12, fileName: 'y.pdf' });
+    setup(c);
+    expect(JSON.parse((await handlers.get('ofw_get_message')!({ messageId: 62 })).content[0].text).attachments).toHaveLength(1); // 190-191
+  });
+
+  it('get_message: listData hints files but re-fetch returns none → no backfill', async () => {
+    upsertMessage(M({ id: 63, listData: { files: [9] } }) as never);
+    const c = new OFWClient();
+    vi.spyOn(c, 'request').mockResolvedValueOnce({ files: [] }); // detail has no fileIds → 157[1]
+    setup(c);
+    expect(JSON.parse((await handlers.get('ofw_get_message')!({ messageId: 63 })).content[0].text).attachments).toHaveLength(0);
+  });
+
+  it('send_message: subject+body present lists only the missing recipientIds', async () => {
+    const c = new OFWClient(); vi.spyOn(c, 'request'); setup(c);
+    await expect(handlers.get('ofw_send_message')!({ subject: 'S', body: 'B' })) // 244[1],245[1]
+      .rejects.toThrow(/requires recipientIds\b/);
+  });
+
+  it('send_message: only recipientIds present lists subject, body', async () => {
+    const c = new OFWClient(); vi.spyOn(c, 'request'); setup(c);
+    await expect(handlers.get('ofw_send_message')!({ recipientIds: [1] })) // 246[1]
+      .rejects.toThrow(/requires subject, body\b/);
+  });
+
+  it('send_message: re-fetched detail missing fields falls back to inputs', async () => {
+    const c = new OFWClient();
+    vi.spyOn(c, 'request')
+      .mockResolvedValueOnce({ entityId: 500 }) // POST
+      .mockResolvedValueOnce({ id: 500 }); // GET bare detail → 290-294 fallbacks
+    setup(c);
+    const out = JSON.parse((await handlers.get('ofw_send_message')!({ subject: 'S', body: 'B', recipientIds: [1] })).content[0].text);
+    expect(out.id).toBe(500);
+    expect(out.subject).toBe('S'); // detail.subject ?? subject
+    expect(out.fromUser).toBe(''); // detail.from?.name ?? ''
+    expect(out.body).toBe('B'); // detail.body ?? body
+  });
+
+  it('send_message: POST with no id returns the generic success message', async () => {
+    const c = new OFWClient();
+    vi.spyOn(c, 'request').mockResolvedValueOnce(null); // raw falsy, id null → 324[1]
+    setup(c);
+    const text = (await handlers.get('ofw_send_message')!({ subject: 'S', body: 'B', recipientIds: [1] })).content[0].text;
+    expect(text).toBe('Message sent successfully.');
+  });
+
+  it('save_draft: POST with no id returns the generic saved message', async () => {
+    const c = new OFWClient();
+    vi.spyOn(c, 'request').mockResolvedValueOnce(null); // raw falsy, id null → 421[1]
+    setup(c);
+    const text = (await handlers.get('ofw_save_draft')!({ subject: 'S', body: 'B' })).content[0].text;
+    expect(text).toBe('Draft saved.');
+  });
+
+  it('download_attachment: no saveTo writes into the default attachments dir', async () => {
+    const c = new OFWClient();
+    vi.spyOn(c, 'request').mockResolvedValueOnce({ fileId: 70, fileName: 'd.bin', fileType: 'application/octet-stream', fileSize: 3 });
+    vi.spyOn(c, 'requestBinary').mockResolvedValueOnce({ body: Buffer.from('def'), contentType: 'application/octet-stream', suggestedFileName: 'd.bin' } as never);
+    setup(c);
+    const dir = mkdtempSync(join(tmpdir(), 'ofw-attach-'));
+    const prev = process.env.OFW_ATTACHMENTS_DIR;
+    process.env.OFW_ATTACHMENTS_DIR = dir;
+    try {
+      const out = JSON.parse((await handlers.get('ofw_download_attachment')!({ fileId: 70 })).content[0].text); // 578
+      expect(out.path).toBe(join(dir, '70-d.bin'));
+      expect(readFileSync(out.path).toString()).toBe('def');
+    } finally {
+      if (prev === undefined) delete process.env.OFW_ATTACHMENTS_DIR; else process.env.OFW_ATTACHMENTS_DIR = prev;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

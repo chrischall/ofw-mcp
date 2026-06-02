@@ -264,6 +264,7 @@ export function countMessages(opts: MessageFilter): number {
   const { where, params } = buildMessageFilter(opts);
   const r = db.prepare(`SELECT COUNT(*) as n FROM messages ${where}`)
     .get(...params as never[]) as { n: number } | undefined;
+  /* v8 ignore next -- SELECT COUNT(*) always returns exactly one row; the ?./?? are defensive */
   return r?.n ?? 0;
 }
 

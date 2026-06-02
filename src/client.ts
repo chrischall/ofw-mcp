@@ -39,6 +39,7 @@ function debugLogEnabled(): boolean {
 
 function redactHeaders(h: Record<string, string>): Record<string, string> {
   const out = { ...h };
+  /* v8 ignore next -- request headers always carry Authorization (set in request()); the guard is defensive for arbitrary header maps */
   if (out.Authorization) out.Authorization = `Bearer ${out.Authorization.slice(7, 17)}…`;
   return out;
 }
