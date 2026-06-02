@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.3.1](https://github.com/chrischall/ofw-mcp/compare/v2.3.0...v2.3.1) (2026-06-02)
+
+
+### Performance
+
+* stream attachment upload from disk instead of buffering it ([#69](https://github.com/chrischall/ofw-mcp/issues/69)) ([83006be](https://github.com/chrischall/ofw-mcp/commit/83006be10ef094ab0c98b5e63b6a279c453ca458))
+
+
+### Refactor
+
+* adopt mcp-utils 0.4.0 fileBlob for attachment upload ([#72](https://github.com/chrischall/ofw-mcp/issues/72)) ([7b55342](https://github.com/chrischall/ofw-mcp/commit/7b55342dfef9e69cb5e8861b0a5498eb667a6cfb))
+
 ## [2.3.0](https://github.com/chrischall/ofw-mcp/compare/v2.2.0...v2.3.0) (2026-05-29)
 
 
