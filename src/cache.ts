@@ -1,5 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, chmodSync, existsSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { getCacheDbPath } from './config.js';
 
@@ -73,14 +73,32 @@ function migrate(db: DatabaseSync): void {
   ).run('schema_version', '2');
 }
 
+// The cache holds full co-parenting message history — keep it private to the
+// owning user. Modes are asserted on every open (not just creation): mkdirSync
+// `mode` and SQLite's default file mode only apply when the path is first
+// created, so a pre-existing dir/db keeps whatever (world-readable) mode it
+// had. The -wal/-shm siblings appear and disappear with WAL checkpoints, hence
+// the existence check.
+function enforceCachePermissions(dbPath: string): void {
+  chmodSync(dirname(dbPath), 0o700);
+  chmodSync(dbPath, 0o600);
+  for (const sibling of [`${dbPath}-wal`, `${dbPath}-shm`]) {
+    if (existsSync(sibling)) chmodSync(sibling, 0o600);
+  }
+}
+
 export function openCache(): Cache {
   if (instance) return instance;
   const path = getCacheDbPath();
   mkdirSync(dirname(path), { recursive: true });
   const db = new DatabaseSync(path);
+  // First pass: lock down dir + db before WAL siblings exist.
+  enforceCachePermissions(path);
   db.exec('PRAGMA journal_mode = WAL');
   db.exec('PRAGMA foreign_keys = ON');
   migrate(db);
+  // Second pass: the migration writes created -wal/-shm — lock those down too.
+  enforceCachePermissions(path);
   instance = { db };
   return instance;
 }

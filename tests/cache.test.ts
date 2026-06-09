@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, statSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { getCacheDbPath } from '../src/config.js';
 import {
   openCache, closeCache,
   upsertMessage, getMessage, deleteMessage, listMessages, countMessages, type MessageRow,
@@ -71,6 +72,29 @@ describe('openCache', () => {
     openCache();
     closeCache();
     expect(() => openCache()).not.toThrow();
+  });
+
+  it('restricts the cache dir to 0700 and database files (incl. -wal/-shm) to 0600 on open', () => {
+    openCache();
+    const dbPath = getCacheDbPath();
+    expect(statSync(tmp).mode & 0o777).toBe(0o700);
+    expect(statSync(dbPath).mode & 0o777).toBe(0o600);
+    // WAL mode + migration writes mean the -wal/-shm siblings exist while open.
+    expect(existsSync(`${dbPath}-wal`)).toBe(true);
+    expect(statSync(`${dbPath}-wal`).mode & 0o777).toBe(0o600);
+    expect(existsSync(`${dbPath}-shm`)).toBe(true);
+    expect(statSync(`${dbPath}-shm`).mode & 0o777).toBe(0o600);
+  });
+
+  it('re-asserts restrictive permissions on every open, not just at creation', () => {
+    openCache();
+    closeCache();
+    const dbPath = getCacheDbPath();
+    chmodSync(tmp, 0o755);
+    chmodSync(dbPath, 0o644);
+    openCache();
+    expect(statSync(tmp).mode & 0o777).toBe(0o700);
+    expect(statSync(dbPath).mode & 0o777).toBe(0o600);
   });
 });
 
