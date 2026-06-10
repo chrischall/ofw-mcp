@@ -16,8 +16,8 @@ export function registerExpenseTools(server: McpServer, client: OFWClient): void
     description: 'List OurFamilyWizard expenses with pagination',
     annotations: { readOnlyHint: true },
     inputSchema: {
-      start: z.number().describe('Start offset (default 0)').optional(),
-      max: z.number().describe('Max results (default 20)').optional(),
+      start: z.number().int().min(0).describe('Start offset (default 0)').optional(),
+      max: z.number().int().min(1).describe('Max results (default 20)').optional(),
     },
   }, async (args) => {
     const start = args.start ?? 0;

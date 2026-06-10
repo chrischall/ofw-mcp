@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
+import { z } from 'zod';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { OFWClient } from '../../src/client.js';
 import { registerExpenseTools } from '../../src/tools/expenses.js';
@@ -75,3 +76,21 @@ describe('ofw_create_expense', () => {
   });
 });
 
+
+describe('expense input schemas', () => {
+  it('rejects negative start and non-positive/fractional max', () => {
+    const server = new McpServer({ name: 'test', version: '0.0.0' });
+    const configs = new Map<string, { inputSchema?: z.ZodRawShape }>();
+    vi.spyOn(server, 'registerTool').mockImplementation((name: string, config: unknown, _cb: unknown) => {
+      configs.set(name, config as { inputSchema?: z.ZodRawShape });
+      return undefined as never;
+    });
+    registerExpenseTools(server, new OFWClient());
+
+    const schema = z.object(configs.get('ofw_list_expenses')!.inputSchema!);
+    expect(schema.safeParse({ start: -1 }).success).toBe(false);
+    expect(schema.safeParse({ max: 0 }).success).toBe(false);
+    expect(schema.safeParse({ max: 2.5 }).success).toBe(false);
+    expect(schema.safeParse({ start: 0, max: 20 }).success).toBe(true);
+  });
+});

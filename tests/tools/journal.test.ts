@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
+import { z } from 'zod';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { OFWClient } from '../../src/client.js';
 import { registerJournalTools } from '../../src/tools/journal.js';
@@ -60,3 +61,20 @@ describe('ofw_create_journal_entry', () => {
   });
 });
 
+
+describe('journal input schemas', () => {
+  it('rejects non-positive start/max (journal offsets are 1-based)', () => {
+    const server = new McpServer({ name: 'test', version: '0.0.0' });
+    const configs = new Map<string, { inputSchema?: z.ZodRawShape }>();
+    vi.spyOn(server, 'registerTool').mockImplementation((name: string, config: unknown, _cb: unknown) => {
+      configs.set(name, config as { inputSchema?: z.ZodRawShape });
+      return undefined as never;
+    });
+    registerJournalTools(server, new OFWClient());
+
+    const schema = z.object(configs.get('ofw_list_journal_entries')!.inputSchema!);
+    expect(schema.safeParse({ start: 0 }).success).toBe(false);
+    expect(schema.safeParse({ max: 0 }).success).toBe(false);
+    expect(schema.safeParse({ start: 1, max: 10 }).success).toBe(true);
+  });
+});

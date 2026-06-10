@@ -8,8 +8,8 @@ export function registerJournalTools(server: McpServer, client: OFWClient): void
     description: 'List OurFamilyWizard journal entries',
     annotations: { readOnlyHint: true },
     inputSchema: {
-      start: z.number().describe('Start offset (default 1)').optional(),
-      max: z.number().describe('Max results (default 10)').optional(),
+      start: z.number().int().min(1).describe('Start offset (default 1)').optional(),
+      max: z.number().int().min(1).describe('Max results (default 10)').optional(),
     },
   }, async (args) => {
     // Journal API uses 1-based offset (unlike expenses which start at 0)
