@@ -9,6 +9,9 @@
     "url": "git+https://github.com/chrischall/ofw-mcp.git"
   },
   "type": "module",
+  "engines": {
+    "node": ">=22.5.0"
+  },
   "bin": {
     "ofw-mcp": "dist/index.js"
   },
