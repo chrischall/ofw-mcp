@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { isAbsolute } from 'node:path';
-import { expandPath, jsonResponse, mapRecipients, textResponse } from '../../src/tools/_shared.js';
+import { expandPath, jsonResponse, mapRecipients, textResponse, verifyWriteLanded } from '../../src/tools/_shared.js';
 
 describe('jsonResponse', () => {
   it('wraps a payload as a single text content block with pretty-printed JSON', () => {
@@ -85,5 +85,35 @@ describe('expandPath', () => {
     // With HOME unset the join collapses to an absolute path starting at /
     // — the path stays absolute rather than becoming a relative one.
     expect(isAbsolute(expandPath('~/foo'))).toBe(true);
+  });
+});
+
+describe('verifyWriteLanded', () => {
+  const sent = { subject: 'Pickup time', body: 'I can do 3pm on Friday.' };
+
+  it('returns null when OFW echoes the content exactly', () => {
+    expect(verifyWriteLanded('message', sent, { ...sent })).toBeNull();
+  });
+
+  it('returns null when OFW transforms by containment (subject prefix, original appended to body)', () => {
+    expect(verifyWriteLanded('message', sent, {
+      subject: 'RE: Pickup time',
+      body: 'I can do 3pm on Friday.\n\n--- Original message ---\nCan you do Friday?',
+    })).toBeNull();
+  });
+
+  it('warns on subject mismatch only', () => {
+    const warning = verifyWriteLanded('draft', sent, { subject: 'something else', body: sent.body });
+    expect(warning).toMatch(/the draft re-fetched from OFW does not contain the subject that was posted/);
+  });
+
+  it('warns on body mismatch only', () => {
+    const warning = verifyWriteLanded('message', sent, { subject: sent.subject, body: 'dropped' });
+    expect(warning).toMatch(/the message re-fetched from OFW does not contain the body that was posted/);
+  });
+
+  it('warns on both when the detail carries neither field', () => {
+    const warning = verifyWriteLanded('message', sent, {});
+    expect(warning).toMatch(/does not contain the subject and body that was posted/);
   });
 });

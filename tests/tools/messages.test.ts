@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { z } from 'zod';
 import { mkdtempSync, rmSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -1639,13 +1640,16 @@ describe('messages.ts — attachment-backfill branches', () => {
       .rejects.toThrow(/requires subject, body\b/);
   });
 
-  it('send_message: re-fetched detail missing fields falls back to inputs', async () => {
+  it('send_message: re-fetched detail missing fields falls back to inputs and WARNs (unverifiable write)', async () => {
     const c = new OFWClient();
     vi.spyOn(c, 'request')
       .mockResolvedValueOnce({ entityId: 500 }) // POST
       .mockResolvedValueOnce({ id: 500 }); // GET bare detail → 290-294 fallbacks
     setup(c);
-    const out = JSON.parse((await handlers.get('ofw_send_message')!({ subject: 'S', body: 'B', recipientIds: [1] })).content[0].text);
+    const text = (await handlers.get('ofw_send_message')!({ subject: 'S', body: 'B', recipientIds: [1] })).content[0].text;
+    // A detail with neither subject nor body cannot confirm the write landed.
+    expect(text).toMatch(/^WARNING: the message re-fetched from OFW does not contain the subject and body/);
+    const out = JSON.parse(text.slice(text.indexOf('\n\n') + 2));
     expect(out.id).toBe(500);
     expect(out.subject).toBe('S'); // detail.subject ?? subject
     expect(out.fromUser).toBe(''); // detail.from?.name ?? ''
@@ -1683,6 +1687,87 @@ describe('messages.ts — attachment-backfill branches', () => {
     } finally {
       if (prev === undefined) delete process.env.OFW_ATTACHMENTS_DIR; else process.env.OFW_ATTACHMENTS_DIR = prev;
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('send/save write verification', () => {
+  it('send_message warns when the re-fetched message does not contain the posted body', async () => {
+    const client = new OFWClient();
+    sendMessageMocks(client, { entityId: 200, detail: { subject: 'Hi', body: 'completely different' } });
+    setup(client);
+    const text = (await handlers.get('ofw_send_message')!({
+      subject: 'Hi', body: 'my real text', recipientIds: [1],
+    })).content[0].text;
+    expect(text).toMatch(/^WARNING: the message re-fetched from OFW does not contain the body that was posted/);
+  });
+
+  it('send_message does not warn when OFW appends the original to a reply body (containment)', async () => {
+    const client = new OFWClient();
+    sendMessageMocks(client, { entityId: 201, detail: { subject: 'RE: Hi', body: 'my reply\n\n--- original ---' } });
+    setup(client);
+    const text = (await handlers.get('ofw_send_message')!({
+      subject: 'Hi', body: 'my reply', recipientIds: [1],
+    })).content[0].text;
+    expect(text).not.toContain('WARNING');
+  });
+
+  it('save_draft warns when the re-fetched draft does not contain the posted body', async () => {
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce({ entityId: 80 })
+      .mockResolvedValueOnce({ id: 80, subject: 'S', body: 'echoed-but-wrong', date: { dateTime: '2026-05-01T00:00:00Z' } });
+    setup(client);
+    const text = (await handlers.get('ofw_save_draft')!({ subject: 'S', body: 'intended body' })).content[0].text;
+    expect(text).toMatch(/WARNING: the draft re-fetched from OFW does not contain the body that was posted/);
+  });
+
+  it('save_draft does not warn when OFW echoes the draft faithfully', async () => {
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce({ entityId: 81 })
+      .mockResolvedValueOnce({ id: 81, subject: 'S', body: 'intended body', date: { dateTime: '2026-05-01T00:00:00Z' } });
+    setup(client);
+    const text = (await handlers.get('ofw_save_draft')!({ subject: 'S', body: 'intended body' })).content[0].text;
+    expect(text).not.toContain('WARNING');
+  });
+});
+
+describe('send_message draft preservation on unconfirmed send', () => {
+  it('keeps the draft and skips the DELETE when the POST response carries no id', async () => {
+    upsertDraft({
+      id: 70, subject: 'S', body: 'B',
+      recipients: [{ userId: 1, name: 'A', viewedAt: null }],
+      replyToId: null, modifiedAt: '2026-05-01T00:00:00Z', listData: {},
+    });
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request').mockResolvedValueOnce({ error: 'boom' }); // POST → no id
+    setup(client);
+
+    const text = (await handlers.get('ofw_send_message')!({ messageId: 70 })).content[0].text;
+
+    expect(getDraft(70)).not.toBeNull(); // draft survives
+    expect(spy).not.toHaveBeenCalledWith('DELETE', expect.anything(), expect.anything());
+    expect(text).toContain('Draft 70 was NOT deleted');
+  });
+});
+
+describe('pagination input schemas', () => {
+  it('rejects non-positive or fractional page/size on the cached list tools', () => {
+    const server = new McpServer({ name: 'test', version: '0.0.0' });
+    const configs = new Map<string, { inputSchema?: z.ZodRawShape }>();
+    vi.spyOn(server, 'registerTool').mockImplementation((name: string, config: unknown, _cb: unknown) => {
+      configs.set(name, config as { inputSchema?: z.ZodRawShape });
+      return undefined as never;
+    });
+    registerMessageTools(server, new OFWClient());
+
+    for (const tool of ['ofw_list_messages', 'ofw_list_drafts', 'ofw_get_unread_sent']) {
+      const schema = z.object(configs.get(tool)!.inputSchema!);
+      expect(schema.safeParse({ page: 0 }).success).toBe(false);
+      expect(schema.safeParse({ size: -1 }).success).toBe(false);
+      expect(schema.safeParse({ size: 1.5 }).success).toBe(false);
+      expect(schema.safeParse({ page: 1, size: 50 }).success).toBe(true);
     }
   });
 });

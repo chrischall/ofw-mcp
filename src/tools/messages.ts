@@ -13,7 +13,7 @@ import { getAttachmentsDir, getDefaultInlineAttachments } from '../config.js';
 import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, extname, join } from 'node:path';
 import { fileBlob } from '@chrischall/mcp-utils';
-import { expandPath, jsonResponse, mapRecipients, postMessageAndRefetch, textResponse, type ApiRecipient } from './_shared.js';
+import { expandPath, jsonResponse, mapRecipients, postMessageAndRefetch, textResponse, verifyWriteLanded, type ApiRecipient } from './_shared.js';
 
 // Lightweight mime sniff from extension. OFW re-derives mime from the filename
 // server-side anyway, so this is just a polite Content-Type for the Blob.
@@ -69,8 +69,8 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
     annotations: { readOnlyHint: true },
     inputSchema: {
       folderId: z.string().describe('Folder name: "inbox", "sent", or "both" (default "both")').optional(),
-      page: z.number().describe('Page number (default 1)').optional(),
-      size: z.number().describe('Messages per page (default 50)').optional(),
+      page: z.number().int().min(1).describe('Page number (default 1)').optional(),
+      size: z.number().int().min(1).describe('Messages per page (default 50)').optional(),
       since: z.string().describe('ISO date or datetime — only messages with sent_at >= since (inclusive)').optional(),
       until: z.string().describe('ISO date or datetime — only messages with sent_at < until (exclusive)').optional(),
       q: z.string().describe('Substring match on subject AND body (case-insensitive). Use to find messages on a specific topic.').optional(),
@@ -283,7 +283,9 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
     });
 
     let persisted: MessageRow | null = null;
+    let verifyNote: string | null = null;
     if (newId !== null) {
+      verifyNote = verifyWriteLanded('message', { subject, body }, detail);
       persisted = {
         id: newId,
         folder: 'sent',
@@ -315,22 +317,31 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
       }
     }
 
+    // Only clean up the draft once the send is confirmed (the POST response
+    // carried an id). On the unconfirmed path the draft is the user's only
+    // copy of the message — keep it.
+    let draftCleanupNote: string | null = null;
     if (draftRef !== undefined) {
-      await deleteOFWMessages(client, [draftRef]);
-      deleteDraft(draftRef);
+      if (newId !== null) {
+        await deleteOFWMessages(client, [draftRef]);
+        deleteDraft(draftRef);
+      } else {
+        draftCleanupNote = `WARNING: OFW's send response did not include a message id, so the send could not be confirmed. Draft ${draftRef} was NOT deleted — check ourfamilywizard.com to see whether the message went out before retrying.`;
+      }
     }
 
     const responseObj = persisted ?? raw;
     const text = responseObj ? JSON.stringify(responseObj, null, 2) : 'Message sent successfully.';
-    return textResponse(rewriteNote ? `${rewriteNote}\n\n${text}` : text);
+    const notes = [rewriteNote, verifyNote, draftCleanupNote].filter((n): n is string => n !== null).join('\n\n');
+    return textResponse(notes ? `${notes}\n\n${text}` : text);
   });
 
   server.registerTool('ofw_list_drafts', {
     description: 'List draft messages from the local OurFamilyWizard cache. Call ofw_sync_messages first if the cache is empty.',
     annotations: { readOnlyHint: true },
     inputSchema: {
-      page: z.number().describe('Page number (default 1)').optional(),
-      size: z.number().describe('Drafts per page (default 50)').optional(),
+      page: z.number().int().min(1).describe('Page number (default 1)').optional(),
+      size: z.number().int().min(1).describe('Drafts per page (default 50)').optional(),
     },
   }, async (args) => {
     const page = args.page ?? 1;
@@ -391,8 +402,10 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
 
     let persisted: DraftRow | null = null;
     let replaceNote: string | null = null;
+    let verifyNote: string | null = null;
 
     if (newId !== null) {
+      verifyNote = verifyWriteLanded('draft', { subject: args.subject, body: args.body }, detail);
       persisted = {
         id: newId,
         subject: detail.subject ?? args.subject,
@@ -419,7 +432,7 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
 
     const responseObj = persisted ?? raw;
     const text = responseObj ? JSON.stringify(responseObj, null, 2) : 'Draft saved.';
-    const notes = [rewriteNote, replaceNote].filter((n): n is string => n !== null).join('\n\n');
+    const notes = [rewriteNote, verifyNote, replaceNote].filter((n): n is string => n !== null).join('\n\n');
     return textResponse(notes ? `${notes}\n\n${text}` : text);
   });
 
@@ -439,8 +452,8 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
     description: 'List sent messages that have not been read by one or more recipients. Reads from local cache; call ofw_sync_messages first if cache is stale.',
     annotations: { readOnlyHint: true },
     inputSchema: {
-      page: z.number().describe('Page (default 1)').optional(),
-      size: z.number().describe('Per page (default 50)').optional(),
+      page: z.number().int().min(1).describe('Page (default 1)').optional(),
+      size: z.number().int().min(1).describe('Per page (default 50)').optional(),
     },
   }, async (args) => {
     const page = args.page ?? 1;
