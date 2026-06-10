@@ -31,8 +31,13 @@ export async function loginWithPassword(
     headers: { ...OFW_PROTOCOL_HEADERS },
     redirect: 'manual',
   });
-  const setCookie = initResponse.headers.get('set-cookie') ?? '';
-  const sessionCookie = setCookie.split(';')[0];
+  // headers.get('set-cookie') folds multiple Set-Cookie headers into one
+  // comma-joined string; getSetCookie() preserves them individually. Echo
+  // every cookie back (name=value only) so login keeps working if OFW ever
+  // sets cookies beyond SESSION.
+  const sessionCookie = initResponse.headers.getSetCookie()
+    .map((c) => c.split(';')[0])
+    .join('; ');
 
   // Step 2: submit the form.
   const response = await fetch(`${BASE_URL}/ofw/login`, {

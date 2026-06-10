@@ -19,7 +19,10 @@ function mockFetch(responses: MockResponse[]) {
       ok: r.status >= 200 && r.status < 300,
       status: r.status,
       statusText: String(r.status),
-      headers: { get: (key: string) => headerMap[key.toLowerCase()] ?? null },
+      headers: {
+        get: (key: string) => headerMap[key.toLowerCase()] ?? null,
+        getSetCookie: () => (headerMap['set-cookie'] ? [headerMap['set-cookie']] : []),
+      },
       json: async () => r.body,
       text: async () => JSON.stringify(r.body),
       arrayBuffer: async () => (r.bytes ?? new Uint8Array()).buffer,
@@ -314,7 +317,10 @@ describe('OFWClient', () => {
           // LOGIN_INIT
           return Promise.resolve({
             ok: false, status: 303, statusText: '303',
-            headers: { get: (k: string) => k.toLowerCase() === 'set-cookie' ? 'SESSION=x' : null },
+            headers: {
+              get: (k: string) => k.toLowerCase() === 'set-cookie' ? 'SESSION=x' : null,
+              getSetCookie: () => ['SESSION=x'],
+            },
             text: async () => '', json: async () => null,
           } as unknown as Response);
         }
@@ -322,7 +328,10 @@ describe('OFWClient', () => {
           // LOGIN_SUCCESS
           return Promise.resolve({
             ok: true, status: 200, statusText: '200',
-            headers: { get: (k: string) => k.toLowerCase() === 'content-type' ? 'application/json' : null },
+            headers: {
+              get: (k: string) => k.toLowerCase() === 'content-type' ? 'application/json' : null,
+              getSetCookie: () => [],
+            },
             text: async () => JSON.stringify({ auth: MOCK_TOKEN }),
             json: async () => ({ auth: MOCK_TOKEN }),
           } as unknown as Response);
@@ -417,14 +426,20 @@ describe('OFWClient', () => {
         if (call === 1) {
           return {
             ok: false, status: 303, statusText: '303',
-            headers: { get: (k: string) => k.toLowerCase() === 'set-cookie' ? 'SESSION=x' : null },
+            headers: {
+              get: (k: string) => k.toLowerCase() === 'set-cookie' ? 'SESSION=x' : null,
+              getSetCookie: () => ['SESSION=x'],
+            },
             text: async () => '', json: async () => null,
           } as unknown as Response;
         }
         if (call === 2) {
           return {
             ok: true, status: 200, statusText: '200',
-            headers: { get: (k: string) => k.toLowerCase() === 'content-type' ? 'application/json' : null },
+            headers: {
+              get: (k: string) => k.toLowerCase() === 'content-type' ? 'application/json' : null,
+              getSetCookie: () => [],
+            },
             text: async () => JSON.stringify({ auth: MOCK_TOKEN }),
             json: async () => ({ auth: MOCK_TOKEN }),
           } as unknown as Response;
@@ -468,14 +483,20 @@ describe('OFWClient', () => {
           if (call === 1) {
             return {
               ok: false, status: 303, statusText: '303',
-              headers: { get: (k: string) => k.toLowerCase() === 'set-cookie' ? 'SESSION=x' : null },
+              headers: {
+              get: (k: string) => k.toLowerCase() === 'set-cookie' ? 'SESSION=x' : null,
+              getSetCookie: () => ['SESSION=x'],
+            },
               text: async () => '', json: async () => null,
             } as unknown as Response;
           }
           if (call === 2) {
             return {
               ok: true, status: 200, statusText: '200',
-              headers: { get: (k: string) => k.toLowerCase() === 'content-type' ? 'application/json' : null },
+              headers: {
+              get: (k: string) => k.toLowerCase() === 'content-type' ? 'application/json' : null,
+              getSetCookie: () => [],
+            },
               text: async () => JSON.stringify({ auth: MOCK_TOKEN }),
               json: async () => ({ auth: MOCK_TOKEN }),
             } as unknown as Response;
@@ -582,14 +603,20 @@ describe('OFWClient', () => {
         if (call === 1) {
           return {
             ok: false, status: 303, statusText: '303',
-            headers: { get: (k: string) => k.toLowerCase() === 'set-cookie' ? 'SESSION=x' : null },
+            headers: {
+              get: (k: string) => k.toLowerCase() === 'set-cookie' ? 'SESSION=x' : null,
+              getSetCookie: () => ['SESSION=x'],
+            },
             text: async () => '', json: async () => null,
           } as unknown as Response;
         }
         if (call === 2) {
           return {
             ok: true, status: 200, statusText: '200',
-            headers: { get: (k: string) => k.toLowerCase() === 'content-type' ? 'application/json' : null },
+            headers: {
+              get: (k: string) => k.toLowerCase() === 'content-type' ? 'application/json' : null,
+              getSetCookie: () => [],
+            },
             text: async () => JSON.stringify({ auth: MOCK_TOKEN }),
             json: async () => ({ auth: MOCK_TOKEN }),
           } as unknown as Response;

@@ -5,6 +5,8 @@ interface MockResponse {
   status: number;
   body?: unknown;
   headers?: Record<string, string>;
+  /** Individual Set-Cookie headers, as Headers.getSetCookie() returns them. */
+  setCookies?: string[];
 }
 
 function mockFetch(responses: MockResponse[]) {
@@ -16,7 +18,11 @@ function mockFetch(responses: MockResponse[]) {
       ok: r.status >= 200 && r.status < 300,
       status: r.status,
       statusText: String(r.status),
-      headers: { get: (key: string) => headerMap[key.toLowerCase()] ?? null },
+      headers: {
+        get: (key: string) => headerMap[key.toLowerCase()] ?? null,
+        getSetCookie: () =>
+          r.setCookies ?? (headerMap['set-cookie'] ? [headerMap['set-cookie']] : []),
+      },
       json: async () => r.body,
       text: async () => (typeof r.body === 'string' ? r.body : JSON.stringify(r.body)),
     } as unknown as Response;
@@ -60,6 +66,16 @@ describe('loginWithPassword', () => {
     expect(postInit.body).toContain('username=me%40example.com');
     expect(postInit.body).toContain('password=pw');
     expect(postInit.body).toContain('submit=Sign+In');
+  });
+
+  it('echoes every cookie when init sets multiple Set-Cookie headers', async () => {
+    const spy = mockFetch([
+      { status: 303, setCookies: ['SESSION=abc; Path=/ofw; HttpOnly', 'XSRF-TOKEN=tok; Path=/'] },
+      { status: 200, body: { auth: 't' }, headers: { 'content-type': 'application/json' } },
+    ]);
+    await loginWithPassword('u', 'p');
+    const postHeaders = (spy.mock.calls[1][1] as RequestInit).headers as Record<string, string>;
+    expect(postHeaders.Cookie).toBe('SESSION=abc; XSRF-TOKEN=tok');
   });
 
   it('omits Cookie header when init returns no set-cookie', async () => {
