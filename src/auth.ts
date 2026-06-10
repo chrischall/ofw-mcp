@@ -83,9 +83,9 @@ function fetchproxyDisabled(): boolean {
  * Resolve OFW auth using the three-path priority described at the top of
  * this file. Throws with an actionable error message when no path succeeds.
  *
- * Callers (i.e. `OFWClient.login()`) treat the return value as opaque
- * credentials — they should not branch on `source`. The field exists for
- * logging / future cache-keying only.
+ * Callers (i.e. the `OFWClient` TokenManager refresh callback) treat the
+ * return value as opaque credentials — they should not branch on `source`.
+ * The field exists for logging / future cache-keying only.
  */
 export async function resolveAuth(): Promise<ResolvedAuth> {
   // ── Path 1: env-var credentials (unchanged from pre-fetchproxy behavior).
