@@ -211,9 +211,19 @@ interface DraftDetailResponse {
 export interface DraftSyncResult { synced: number }
 
 export async function syncDrafts(client: OFWClient, draftsFolderId: string): Promise<DraftSyncResult> {
-  const path = `/pub/v3/messages?folders=${encodeURIComponent(draftsFolderId)}&page=1&size=50&sort=date&sortDirection=desc`;
-  const list = await client.request<DraftListResponse>('GET', path);
-  const items = list.data ?? [];
+  // Walk every page. The reconciliation loop at the bottom deletes any
+  // cached draft that wasn't seen in the listing, so a partial walk would
+  // wrongly evict real drafts beyond the first page.
+  const items: DraftListItem[] = [];
+  let page = 1;
+  while (true) {
+    const path = `/pub/v3/messages?folders=${encodeURIComponent(draftsFolderId)}&page=${page}&size=50&sort=date&sortDirection=desc`;
+    const list = await client.request<DraftListResponse>('GET', path);
+    const pageItems = list.data ?? [];
+    items.push(...pageItems);
+    if (pageItems.length < 50) break;
+    page++;
+  }
   const seenIds = new Set<number>();
   let synced = 0;
 

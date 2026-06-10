@@ -358,6 +358,33 @@ describe('syncDrafts', () => {
     expect(listDraftIds()).toEqual([1]);
   });
 
+  it('paginates past a full first page so later-page drafts are synced, not evicted', async () => {
+    // A cached draft that OFW reports on page 2 — the old single-page sync
+    // would have treated it as "not seen" and deleted it.
+    upsertDraft({
+      id: 51, subject: 'Page-2 draft', body: 'stale-body',
+      recipients: [], replyToId: null,
+      modifiedAt: '2026-05-01T00:00:00Z', listData: {},
+    });
+
+    const page1 = Array.from({ length: 50 }, (_, i) => ({ id: i + 1 }));
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request').mockImplementation(async (_method, path) => {
+      const p = String(path);
+      if (p.includes('page=1&')) return draftListResponse(page1);
+      if (p.includes('page=2&')) return draftListResponse([{ id: 51 }]);
+      // detail fetch for every draft id
+      return { body: 'b', subject: 's', recipientIds: [] };
+    });
+
+    await syncDrafts(client, '333');
+
+    expect(getDraft(51)).not.toBeNull();
+    expect(listDraftIds()).toHaveLength(51);
+    const listCalls = spy.mock.calls.filter((c) => String(c[1]).includes('folders='));
+    expect(listCalls).toHaveLength(2); // page 1 (full) + page 2 (short → stop)
+  });
+
   it('updates a changed draft (different modifiedAt)', async () => {
     upsertDraft({
       id: 1, subject: 'Old', body: 'old-body',
