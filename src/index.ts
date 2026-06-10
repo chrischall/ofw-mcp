@@ -26,7 +26,7 @@ import { registerJournalTools } from './tools/journal.js';
 // always succeeds before any credential check runs.
 await runMcp({
   name: 'ofw',
-  version: '2.3.1', // x-release-please-version
+  version: '2.3.2', // x-release-please-version
   deps: client,
   tools: [
     registerUserTools,

@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.3.2](https://github.com/chrischall/ofw-mcp/compare/v2.3.1...v2.3.2) (2026-06-10)
+
+
+### Bug Fixes
+
+* restrict cache dir/db permissions to owner-only (0700/0600) ([#78](https://github.com/chrischall/ofw-mcp/issues/78)) ([5328567](https://github.com/chrischall/ofw-mcp/commit/53285674e4c835de6eb23f640c67d4f7670ba0c7))
+
+
+### Refactor
+
+* adopt shared TokenManager for the OFW bearer lifecycle ([#80](https://github.com/chrischall/ofw-mcp/issues/80)) ([d70cce2](https://github.com/chrischall/ofw-mcp/commit/d70cce20f0780f82492cd4c77332d2502cb8715d))
+
 ## [2.3.1](https://github.com/chrischall/ofw-mcp/compare/v2.3.0...v2.3.1) (2026-06-02)
 
 
