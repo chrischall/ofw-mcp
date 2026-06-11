@@ -15,14 +15,15 @@ jobs:
     #     runs; the label event fires the run, and pushes to an armed PR
     #     re-run via synchronize (label still present).
     #   - release-please PRs: deferred to the `release-ready` ship signal.
-    #   - BOT-authored PRs (dependabot): immediate CI on open/synchronize —
+    #   - BOT-authored PRs (dependabot): CI on EVERY event, unconditionally —
+    #     a label event must not gate them (upstream curtaincall#86 review) —
     #     bots never receive auto-review, so they'd otherwise merge with CI
     #     skipped (native auto-merge treats a skipped required check as
     #     satisfied).
     #   - non-pull_request runs (workflow_call / push) fall through unharmed.
     if: |
       github.event_name != 'pull_request' ||
-      (github.event.pull_request.user.type != 'User' && github.event.action != 'labeled') ||
+      github.event.pull_request.user.type != 'User' ||
       (
         (github.event.action != 'labeled' || github.event.label.name == 'release-ready' || github.event.label.name == 'ready-to-merge') &&
         (
