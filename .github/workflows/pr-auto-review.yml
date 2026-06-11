@@ -70,10 +70,10 @@ jobs:
       github.event.pull_request.draft == false &&
       github.event.pull_request.user.type == 'User' &&
       github.event.pull_request.head.repo.full_name == github.repository &&
-      !startsWith(github.event.pull_request.head.ref, 'release-please--') &&
-      !contains(github.event.pull_request.labels.*.name, 'autorelease: pending') &&
+      (!startsWith(github.event.pull_request.head.ref, 'release-please--') || contains(github.event.pull_request.labels.*.name, 'release-ready')) &&
+      (!contains(github.event.pull_request.labels.*.name, 'autorelease: pending') || contains(github.event.pull_request.labels.*.name, 'release-ready')) &&
       !contains(github.event.pull_request.labels.*.name, 'ready-to-merge') &&
-      (github.event.action != 'labeled' || github.event.label.name == 'review-with-opus')
+      (github.event.action != 'labeled' || github.event.label.name == 'review-with-opus' || github.event.label.name == 'release-ready')
     steps:
       - name: Apply auto-review label
         env:
