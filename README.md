@@ -1,5 +1,9 @@
 # OurFamilyWizard MCP
 
+[![CI](https://github.com/chrischall/ofw-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/chrischall/ofw-mcp/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/ofw-mcp)](https://www.npmjs.com/package/ofw-mcp)
+[![license](https://img.shields.io/npm/l/ofw-mcp)](LICENSE)
+
 A [Model Context Protocol](https://modelcontextprotocol.io) server that connects Claude to [OurFamilyWizard](https://www.ourfamilywizard.com), giving you natural-language access to your co-parenting messages, calendar, expenses, and journal.
 
 > [!WARNING]
