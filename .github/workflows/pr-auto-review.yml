@@ -70,10 +70,10 @@ jobs:
       github.event.pull_request.draft == false &&
       github.event.pull_request.user.type == 'User' &&
       github.event.pull_request.head.repo.full_name == github.repository &&
-      !startsWith(github.event.pull_request.head.ref, 'release-please--') &&
-      !contains(github.event.pull_request.labels.*.name, 'autorelease: pending') &&
+      (!startsWith(github.event.pull_request.head.ref, 'release-please--') || contains(github.event.pull_request.labels.*.name, 'release-ready')) &&
+      (!contains(github.event.pull_request.labels.*.name, 'autorelease: pending') || contains(github.event.pull_request.labels.*.name, 'release-ready')) &&
       !contains(github.event.pull_request.labels.*.name, 'ready-to-merge') &&
-      (github.event.action != 'labeled' || github.event.label.name == 'review-with-opus')
+      (github.event.action != 'labeled' || github.event.label.name == 'review-with-opus' || github.event.label.name == 'release-ready')
     steps:
       - name: Apply auto-review label
         env:
@@ -163,7 +163,11 @@ jobs:
           # example). In automation mode this is off by default; we enable
           # it so reviews are visibly "in flight" rather than appearing all
           # at once at the end.
-          track_progress: true
+          # EXCEPT on `labeled` events (the `release-ready` /
+          # `review-with-opus` triggers): the action only supports
+          # track_progress for opened/synchronize/ready_for_review/reopened
+          # and hard-errors on anything else, killing the review.
+          track_progress: ${{ github.event.action != 'labeled' }}
           claude_args: |
             --model ${{ steps.model.outputs.model }}
             --json-schema '{"type":"object","required":["verdict","summary","important_findings"],"properties":{"verdict":{"enum":["pass","warn","fail"]},"summary":{"type":"string"},"important_findings":{"type":"array","items":{"type":"string"}}}}'

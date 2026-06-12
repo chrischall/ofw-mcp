@@ -1,5 +1,9 @@
 # OurFamilyWizard MCP
 
+[![CI](https://github.com/chrischall/ofw-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/chrischall/ofw-mcp/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/ofw-mcp)](https://www.npmjs.com/package/ofw-mcp)
+[![license](https://img.shields.io/npm/l/ofw-mcp)](LICENSE)
+
 A [Model Context Protocol](https://modelcontextprotocol.io) server that connects Claude to [OurFamilyWizard](https://www.ourfamilywizard.com), giving you natural-language access to your co-parenting messages, calendar, expenses, and journal.
 
 > [!WARNING]
@@ -122,28 +126,40 @@ OFW_USERNAME=you@example.com OFW_PASSWORD=yourpass node dist/index.js
 
 ## Available tools
 
-Read-only tools run automatically. Write tools ask for your confirmation first.
+Read-only tools run automatically. Write tools ask for your confirmation first. The *Write mode* column shows the minimum `OFW_WRITE_MODE` a tool needs to be available at all — see [Write protection](#write-protection-ofw_write_mode) below.
 
-| Tool | What it does | Permission |
-|------|-------------|------------|
-| `ofw_get_profile` | Your profile and co-parent info | Auto |
-| `ofw_get_notifications` | Dashboard counts (unread messages, upcoming events, outstanding expenses) | Auto |
-| `ofw_list_message_folders` | Folders with unread counts — **get folder IDs here before listing messages** | Auto |
-| `ofw_list_messages` | Messages in a folder | Auto |
-| `ofw_get_message` | Full content of a single message | Auto |
-| `ofw_send_message` | Send a message | Confirm |
-| `ofw_list_drafts` | Draft messages | Auto |
-| `ofw_save_draft` | Create or update a draft | Confirm |
-| `ofw_delete_draft` | Delete a draft | Confirm |
-| `ofw_list_events` | Calendar events in a date range | Auto |
-| `ofw_create_event` | Create a calendar event | Confirm |
-| `ofw_update_event` | Update a calendar event | Confirm |
-| `ofw_delete_event` | Delete a calendar event | Confirm |
-| `ofw_get_expense_totals` | Expense summary totals | Auto |
-| `ofw_list_expenses` | Expense history | Auto |
-| `ofw_create_expense` | Log a new expense | Confirm |
-| `ofw_list_journal_entries` | Journal entries | Auto |
-| `ofw_create_journal_entry` | Create a journal entry | Confirm |
+| Tool | What it does | Permission | Write mode |
+|------|-------------|------------|------------|
+| `ofw_get_profile` | Your profile and co-parent info | Auto | any |
+| `ofw_get_notifications` | Dashboard counts (unread messages, upcoming events, outstanding expenses) | Auto | any |
+| `ofw_list_message_folders` | Folders with unread counts — **get folder IDs here before listing messages** | Auto | any |
+| `ofw_list_messages` | Messages in a folder | Auto | any |
+| `ofw_get_message` | Full content of a single message | Auto | any |
+| `ofw_send_message` | Send a message | Confirm | `all` |
+| `ofw_list_drafts` | Draft messages | Auto | any |
+| `ofw_save_draft` | Create or update a draft | Confirm | `drafts` |
+| `ofw_delete_draft` | Delete a draft | Confirm | `drafts` |
+| `ofw_list_events` | Calendar events in a date range | Auto | any |
+| `ofw_create_event` | Create a calendar event | Confirm | `all` |
+| `ofw_update_event` | Update a calendar event | Confirm | `all` |
+| `ofw_delete_event` | Delete a calendar event | Confirm | `all` |
+| `ofw_get_expense_totals` | Expense summary totals | Auto | any |
+| `ofw_list_expenses` | Expense history | Auto | any |
+| `ofw_create_expense` | Log a new expense | Confirm | `all` |
+| `ofw_list_journal_entries` | Journal entries | Auto | any |
+| `ofw_create_journal_entry` | Create a journal entry | Confirm | `all` |
+
+### Write protection (`OFW_WRITE_MODE`)
+
+The "Confirm" permission above is a *hint* to the MCP host — a host configured to auto-approve tools (or a user who clicked "always allow" once) would leave nothing between model output and a sent message. Because OurFamilyWizard is a court-of-record platform, the server also supports a structural gate: set `OFW_WRITE_MODE` in the server's `env` block and tools above your chosen level are **never registered**, so no host setting or prompt-injected instruction can invoke them.
+
+| `OFW_WRITE_MODE` | What's available |
+|------------------|------------------|
+| `none` | Read/sync/search only. No write tools exist. |
+| `drafts` | Adds draft-level writes: `ofw_save_draft`, `ofw_delete_draft`, `ofw_upload_attachment`. Nothing that lands on the court-visible record — the AI prepares, only a human signed into the OFW web UI can send. |
+| `all` | Everything (the default — fully backward compatible). |
+
+Unrecognized values fail closed to `none`, with a warning on stderr — a typo never silently grants write access.
 
 ## Troubleshooting
 

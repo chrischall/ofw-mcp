@@ -9,7 +9,7 @@ import {
   getDraft,
   type MessageRow, type DraftRow,
 } from '../cache.js';
-import { getAttachmentsDir, getDefaultInlineAttachments } from '../config.js';
+import { getAttachmentsDir, getDefaultInlineAttachments, getWriteMode } from '../config.js';
 import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, extname, join } from 'node:path';
 import { fileBlob } from '@chrischall/mcp-utils';
@@ -56,6 +56,14 @@ function listDataHintsAtFiles(listData: unknown): boolean {
 }
 
 export function registerMessageTools(server: McpServer, client: OFWClient): void {
+  // OFW_WRITE_MODE gate (see config.ts). Send lands on the court-visible
+  // record, so it is 'all'-only; draft-level writes (save/delete drafts,
+  // upload attachments) also register under 'drafts'. Read/sync/download
+  // tools always register.
+  const writeMode = getWriteMode();
+  const allowSend = writeMode === 'all';
+  const allowDrafts = writeMode !== 'none';
+
   server.registerTool('ofw_list_message_folders', {
     description: 'List OurFamilyWizard message folders (inbox, sent, etc.) and their unread counts. Returns folder IDs needed to call ofw_list_messages. Does NOT return message content.',
     annotations: { readOnlyHint: true },
@@ -194,7 +202,7 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
     return jsonResponse({ ...row, attachments });
   });
 
-  server.registerTool('ofw_send_message', {
+  if (allowSend) server.registerTool('ofw_send_message', {
     description: 'Send a message via OurFamilyWizard. To send an existing draft, pass messageId — subject/body/recipientIds become optional overrides (missing fields default to the draft\'s cached values) and the draft is deleted after sending. To send a fresh message, supply subject/body/recipientIds directly. draftId is the legacy spelling of messageId and works the same way. If replyToId is provided, the cache may rewrite it to the latest reply in the same thread (a note is included in the response when this happens). Attach files by passing their fileIds (from ofw_upload_attachment) in myFileIDs. After sending, the tool re-fetches the message from OFW to populate the local cache and link attachments to the new message id.',
     annotations: { destructiveHint: true },
     inputSchema: {
@@ -353,7 +361,7 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
     return jsonResponse(payload);
   });
 
-  server.registerTool('ofw_save_draft', {
+  if (allowDrafts) server.registerTool('ofw_save_draft', {
     description: 'Save a message as a draft in OurFamilyWizard. Recipients are optional. Pass messageId to replace an existing draft — note that under the hood this creates a NEW draft and deletes the old one (OFW\'s update-in-place endpoint silently no-ops while echoing the posted body, so we don\'t use it); the response.id will be the NEW id, not the messageId you passed, and the change is documented in a transparency NOTE in the response. If replyToId is provided, the cache may rewrite it to the latest reply in the thread (note included in response). Attach files by passing their fileIds (from ofw_upload_attachment) in myFileIDs. After saving, the tool re-fetches the draft from OFW to populate the local cache from authoritative server state.',
     annotations: { readOnlyHint: false },
     inputSchema: {
@@ -436,7 +444,7 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
     return textResponse(notes ? `${notes}\n\n${text}` : text);
   });
 
-  server.registerTool('ofw_delete_draft', {
+  if (allowDrafts) server.registerTool('ofw_delete_draft', {
     description: 'Delete a draft message from OurFamilyWizard. Also removes the draft from the local cache.',
     annotations: { destructiveHint: true },
     inputSchema: {
@@ -478,7 +486,7 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
     return jsonResponse(unread);
   });
 
-  server.registerTool('ofw_upload_attachment', {
+  if (allowDrafts) server.registerTool('ofw_upload_attachment', {
     description: 'Upload a local file to OurFamilyWizard\'s "My Files" so it can be attached to a message. Returns the fileId — pass that to ofw_send_message or ofw_save_draft in myFileIDs to attach it. The file is uploaded as PRIVATE (visible only to you) by default; pass shareClass:"SHARED" to share with co-parents directly via the My Files area.',
     annotations: { destructiveHint: false },
     inputSchema: {

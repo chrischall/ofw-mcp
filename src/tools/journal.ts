@@ -2,8 +2,12 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import type { OFWClient } from '../client.js';
 import { jsonResponse } from './_shared.js';
+import { getWriteMode } from '../config.js';
 
 export function registerJournalTools(server: McpServer, client: OFWClient): void {
+  // Journal writes land on the court-visible record — OFW_WRITE_MODE 'all' only.
+  const allowWrites = getWriteMode() === 'all';
+
   server.registerTool('ofw_list_journal_entries', {
     description: 'List OurFamilyWizard journal entries',
     annotations: { readOnlyHint: true },
@@ -19,7 +23,7 @@ export function registerJournalTools(server: McpServer, client: OFWClient): void
     return jsonResponse(data);
   });
 
-  server.registerTool('ofw_create_journal_entry', {
+  if (allowWrites) server.registerTool('ofw_create_journal_entry', {
     description: 'Create a new journal entry in OurFamilyWizard',
     annotations: { destructiveHint: false },
     inputSchema: {

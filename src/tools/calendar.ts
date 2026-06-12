@@ -2,8 +2,12 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import type { OFWClient } from '../client.js';
 import { jsonResponse, textResponse } from './_shared.js';
+import { getWriteMode } from '../config.js';
 
 export function registerCalendarTools(server: McpServer, client: OFWClient): void {
+  // Calendar writes land on the court-visible record — OFW_WRITE_MODE 'all' only.
+  const allowWrites = getWriteMode() === 'all';
+
   server.registerTool('ofw_list_events', {
     description: 'List OurFamilyWizard calendar events in a date range',
     annotations: { readOnlyHint: true },
@@ -21,7 +25,7 @@ export function registerCalendarTools(server: McpServer, client: OFWClient): voi
     return jsonResponse(data);
   });
 
-  server.registerTool('ofw_create_event', {
+  if (allowWrites) server.registerTool('ofw_create_event', {
     description: 'Create a calendar event in OurFamilyWizard',
     annotations: { destructiveHint: false },
     inputSchema: {
@@ -42,7 +46,7 @@ export function registerCalendarTools(server: McpServer, client: OFWClient): voi
     return jsonResponse(data);
   });
 
-  server.registerTool('ofw_update_event', {
+  if (allowWrites) server.registerTool('ofw_update_event', {
     description: 'Update an existing OurFamilyWizard calendar event',
     annotations: { destructiveHint: true },
     inputSchema: {
@@ -61,7 +65,7 @@ export function registerCalendarTools(server: McpServer, client: OFWClient): voi
     return jsonResponse(data);
   });
 
-  server.registerTool('ofw_delete_event', {
+  if (allowWrites) server.registerTool('ofw_delete_event', {
     description: 'Delete an OurFamilyWizard calendar event',
     annotations: { destructiveHint: true },
     inputSchema: {
