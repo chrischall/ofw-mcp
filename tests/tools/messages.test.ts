@@ -773,14 +773,21 @@ describe('ofw_send_message with messageId (send-existing-draft)', () => {
 
 describe('ofw_save_draft', () => {
   it('creates a new draft without messageId', async () => {
-    const client = makeClient({ entityId: 42 });
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce({ entityId: 42 })                       // POST → new id
+      .mockResolvedValueOnce({                                        // GET detail (faithful echo)
+        id: 42, subject: 'Draft subject', body: 'Draft body',
+        date: { dateTime: '2026-05-04T00:00:00Z' },
+      });
     setup(client);
 
-    await handlers.get('ofw_save_draft')!({
+    const text = (await handlers.get('ofw_save_draft')!({
       subject: 'Draft subject',
       body: 'Draft body',
-    });
+    })).content[0].text;
 
+    expect(text).not.toContain('WARNING');
     expect(client.request).toHaveBeenCalledWith('POST', '/pub/v3/messages', {
       subject: 'Draft subject',
       body: 'Draft body',
@@ -793,15 +800,22 @@ describe('ofw_save_draft', () => {
   });
 
   it('sets includeOriginal true when replyToId is provided', async () => {
-    const client = makeClient({ entityId: 42 });
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce({ entityId: 42 })                       // POST → new id
+      .mockResolvedValueOnce({                                        // GET detail (faithful echo)
+        id: 42, subject: 'Re: pickup', body: 'Draft reply body',
+        date: { dateTime: '2026-05-04T00:00:00Z' }, replyToId: 55,
+      });
     setup(client);
 
-    await handlers.get('ofw_save_draft')!({
+    const text = (await handlers.get('ofw_save_draft')!({
       subject: 'Re: pickup',
       body: 'Draft reply body',
       replyToId: 55,
-    });
+    })).content[0].text;
 
+    expect(text).not.toContain('WARNING');
     expect(client.request).toHaveBeenCalledWith('POST', '/pub/v3/messages', {
       subject: 'Re: pickup',
       body: 'Draft reply body',
@@ -1656,12 +1670,13 @@ describe('messages.ts — attachment-backfill branches', () => {
     expect(out.body).toBe('B'); // detail.body ?? body
   });
 
-  it('send_message: POST with no id returns the generic success message', async () => {
+  it('send_message: POST with no id falls back to the generic text plus an unconfirmed-send warning', async () => {
     const c = new OFWClient();
-    vi.spyOn(c, 'request').mockResolvedValueOnce(null); // raw falsy, id null → 324[1]
+    vi.spyOn(c, 'request').mockResolvedValueOnce(null); // raw falsy, id null
     setup(c);
     const text = (await handlers.get('ofw_send_message')!({ subject: 'S', body: 'B', recipientIds: [1] })).content[0].text;
-    expect(text).toBe('Message sent successfully.');
+    expect(text).toContain("WARNING: OFW's send response did not include a message id");
+    expect(text).toContain('Message sent successfully.');
   });
 
   it('save_draft: POST with no id returns the generic saved message', async () => {
@@ -1722,6 +1737,20 @@ describe('send/save write verification', () => {
     expect(text).toMatch(/WARNING: the draft re-fetched from OFW does not contain the body that was posted/);
   });
 
+  it('save_draft warns and falls back to posted values when the re-fetched detail is sparse', async () => {
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce({ entityId: 82 })
+      .mockResolvedValueOnce({ id: 82 }); // detail missing subject/body/date entirely
+    setup(client);
+    const text = (await handlers.get('ofw_save_draft')!({ subject: 'S', body: 'B' })).content[0].text;
+    expect(text).toMatch(/WARNING: the draft re-fetched from OFW does not contain the subject and body/);
+    // Cache row falls back to the posted subject and an empty body.
+    const cached = getDraft(82)!;
+    expect(cached.subject).toBe('S');
+    expect(cached.body).toBe('');
+  });
+
   it('save_draft does not warn when OFW echoes the draft faithfully', async () => {
     const client = new OFWClient();
     vi.spyOn(client, 'request')
@@ -1749,6 +1778,19 @@ describe('send_message draft preservation on unconfirmed send', () => {
     expect(getDraft(70)).not.toBeNull(); // draft survives
     expect(spy).not.toHaveBeenCalledWith('DELETE', expect.anything(), expect.anything());
     expect(text).toContain('Draft 70 was NOT deleted');
+  });
+
+  it('warns about the unconfirmed send even when no draft was involved', async () => {
+    const client = new OFWClient();
+    vi.spyOn(client, 'request').mockResolvedValueOnce({ error: 'boom' }); // POST → no id
+    setup(client);
+
+    const text = (await handlers.get('ofw_send_message')!({
+      subject: 'Hi', body: 'B', recipientIds: [1],
+    })).content[0].text;
+
+    expect(text).toContain("WARNING: OFW's send response did not include a message id");
+    expect(text).not.toContain('NOT deleted'); // no draft in play
   });
 });
 

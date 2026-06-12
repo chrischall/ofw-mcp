@@ -328,19 +328,20 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
     // Only clean up the draft once the send is confirmed (the POST response
     // carried an id). On the unconfirmed path the draft is the user's only
     // copy of the message — keep it.
-    let draftCleanupNote: string | null = null;
-    if (draftRef !== undefined) {
-      if (newId !== null) {
-        await deleteOFWMessages(client, [draftRef]);
-        deleteDraft(draftRef);
-      } else {
-        draftCleanupNote = `WARNING: OFW's send response did not include a message id, so the send could not be confirmed. Draft ${draftRef} was NOT deleted — check ourfamilywizard.com to see whether the message went out before retrying.`;
-      }
+    let unconfirmedNote: string | null = null;
+    if (newId === null) {
+      const draftClause = draftRef !== undefined
+        ? `Draft ${draftRef} was NOT deleted — check`
+        : 'Check';
+      unconfirmedNote = `WARNING: OFW's send response did not include a message id, so the send could not be confirmed. ${draftClause} ourfamilywizard.com to see whether the message went out before retrying.`;
+    } else if (draftRef !== undefined) {
+      await deleteOFWMessages(client, [draftRef]);
+      deleteDraft(draftRef);
     }
 
     const responseObj = persisted ?? raw;
     const text = responseObj ? JSON.stringify(responseObj, null, 2) : 'Message sent successfully.';
-    const notes = [rewriteNote, verifyNote, draftCleanupNote].filter((n): n is string => n !== null).join('\n\n');
+    const notes = [rewriteNote, verifyNote, unconfirmedNote].filter((n): n is string => n !== null).join('\n\n');
     return textResponse(notes ? `${notes}\n\n${text}` : text);
   });
 

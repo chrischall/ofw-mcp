@@ -33,23 +33,6 @@ export function mapRecipients(items: ApiRecipient[] | undefined | null): Recipie
 export const expandPath = expandPathUtil;
 
 /**
- * POST a payload to /pub/v3/messages, then immediately GET the detail
- * endpoint for the resulting message id. This is the only correct way to
- * populate the cache after `ofw_send_message` or `ofw_save_draft`:
- *
- *  - OFW's POST response is minimal (typically just `{entityId: <id>}`
- *    or sometimes legacy `{id: <id>}`), so we can't build a full row
- *    from it directly.
- *  - Worse, on draft updates OFW returns the same success shape even
- *    when the server silently no-ops, so the GET is also how we verify
- *    the write landed (callers compare detail.body to args.body).
- *
- * Returns a discriminated union so callers can narrow with
- * `if (result.id !== null)`. When id is null (no id field in the
- * response — never observed in production, but defensive), `raw`
- * carries the POST response so the caller can still surface it.
- */
-/**
  * Best-effort check that OFW actually persisted what we posted. OFW's
  * draft-update path is known to silently no-op while echoing success in the
  * POST response, so callers re-GET the detail and compare it to what was
@@ -75,6 +58,23 @@ export function verifyWriteLanded(
   return `WARNING: the ${kind} re-fetched from OFW does not contain the ${mismatches.join(' and ')} that was posted — OFW may have silently dropped or altered the write. Verify the ${kind} on ourfamilywizard.com before relying on it.`;
 }
 
+/**
+ * POST a payload to /pub/v3/messages, then immediately GET the detail
+ * endpoint for the resulting message id. This is the only correct way to
+ * populate the cache after `ofw_send_message` or `ofw_save_draft`:
+ *
+ *  - OFW's POST response is minimal (typically just `{entityId: <id>}`
+ *    or sometimes legacy `{id: <id>}`), so we can't build a full row
+ *    from it directly.
+ *  - Worse, on draft updates OFW returns the same success shape even
+ *    when the server silently no-ops, so the GET is also how we verify
+ *    the write landed (callers compare detail.body to args.body).
+ *
+ * Returns a discriminated union so callers can narrow with
+ * `if (result.id !== null)`. When id is null (no id field in the
+ * response — never observed in production, but defensive), `raw`
+ * carries the POST response so the caller can still surface it.
+ */
 export async function postMessageAndRefetch<TDetail>(
   client: OFWClient,
   payload: unknown,
