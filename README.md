@@ -135,10 +135,14 @@ Read-only tools run automatically. Write tools ask for your confirmation first. 
 | `ofw_list_message_folders` | Folders with unread counts — **get folder IDs here before listing messages** | Auto | any |
 | `ofw_list_messages` | Messages in a folder | Auto | any |
 | `ofw_get_message` | Full content of a single message | Auto | any |
+| `ofw_sync_messages` | Sync messages into the local cache (unread bodies left unfetched to avoid read receipts) | Auto | any |
+| `ofw_get_unread_sent` | Sent messages a recipient hasn't read yet (from local cache) | Auto | any |
+| `ofw_download_attachment` | Download a message attachment to disk (or inline as MCP content) | Auto | any |
 | `ofw_send_message` | Send a message | Confirm | `all` |
 | `ofw_list_drafts` | Draft messages | Auto | any |
 | `ofw_save_draft` | Create or update a draft | Confirm | `drafts` |
 | `ofw_delete_draft` | Delete a draft | Confirm | `drafts` |
+| `ofw_upload_attachment` | Upload a local file to My Files; returns a fileId to attach via `ofw_send_message`/`ofw_save_draft` | Auto | `drafts` |
 | `ofw_list_events` | Calendar events in a date range | Auto | any |
 | `ofw_create_event` | Create a calendar event | Confirm | `all` |
 | `ofw_update_event` | Update a calendar event | Confirm | `all` |
