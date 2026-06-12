@@ -1,5 +1,25 @@
 # Changelog
 
+## [2.4.0](https://github.com/chrischall/ofw-mcp/compare/v2.3.2...v2.4.0) (2026-06-12)
+
+
+### Features
+
+* OFW_WRITE_MODE gate (none/drafts/all) for structural write protection ([#90](https://github.com/chrischall/ofw-mcp/issues/90)) ([383adec](https://github.com/chrischall/ofw-mcp/commit/383adecb7d5b3fad2e99fd986a03c8291ded1ce4))
+* runtime validation of OFW API responses at the client boundary ([#92](https://github.com/chrischall/ofw-mcp/issues/92)) ([a9caead](https://github.com/chrischall/ofw-mcp/commit/a9caeadbb29f64b328dfe81afb56460a5e4ad29d))
+
+
+### Bug Fixes
+
+* bot PRs bypass the CI gate unconditionally (upstream curtaincall[#86](https://github.com/chrischall/ofw-mcp/issues/86) review) ([#86](https://github.com/chrischall/ofw-mcp/issues/86)) ([f02c04a](https://github.com/chrischall/ofw-mcp/commit/f02c04a12c9fb25d9dfd1bdc2ab71a4c24738b5e))
+* verify send/draft writes landed, paginate drafts sync, validate pagination inputs ([#81](https://github.com/chrischall/ofw-mcp/issues/81)) ([63804e6](https://github.com/chrischall/ofw-mcp/commit/63804e6ac7aa078c795cc2b403dc8be1a3c7265f))
+
+
+### Documentation
+
+* add missing tools to the README table (sync, unread-sent, attachments) ([#91](https://github.com/chrischall/ofw-mcp/issues/91)) ([eefb2c9](https://github.com/chrischall/ofw-mcp/commit/eefb2c9b5522e8d57bec3580db8c8c3b1880869c))
+* declare MIT license and add README badges ([#88](https://github.com/chrischall/ofw-mcp/issues/88)) ([adfc3ea](https://github.com/chrischall/ofw-mcp/commit/adfc3ea6eccb7c0cb1ce099a8ed95f6c327a0104))
+
 ## [2.3.2](https://github.com/chrischall/ofw-mcp/compare/v2.3.1...v2.3.2) (2026-06-10)
 
 
