@@ -1,258 +1,35 @@
 name: PR auto-review
 
-# On every non-draft, same-repo, human-authored PR this workflow:
-#
-#  1. Applies the `auto-review` label.
-#  2. Requests GitHub Copilot as a reviewer (best-effort).
-#  3. Runs claude-code-action with a JSON-schema-bound verdict:
-#       pass | warn | fail
-#     Claude posts findings (as claude[bot] via the installed Claude App)
-#     and emits the verdict to `structured_output`.
-#  4. On `verdict == pass`, adds the `ready-to-merge` label using
-#     RELEASE_PAT, which arms auto-merge.yml. `warn` and `fail` never
-#     auto-arm — those keep a human in the loop.
-#
-# Why `pull_request` (not `pull_request_target`):
-# Anthropic's GitHub App OIDC backend has an event-name allowlist that
-# rejects `pull_request_target` (see anthropics/claude-code-action#713),
-# so that trigger would force a `github_token`-override workaround and
-# comments would be authored by `github-actions[bot]` instead of
-# `claude[bot]`. `pull_request` is the documented supported event for
-# automated PR review with the installed App.
-#
-# Tradeoff: fork PRs cannot be auto-reviewed (`pull_request` from a fork
-# has no access to secrets). For those rare cases, `@claude review this`
-# in a PR comment triggers the existing `claude.yml` flow as a manual
-# fallback.
-#
-# The `head.repo == github.repository` guard is belt-and-braces: even on
-# `pull_request`, GITHUB_TOKEN is read-only for fork PRs, so the label-
-# add step would fail. The guard skips the entire job cleanly for forks.
-#
-# Bot-authored PRs (dependabot/renovate/etc.) are skipped via the
-# `user.type == 'User'` filter — those go straight to CI + auto-merge.
-#
-# PRs that already carry `ready-to-merge` are skipped — they've passed
-# review once and are armed for auto-merge, so re-reviewing on a follow-up
-# `synchronize` (or unrelated label change) just burns quota.
-#
-# Release-please PRs are skipped via the `autorelease: pending` label
-# filter so they stay open as long-lived staging artifacts. release-
-# please updates the same PR as more fix:/feat: commits land; you add
-# `ready-to-merge` manually when you decide it's time to ship a batch.
-#
-# `ready-to-merge` MUST be added via RELEASE_PAT, not GITHUB_TOKEN.
-# GitHub suppresses workflow runs for `GITHUB_TOKEN`-triggered events,
-# so a label added that way would not fire auto-merge.yml.
+# Thin stub — the pipeline lives in chrischall/workflows.
 
 on:
   pull_request:
-    # `labeled` is included so adding `review-with-opus` forces a
-    # re-review with Opus. The job filter scopes that re-fire to *just*
-    # that label so unrelated label changes (auto-review, ready-to-merge,
-    # etc.) don't trigger redundant reviews.
     types: [opened, reopened, ready_for_review, synchronize, labeled]
 
 permissions:
   contents: read
   pull-requests: write
   issues: write
-  id-token: write       # Required for the Claude App OIDC token exchange
+  id-token: write
 
+# `labeled` events get their own group keyed by label name: opening a PR
+# with --label fires `opened`+`labeled` back-to-back, and a shared group
+# would let the labeled event displace the queued review, leaving the PR
+# with no verdict and no label.
 concurrency:
-  group: pr-auto-review-${{ github.event.pull_request.number }}
+  group: |
+    pr-auto-review-${{ github.event.pull_request.number }}${{
+      github.event.action == 'labeled'
+        && format('-labeled-{0}', github.event.label.name)
+        || ''
+    }}
   cancel-in-progress: false
 
 jobs:
   review:
-    runs-on: ubuntu-latest
-    if: |
-      github.event.pull_request.draft == false &&
-      github.event.pull_request.user.type == 'User' &&
-      github.event.pull_request.head.repo.full_name == github.repository &&
-      (!startsWith(github.event.pull_request.head.ref, 'release-please--') || contains(github.event.pull_request.labels.*.name, 'release-ready')) &&
-      (!contains(github.event.pull_request.labels.*.name, 'autorelease: pending') || contains(github.event.pull_request.labels.*.name, 'release-ready')) &&
-      !contains(github.event.pull_request.labels.*.name, 'ready-to-merge') &&
-      (github.event.action != 'labeled' || github.event.label.name == 'review-with-opus' || github.event.label.name == 'release-ready')
-    steps:
-      - name: Apply auto-review label
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR: ${{ github.event.pull_request.number }}
-          REPO: ${{ github.repository }}
-        run: gh pr edit "$PR" --repo "$REPO" --add-label auto-review
-
-      - name: Request Copilot reviewer
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR: ${{ github.event.pull_request.number }}
-          REPO: ${{ github.repository }}
-        run: |
-          # Copilot code-review surfaces as the `Copilot` user (sometimes
-          # `copilot-pull-request-reviewer[bot]`). The REST endpoint accepts
-          # the bare login. If the repo/org doesn't have Copilot review
-          # enabled, this returns 422 — swallow that so the rest of the
-          # workflow still succeeds.
-          if gh api --method POST \
-              "/repos/${REPO}/pulls/${PR}/requested_reviewers" \
-              -f 'reviewers[]=Copilot' 2>/tmp/copilot.err; then
-            echo "Requested Copilot as reviewer."
-          else
-            echo "Could not request Copilot reviewer (likely not enabled):"
-            cat /tmp/copilot.err
-          fi
-
-      - name: Checkout PR
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 1
-
-      - name: Pick model by PR size (or label override)
-        id: model
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR: ${{ github.event.pull_request.number }}
-          REPO: ${{ github.repository }}
-          HAS_OPUS_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'review-with-opus') }}
-        run: |
-          # The Claude CLI's default is `claude-opus-4-7[1m]` — the 1M
-          # context Opus tier, the priciest model. For most PRs that's
-          # overkill. Three-tier ladder by additions+deletions, with a
-          # `review-with-opus` label as a manual escalation knob:
-          #
-          #   `review-with-opus` label present  →  Opus 4.7    (forced)
-          #   ≤50 lines                         →  Haiku 4.5   (~$0.01/PR)
-          #   51-500 lines                      →  Sonnet 4.6  (~$0.05/PR)
-          #   >500 lines                        →  Opus 4.7    (~$0.26/PR)
-          #
-          # Never the [1m] variant — our codebase + diff is well under
-          # 200k tokens. If Sonnet starts missing subtle issues on small
-          # PRs, lower the 500 threshold; if Haiku flags too many false
-          # positives or misses real ones, raise the 50 threshold (or drop
-          # the Haiku tier entirely).
-          CHANGED=$(gh api "/repos/${REPO}/pulls/${PR}" --jq '.additions + .deletions')
-          if [ "$HAS_OPUS_LABEL" = "true" ]; then
-            MODEL="claude-opus-4-7"
-            REASON="\`review-with-opus\` label (forced)"
-          elif [ "$CHANGED" -le 50 ]; then
-            MODEL="claude-haiku-4-5"
-            REASON="${CHANGED} lines (≤50, trivial)"
-          elif [ "$CHANGED" -le 500 ]; then
-            MODEL="claude-sonnet-4-6"
-            REASON="${CHANGED} lines (51-500)"
-          else
-            MODEL="claude-opus-4-7"
-            REASON="${CHANGED} lines (>500, complex)"
-          fi
-          echo "model=$MODEL" >> "$GITHUB_OUTPUT"
-          echo "Selected ${MODEL} — ${REASON}"
-          echo "**Model:** \`${MODEL}\` — ${REASON}" >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Claude review with structured verdict
-        id: review
-        uses: anthropics/claude-code-action@v1
-        with:
-          # Auth via the user's Claude Max plan (OAuth token from
-          # `claude setup-token`). PR reviews count against the Max
-          # subscription's quota instead of pay-per-token API billing.
-          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          # No `github_token:` — let the action use the installed Claude
-          # App via OIDC so comments are authored by `claude[bot]`.
-          # `track_progress: true` posts a live progress comment as Claude
-          # works (recommended by the action's pr-review-comprehensive.yml
-          # example). In automation mode this is off by default; we enable
-          # it so reviews are visibly "in flight" rather than appearing all
-          # at once at the end.
-          # EXCEPT on `labeled` events (the `release-ready` /
-          # `review-with-opus` triggers): the action only supports
-          # track_progress for opened/synchronize/ready_for_review/reopened
-          # and hard-errors on anything else, killing the review.
-          track_progress: ${{ github.event.action != 'labeled' }}
-          claude_args: |
-            --model ${{ steps.model.outputs.model }}
-            --json-schema '{"type":"object","required":["verdict","summary","important_findings"],"properties":{"verdict":{"enum":["pass","warn","fail"]},"summary":{"type":"string"},"important_findings":{"type":"array","items":{"type":"string"}}}}'
-            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(cat:*),Bash(rg:*),Bash(jq:*),Bash(ls:*),Bash(find:*)"
-          prompt: |
-            You are reviewing pull request #${{ github.event.pull_request.number }} in ${{ github.repository }}.
-
-            STEPS:
-            1. Read CLAUDE.md to learn the project's conventions (versioning rules, ESM `.js` import requirement, testing/coverage requirements, stdio logging rules, etc.).
-            2. Read the PR diff: `gh pr diff ${{ github.event.pull_request.number }}` (or read files in the working tree, which is checked out).
-            3. Review the changes for:
-               - Correctness and edge cases
-               - Adherence to CLAUDE.md conventions
-               - Test coverage of new code paths (note: vitest enforces 100% coverage in CI)
-               - Security or data-integrity concerns
-
-            CONVENTIONS ARE GROUNDED, NOT INVENTED:
-            A "convention" exists only if it is (a) written in CLAUDE.md, (b) enforced by a repo config (eslint/prettier/tsconfig), or (c) consistently followed by the surrounding code. Before citing a CLAUDE.md rule you MUST be able to quote its exact text — if it is not in CLAUDE.md, it is NOT a CLAUDE.md rule. Never infer an unwritten style rule.
-
-            SEVERITY MODEL (matches the official code-review plugin):
-              🔴 Important — bug, broken behavior, security/data risk, or violation of a convention you can QUOTE from CLAUDE.md. Confidence ≥80 to count.
-              🟡 Nit       — a concrete, actionable minor issue grounded in CLAUDE.md, a linter/formatter config, or a clear inconsistency with adjacent code. Confidence ≥80.
-              🟣 Pre-existing — issue already in the codebase, not introduced by this PR. Never blocking.
-
-            OUT OF SCOPE — never a finding, never affects the verdict:
-              - Formatting taste a formatter would own: comment length, single- vs multi-line comments, blank lines, line breaks, import order not enforced by a config.
-              - Rephrasing comments/identifiers that are already clear.
-              - Anything you cannot ground in CLAUDE.md, a repo config, or adjacent-code style.
-            If your only findings are out-of-scope, the verdict is `pass`.
-
-            OUTPUT:
-            - For line-specific findings, prefer the inline-comment tool (`mcp__github_inline_comment__create_inline_comment`).
-            - Post ONE top-level summary comment with overall judgment (use `gh pr comment`). If there are no findings worth surfacing, post a short "No issues found — verdict pass" comment.
-            - Then emit your structured verdict per the JSON schema:
-              • `pass` — no 🔴 Important findings.
-              • `warn` — no 🔴 Important findings but at least one 🟡 Nit worth surfacing.
-              • `fail` — at least one 🔴 Important finding.
-              Set `summary` to a 1-2 sentence overall judgment.
-              Set `important_findings` to the list of 🔴 Important finding titles (empty array if none).
-
-            DO NOT modify files, push commits, approve the PR formally, or call `gh pr review` / `gh pr edit`. Posting comments and emitting the verdict is the entire job. The workflow will gate auto-merge based on your verdict.
-
-      - name: Surface verdict in run summary
-        if: always() && steps.review.outputs.structured_output != ''
-        env:
-          OUT: ${{ steps.review.outputs.structured_output }}
-        run: |
-          {
-            echo "## Claude review verdict"
-            echo ""
-            echo "**Verdict:** \`$(echo "$OUT" | jq -r .verdict)\`"
-            echo ""
-            echo "**Summary:** $(echo "$OUT" | jq -r .summary)"
-            echo ""
-            COUNT=$(echo "$OUT" | jq -r '.important_findings | length')
-            echo "**Important findings:** ${COUNT}"
-            if [ "$COUNT" -gt 0 ]; then
-              echo ""
-              echo "$OUT" | jq -r '.important_findings[] | "- " + .'
-            fi
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Arm auto-merge on pass
-        if: ${{ !cancelled() && github.event.pull_request.head.repo.full_name == github.repository }}
-        env:
-          GH_TOKEN: ${{ secrets.RELEASE_PAT }}
-          PR: ${{ github.event.pull_request.number }}
-          REPO: ${{ github.repository }}
-          OUT: ${{ steps.review.outputs.structured_output }}
-        run: |
-          verdict=""
-          [ -n "$OUT" ] && verdict=$(echo "$OUT" | jq -r '.verdict // empty')
-          # Fallback: claude-code-action intermittently returns an empty
-          # structured_output even on a clean pass (the verdict comment still
-          # posts). Re-derive the verdict from the latest claude[bot] verdict
-          # marker. ONLY an explicit `pass` arms; warn/fail/anything-else keeps
-          # a human in the loop.
-          if [ -z "$verdict" ]; then
-            body=$(gh pr view "$PR" --repo "$REPO" --json comments --jq '[.comments[]|select(.author.login=="claude")]|last|.body' 2>/dev/null || echo "")
-            vline=$(printf '%s' "$body" | grep -ioE 'verdict[^a-z]{0,6}(pass|warn|fail)' | tail -1)
-            case "$vline" in *[Pp]ass*) verdict="pass";; esac
-          fi
-          if [ "$verdict" = "pass" ]; then
-            gh pr edit "$PR" --repo "$REPO" --add-label ready-to-merge
-            echo "Verdict=pass — added ready-to-merge to arm auto-merge."
-          else
-            echo "Verdict=${verdict:-unknown} — not arming (human-in-the-loop preserved)."
-          fi
+    uses: chrischall/workflows/.github/workflows/reusable-pr-auto-review.yml@main
+    with:
+      conventions_hint: ""
+    secrets:
+      claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+      release_pat: ${{ secrets.RELEASE_PAT }}

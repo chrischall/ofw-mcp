@@ -1,28 +1,12 @@
 name: release-please
 
-# Canonical release-please workflow.
+# Thin stub: release-please runs here; the publish steps are the
+# chrischall/workflows mcp-publish composite action. The publish job stays
+# in THIS file (not a reusable workflow) because npm trusted publishing and
+# mcp-publisher bind to this repo's workflow identity via OIDC.
 #
-# On every push to main, run googleapis/release-please-action. It scans
-# Conventional-Commit messages since the last release tag and:
-#
-#   - If new fix:/feat:/etc. commits are present, opens or updates a
-#     "release PR" that bumps every file registered in extra-files (see
-#     release-please-config.json) and updates CHANGELOG.md.
-#   - When that release PR merges, the action creates a `v<VERSION>` tag
-#     and a GitHub Release populated from the CHANGELOG section.
-#
-# The release PR is left open as a human review gate. You merge it
-# (manually via the GitHub UI, or by adding the `ready-to-merge` label so
-# auto-merge.yml arms it) when you're ready to ship.
-#
-# When the release PR merges, this workflow runs again, release_created
-# becomes true, and the `publish` job runs.
-#
-# RELEASE_PAT (not GITHUB_TOKEN) is used so:
-#   - The release PR's `opened` event triggers downstream workflows (CI,
-#     pr-auto-review.yml).
-#   - The `v<VERSION>` tag push, if anything downstream listens for it,
-#     would fire (we don't currently — publish runs in this same workflow).
+# The release PR is the human review gate: add `release-ready` to ship it.
+# The PAT (not GITHUB_TOKEN) so the release PR's events trigger CI/review.
 
 on:
   push:
@@ -58,101 +42,15 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      id-token: write
+      id-token: write    # npm provenance + mcp-publisher OIDC
     steps:
-      - uses: actions/checkout@v6.0.2
+      - uses: actions/checkout@v6
         with:
           ref: ${{ needs.release-please.outputs.tag_name }}
 
-      - uses: actions/setup-node@v6.4.0
+      - uses: chrischall/workflows/.github/actions/mcp-publish@main
         with:
-          node-version: 26
-          cache: npm
-          registry-url: https://registry.npmjs.org
-
-      # Strip always-auth from .npmrc (set by setup-node, deprecated in npm 11)
-      - run: sed -i '/always-auth/d' "$NPM_CONFIG_USERCONFIG"
-
-      - run: npm ci
-      - run: npm run build
-
-      - name: Set VERSION env
-        run: echo "VERSION=${{ needs.release-please.outputs.version }}" >> "$GITHUB_ENV"
-
-      - name: Package skill
-        run: |
-          python3 - <<'EOF'
-          import zipfile, pathlib, os
-
-          version = os.environ["VERSION"]
-          skill_name = "ofw-mcp"
-          out = pathlib.Path(f"{skill_name}-{version}.skill")
-
-          with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
-              zf.write(pathlib.Path("skills/ofw/SKILL.md"), f"{skill_name}/SKILL.md")
-
-          print(f"Packaged {out} ({out.stat().st_size} bytes)")
-          EOF
-
-      - name: Build .mcpb bundle
-        run: |
-          npx @anthropic-ai/mcpb pack
-          mv ofw-mcp.mcpb "ofw-mcp-${VERSION}.mcpb"
-
-      # Idempotent: skip if this version is already on the registry.
-      - name: Publish to npm
-        run: |
-          PKG=$(node -p "require('./package.json').name")
-          PUBLISHED=$(npm view "${PKG}@${VERSION}" version 2>/dev/null || true)
-          if [ "$PUBLISHED" = "$VERSION" ]; then
-            echo "npm already has ${PKG}@${VERSION} — skipping publish."
-            exit 0
-          fi
-          npm publish --access public --provenance
-
-      # ─── modelcontextprotocol/registry (PulseMCP auto-ingests weekly) ───
-      - name: Install mcp-publisher
-        uses: chrischall/mcp-utils/.github/actions/install-mcp-publisher@v0.6.0
-
-      - name: Authenticate to MCP Registry (OIDC)
-        run: mcp-publisher login github-oidc
-
-      - name: Publish to MCP Registry
-        run: mcp-publisher publish
-
-      # ─── ClawHub (OpenClaw skill registry) — conditional on CLAWHUB_TOKEN ───
-      # GitHub Actions disallows `secrets.*` in step-level `if:`, so the
-      # token check happens inside the run block.
-      - name: Publish skill to ClawHub
-        continue-on-error: true
-        env:
-          CLAWHUB_TOKEN: ${{ secrets.CLAWHUB_TOKEN }}
-        run: |
-          if [ -z "$CLAWHUB_TOKEN" ]; then
-            echo "CLAWHUB_TOKEN not set — skipping ClawHub publish."
-            exit 0
-          fi
-          if [ ! -f skills/ofw/SKILL.md ]; then
-            echo "skills/ofw/SKILL.md not present — skipping ClawHub publish."
-            exit 0
-          fi
-          npx --yes clawhub login --token "$CLAWHUB_TOKEN" --no-browser
-          # ClawHub's `publish` rejects folders that look like a plugin
-          # (.claude-plugin/plugin.json present), and `package publish`
-          # requires an openclaw.plugin.json we don't have. Workaround: copy
-          # SKILL.md to a clean temp dir and publish that as a standalone skill.
-          SKILL_DIR=$(mktemp -d)
-          cp skills/ofw/SKILL.md "$SKILL_DIR/"
-          npx --yes clawhub publish "$SKILL_DIR" --version "${VERSION}" --slug ofw-mcp
-
-      # release-please already created the GitHub Release with CHANGELOG
-      # content; just attach the build artifacts. --clobber so re-running
-      # the workflow on the same tag overwrites prior uploads.
-      - name: Attach artifacts to release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh release upload "${{ needs.release-please.outputs.tag_name }}" \
-            "ofw-mcp-${VERSION}.skill" \
-            "ofw-mcp-${VERSION}.mcpb" \
-            --clobber
+          version: ${{ needs.release-please.outputs.version }}
+          tag-name: ${{ needs.release-please.outputs.tag_name }}
+          clawhub-token: ${{ secrets.CLAWHUB_TOKEN }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
