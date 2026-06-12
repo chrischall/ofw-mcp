@@ -1,33 +1,7 @@
 name: Auto-merge PRs
 
-# Source-aware auto-merge:
-#
-#  - dependabot[bot] PRs: arm `--auto --squash` as soon as the PR is non-
-#    draft. Merges when CI is green; no review gating.
-#  - Same-repo (non-fork) PRs with the `ready-to-merge` label: arm
-#    `--auto --squash`. That label is added either:
-#      * by the owner manually (to override Claude's warn/fail), OR
-#      * automatically by pr-auto-review.yml when Claude's verdict =
-#        `pass` on a same-repo PR, OR
-#      * automatically by release-please.yml on the release PR.
-#    Either way, the label is the signal.
-#  - Fork PRs: never auto-armed. Reviewed for advisory value only;
-#    the owner merges those by hand.
-#
-# The merge still waits for branch protection's required status check
-# (`ci`), so this is "merge as soon as CI is green," not "merge without
-# CI."
-#
-# pull_request_target is used (not pull_request) so dependabot PRs can
-# arm — dependabot's pull_request token is restricted. Safe because we
-# never check out or execute PR code; we only call the GitHub API via
-# the gh CLI.
-#
-# RELEASE_PAT (not GITHUB_TOKEN) is used to arm `gh pr merge --auto`.
-# GitHub suppresses workflow runs for events triggered by GITHUB_TOKEN
-# to prevent loops; with the PAT, the merge it eventually performs
-# fires `push` events on main, which is what release-please.yml
-# listens on (to open / tag / publish the next release).
+# Thin stub — the pipeline lives in chrischall/workflows.
+# pull_request_target so dependabot PRs can arm; PR code is never executed.
 
 on:
   pull_request_target:
@@ -42,50 +16,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  arm-dependabot:
-    runs-on: ubuntu-latest
-    # Fire on the lifecycle events but NOT on `labeled` — that's the
-    # owner-PR path. Without this guard, adding any label to a
-    # dependabot PR would re-arm (harmless but noisy).
-    if: |
-      github.event.action != 'labeled' &&
-      github.event.pull_request.draft == false &&
-      github.event.pull_request.user.login == 'dependabot[bot]'
-    steps:
-      - name: Arm auto-merge for dependabot
-        env:
-          GH_TOKEN: ${{ secrets.RELEASE_PAT }}
-          PR_URL: ${{ github.event.pull_request.html_url }}
-        run: |
-          if gh pr merge --auto --squash "$PR_URL"; then exit 0; fi
-          state="$(gh pr view "$PR_URL" --json state --jq .state 2>/dev/null || echo UNKNOWN)"
-          if [ "$state" = "MERGED" ]; then
-            echo "PR already merged (instant-merge race) — treating as success."
-            exit 0
-          fi
-          echo "::error::auto-merge arm failed (PR state=$state)"
-          exit 1
-
-  arm-on-ready-label:
-    runs-on: ubuntu-latest
-    # Same-repo PRs only (excludes forks). The label may be added by the
-    # owner manually or by pr-auto-review.yml on Claude's `verdict=pass`.
-    if: |
-      github.event.action == 'labeled' &&
-      github.event.label.name == 'ready-to-merge' &&
-      github.event.pull_request.draft == false &&
-      github.event.pull_request.head.repo.full_name == github.repository
-    steps:
-      - name: Arm auto-merge on ready-to-merge label
-        env:
-          GH_TOKEN: ${{ secrets.RELEASE_PAT }}
-          PR_URL: ${{ github.event.pull_request.html_url }}
-        run: |
-          if gh pr merge --auto --squash "$PR_URL"; then exit 0; fi
-          state="$(gh pr view "$PR_URL" --json state --jq .state 2>/dev/null || echo UNKNOWN)"
-          if [ "$state" = "MERGED" ]; then
-            echo "PR already merged (instant-merge race) — treating as success."
-            exit 0
-          fi
-          echo "::error::auto-merge arm failed (PR state=$state)"
-          exit 1
+  arm:
+    uses: chrischall/workflows/.github/workflows/reusable-auto-merge.yml@main
+    secrets:
+      release_pat: ${{ secrets.RELEASE_PAT }}
