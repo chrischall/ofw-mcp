@@ -2,8 +2,12 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import type { OFWClient } from '../client.js';
 import { jsonResponse } from './_shared.js';
+import { getWriteMode } from '../config.js';
 
 export function registerExpenseTools(server: McpServer, client: OFWClient): void {
+  // Expense writes land on the court-visible record — OFW_WRITE_MODE 'all' only.
+  const allowWrites = getWriteMode() === 'all';
+
   server.registerTool('ofw_get_expense_totals', {
     description: 'Get OurFamilyWizard expense summary totals (owed/paid)',
     annotations: { readOnlyHint: true },
@@ -26,7 +30,7 @@ export function registerExpenseTools(server: McpServer, client: OFWClient): void
     return jsonResponse(data);
   });
 
-  server.registerTool('ofw_create_expense', {
+  if (allowWrites) server.registerTool('ofw_create_expense', {
     description: 'Log a new expense in OurFamilyWizard',
     annotations: { destructiveHint: false },
     inputSchema: {

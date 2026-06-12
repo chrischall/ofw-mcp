@@ -1686,3 +1686,52 @@ describe('messages.ts — attachment-backfill branches', () => {
     }
   });
 });
+
+describe('OFW_WRITE_MODE gating', () => {
+  let original: string | undefined;
+  beforeEach(() => {
+    original = process.env.OFW_WRITE_MODE;
+  });
+  afterEach(() => {
+    if (original === undefined) delete process.env.OFW_WRITE_MODE;
+    else process.env.OFW_WRITE_MODE = original;
+  });
+
+  it('mode "none" registers no message write tools', () => {
+    process.env.OFW_WRITE_MODE = 'none';
+    setup(makeClient({}));
+    expect(handlers.has('ofw_send_message')).toBe(false);
+    expect(handlers.has('ofw_save_draft')).toBe(false);
+    expect(handlers.has('ofw_delete_draft')).toBe(false);
+    expect(handlers.has('ofw_upload_attachment')).toBe(false);
+    // read/sync/download surface stays intact
+    expect(handlers.has('ofw_list_message_folders')).toBe(true);
+    expect(handlers.has('ofw_list_messages')).toBe(true);
+    expect(handlers.has('ofw_get_message')).toBe(true);
+    expect(handlers.has('ofw_list_drafts')).toBe(true);
+    expect(handlers.has('ofw_get_unread_sent')).toBe(true);
+    expect(handlers.has('ofw_download_attachment')).toBe(true);
+    expect(handlers.has('ofw_sync_messages')).toBe(true);
+  });
+
+  it('mode "drafts" registers draft-level writes but never send', () => {
+    process.env.OFW_WRITE_MODE = 'drafts';
+    setup(makeClient({}));
+    expect(handlers.has('ofw_send_message')).toBe(false);
+    expect(handlers.has('ofw_save_draft')).toBe(true);
+    expect(handlers.has('ofw_delete_draft')).toBe(true);
+    expect(handlers.has('ofw_upload_attachment')).toBe(true);
+  });
+
+  it('mode "all" (and unset) registers everything', () => {
+    process.env.OFW_WRITE_MODE = 'all';
+    setup(makeClient({}));
+    expect(handlers.has('ofw_send_message')).toBe(true);
+    delete process.env.OFW_WRITE_MODE;
+    setup(makeClient({}));
+    expect(handlers.has('ofw_send_message')).toBe(true);
+    expect(handlers.has('ofw_save_draft')).toBe(true);
+    expect(handlers.has('ofw_delete_draft')).toBe(true);
+    expect(handlers.has('ofw_upload_attachment')).toBe(true);
+  });
+});
