@@ -56,6 +56,35 @@ export function parseBoolEnv(name: string): boolean {
   return parseBoolEnvUtil(name);
 }
 
+export type WriteMode = 'none' | 'drafts' | 'all';
+
+/**
+ * Gate for write-tool registration, read at registration time (startup).
+ *
+ *   none    No write tools are registered — pure read/sync/search surface.
+ *   drafts  Draft-level writes only (ofw_save_draft, ofw_delete_draft,
+ *           ofw_upload_attachment). Nothing that lands on the court-visible
+ *           record (send, calendar/expense/journal writes) is registered —
+ *           the only way to send remains a human in the OFW web UI.
+ *   all     Every tool registers (the default; fully backward compatible).
+ *
+ * Unregistered tools cannot be invoked by any host permission setting or
+ * injected instruction — the gate is structural, not behavioral. An
+ * unrecognized value fails closed to 'none': this is a safety control, so a
+ * typo must never silently grant write access.
+ */
+export function getWriteMode(): WriteMode {
+  const raw = process.env.OFW_WRITE_MODE;
+  if (typeof raw !== 'string' || raw.trim().length === 0) return 'all';
+  const mode = raw.trim().toLowerCase();
+  if (mode === 'none' || mode === 'drafts' || mode === 'all') return mode;
+  // stdio transport: stderr only — stdout is reserved for JSON-RPC.
+  console.error(
+    `[ofw-mcp] Unrecognized OFW_WRITE_MODE "${raw.trim()}" — failing closed to "none" (no write tools registered). Valid values: none, drafts, all.`,
+  );
+  return 'none';
+}
+
 // Default for ofw_download_attachment's `inline` arg when the caller doesn't
 // pass one. Set OFW_INLINE_ATTACHMENTS=true to have attachments returned as
 // MCP content blocks by default (skipping disk) — useful on sandboxed MCP

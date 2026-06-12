@@ -28,6 +28,12 @@
           "isRequired": false,
           "format": "string",
           "isSecret": true
+        },
+        {
+          "name": "OFW_WRITE_MODE",
+          "description": "Write-tool gate: \"none\" registers no write tools; \"drafts\" registers draft-level writes only (save/delete drafts, upload attachments); \"all\" registers everything (default). Unrecognized values fail closed to \"none\".",
+          "isRequired": false,
+          "format": "string"
         }
       ]
     }

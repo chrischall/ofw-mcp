@@ -1,8 +1,8 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { getAttachmentsDir, getCacheDbPath, getDefaultInlineAttachments, getCacheDir } from '../src/config.js';
+import { getAttachmentsDir, getCacheDbPath, getDefaultInlineAttachments, getCacheDir, getWriteMode } from '../src/config.js';
 
 describe('getCacheDbPath', () => {
   let tmp: string;
@@ -138,5 +138,40 @@ describe('getCacheDir', () => {
       if (orig === undefined) delete process.env.OFW_CACHE_DIR;
       else process.env.OFW_CACHE_DIR = orig;
     }
+  });
+});
+
+describe('getWriteMode', () => {
+  let original: string | undefined;
+  beforeEach(() => {
+    original = process.env.OFW_WRITE_MODE;
+  });
+  afterEach(() => {
+    if (original === undefined) delete process.env.OFW_WRITE_MODE;
+    else process.env.OFW_WRITE_MODE = original;
+    vi.restoreAllMocks();
+  });
+
+  it('defaults to "all" when unset or blank', () => {
+    delete process.env.OFW_WRITE_MODE;
+    expect(getWriteMode()).toBe('all');
+    process.env.OFW_WRITE_MODE = '   ';
+    expect(getWriteMode()).toBe('all');
+  });
+
+  it('accepts none/drafts/all, case-insensitive and trimmed', () => {
+    process.env.OFW_WRITE_MODE = 'none';
+    expect(getWriteMode()).toBe('none');
+    process.env.OFW_WRITE_MODE = ' Drafts ';
+    expect(getWriteMode()).toBe('drafts');
+    process.env.OFW_WRITE_MODE = 'ALL';
+    expect(getWriteMode()).toBe('all');
+  });
+
+  it('fails closed to "none" on an unrecognized value, warning on stderr', () => {
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    process.env.OFW_WRITE_MODE = 'readonly';
+    expect(getWriteMode()).toBe('none');
+    expect(err).toHaveBeenCalledWith(expect.stringContaining('Unrecognized OFW_WRITE_MODE "readonly"'));
   });
 });

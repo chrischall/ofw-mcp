@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { OFWClient } from '../../src/client.js';
 import { registerJournalTools } from '../../src/tools/journal.js';
@@ -60,3 +60,29 @@ describe('ofw_create_journal_entry', () => {
   });
 });
 
+
+describe('OFW_WRITE_MODE gating', () => {
+  let original: string | undefined;
+  beforeEach(() => {
+    original = process.env.OFW_WRITE_MODE;
+  });
+  afterEach(() => {
+    if (original === undefined) delete process.env.OFW_WRITE_MODE;
+    else process.env.OFW_WRITE_MODE = original;
+  });
+
+  it('ofw_create_journal_entry is absent below mode "all"', () => {
+    for (const mode of ['none', 'drafts']) {
+      process.env.OFW_WRITE_MODE = mode;
+      setup(makeClient({}));
+      expect(handlers.has('ofw_create_journal_entry')).toBe(false);
+      expect(handlers.has('ofw_list_journal_entries')).toBe(true); // reads unaffected
+    }
+  });
+
+  it('ofw_create_journal_entry registers in mode "all"', () => {
+    process.env.OFW_WRITE_MODE = 'all';
+    setup(makeClient({}));
+    expect(handlers.has('ofw_create_journal_entry')).toBe(true);
+  });
+});

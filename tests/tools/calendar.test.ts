@@ -104,3 +104,33 @@ describe('ofw_delete_event', () => {
   });
 });
 
+
+describe('OFW_WRITE_MODE gating', () => {
+  let original: string | undefined;
+  beforeEach(() => {
+    original = process.env.OFW_WRITE_MODE;
+  });
+  afterEach(() => {
+    if (original === undefined) delete process.env.OFW_WRITE_MODE;
+    else process.env.OFW_WRITE_MODE = original;
+  });
+
+  it('calendar writes are absent below mode "all"', () => {
+    for (const mode of ['none', 'drafts']) {
+      process.env.OFW_WRITE_MODE = mode;
+      setup(makeClient({}));
+      expect(handlers.has('ofw_create_event')).toBe(false);
+      expect(handlers.has('ofw_update_event')).toBe(false);
+      expect(handlers.has('ofw_delete_event')).toBe(false);
+      expect(handlers.has('ofw_list_events')).toBe(true); // reads unaffected
+    }
+  });
+
+  it('calendar writes register in mode "all"', () => {
+    process.env.OFW_WRITE_MODE = 'all';
+    setup(makeClient({}));
+    expect(handlers.has('ofw_create_event')).toBe(true);
+    expect(handlers.has('ofw_update_event')).toBe(true);
+    expect(handlers.has('ofw_delete_event')).toBe(true);
+  });
+});

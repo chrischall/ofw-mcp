@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { OFWClient } from '../../src/client.js';
 import { registerExpenseTools } from '../../src/tools/expenses.js';
@@ -75,3 +75,30 @@ describe('ofw_create_expense', () => {
   });
 });
 
+
+describe('OFW_WRITE_MODE gating', () => {
+  let original: string | undefined;
+  beforeEach(() => {
+    original = process.env.OFW_WRITE_MODE;
+  });
+  afterEach(() => {
+    if (original === undefined) delete process.env.OFW_WRITE_MODE;
+    else process.env.OFW_WRITE_MODE = original;
+  });
+
+  it('ofw_create_expense is absent below mode "all"', () => {
+    for (const mode of ['none', 'drafts']) {
+      process.env.OFW_WRITE_MODE = mode;
+      setup(makeClient({}));
+      expect(handlers.has('ofw_create_expense')).toBe(false);
+      expect(handlers.has('ofw_list_expenses')).toBe(true); // reads unaffected
+      expect(handlers.has('ofw_get_expense_totals')).toBe(true);
+    }
+  });
+
+  it('ofw_create_expense registers in mode "all"', () => {
+    process.env.OFW_WRITE_MODE = 'all';
+    setup(makeClient({}));
+    expect(handlers.has('ofw_create_expense')).toBe(true);
+  });
+});
