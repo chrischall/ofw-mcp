@@ -1862,3 +1862,63 @@ describe('OFW_WRITE_MODE gating', () => {
     expect(handlers.has('ofw_upload_attachment')).toBe(true);
   });
 });
+
+describe('response validation (issue #83)', () => {
+  it('send_message: strict — a mistyped entityId in the POST response throws instead of degrading to "unconfirmed send"', async () => {
+    const client = new OFWClient();
+    vi.spyOn(client, 'request').mockResolvedValueOnce({ entityId: '42' }); // string, not number
+    setup(client);
+    await expect(handlers.get('ofw_send_message')!({ subject: 'S', body: 'B', recipientIds: [1] }))
+      .rejects.toThrow(/OFW response for POST \/pub\/v3\/messages \(ofw_send_message\) failed validation: entityId/);
+  });
+
+  it('send_message: strict — a mistyped field in the re-fetched detail throws', async () => {
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce({ entityId: 7 })
+      .mockResolvedValueOnce({ subject: 123 }); // detail subject mistyped
+    setup(client);
+    await expect(handlers.get('ofw_send_message')!({ subject: 'S', body: 'B', recipientIds: [1] }))
+      .rejects.toThrow(/GET \/pub\/v3\/messages\/\{id\} \(ofw_send_message\) failed validation: subject/);
+  });
+
+  it('save_draft: strict — a mistyped replyToId in the re-fetched detail throws', async () => {
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce({ entityId: 8 })
+      .mockResolvedValueOnce({ replyToId: 'nope' });
+    setup(client);
+    await expect(handlers.get('ofw_save_draft')!({ subject: 'S', body: 'B' }))
+      .rejects.toThrow(/\(ofw_save_draft\) failed validation: replyToId/);
+  });
+
+  it('upload_attachment: strict — a missing fileId in the upload response throws', async () => {
+    const client = new OFWClient();
+    vi.spyOn(client, 'request').mockResolvedValueOnce({ fileName: 'note.txt' }); // no fileId
+    setup(client);
+    const dir = mkdtempSync(join(tmpdir(), 'ofw-upv-'));
+    const filePath = join(dir, 'note.txt');
+    writeFileSync(filePath, 'x');
+    try {
+      await expect(handlers.get('ofw_upload_attachment')!({ path: filePath }))
+        .rejects.toThrow(/POST \/pub\/v3\/myfiles\/multipart \(ofw_upload_attachment\) failed validation: fileId/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('get_message: lenient — a malformed uncached detail warns to stderr but still serves', async () => {
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const client = new OFWClient();
+    vi.spyOn(client, 'request').mockResolvedValueOnce({
+      id: 60, subject: 'S', body: 'B', date: { dateTime: '2026-05-01T00:00:00Z' },
+      files: 'nope', // mistyped: number[] expected
+    });
+    setup(client);
+    const result = await handlers.get('ofw_get_message')!({ messageId: 60 });
+    expect(JSON.parse(result.content[0].text).id).toBe(60); // raw flows through
+    const warning = err.mock.calls.map((c) => c[0]).find((m) => typeof m === 'string' && m.includes('failed validation'));
+    expect(warning).toContain('GET /pub/v3/messages/{id} (ofw_get_message)');
+    expect(warning).toContain('files');
+  });
+});

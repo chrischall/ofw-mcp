@@ -649,3 +649,25 @@ describe('sync — empty/missing data arrays', () => {
     expect((await syncDrafts(client, '333')).synced).toBe(0);
   });
 });
+
+describe('sync — response validation (issue #83)', () => {
+  it('warns to stderr but completes the sync when a list item has a mistyped field', async () => {
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce({ data: [{
+        id: 90, subject: 'S', date: { dateTime: '2026-05-01T00:00:00Z' },
+        showNeverViewed: 'nope', // mistyped: boolean expected
+        recipients: [],
+      }] })
+      .mockResolvedValueOnce({ body: 'B' })     // detail
+      .mockResolvedValueOnce({ data: [] });     // page 2 → break
+
+    const result = await syncMessageFolder(client, 'inbox', '111', { fetchUnreadBodies: false });
+    expect(result.synced).toBe(1);              // sync still lands the message
+    expect(getMessage(90)?.body).toBe('B');
+    const warning = err.mock.calls.map((c) => c[0]).find((m) => typeof m === 'string' && m.includes('failed validation'));
+    expect(warning).toContain('GET /pub/v3/messages?folders={inbox}');
+    expect(warning).toContain('showNeverViewed');
+  });
+});
