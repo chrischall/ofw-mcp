@@ -24,6 +24,7 @@ src/
   config.ts         env-driven cache dir + sha256(OFW_CACHE_IDENTITY|OFW_USERNAME|"_default") DB path + attachments dir
   cache.ts          node:sqlite cache (messages, drafts, attachments, sync_state, meta) with typed CRUD + findLatestReplyTip
   sync.ts           resolveFolderIds + syncMessageFolder/syncDrafts/syncAll + attachment-meta fetch
+  validate.ts       parseOFW(): zod validation of OFW responses at call sites (lenient reads / strict writes)
   tools/
     _shared.ts      recipient mapping, response helpers, path expansion
     user.ts         ofw_get_profile, ofw_get_notifications
@@ -73,6 +74,15 @@ The split into `auth.ts` + `auth-password.ts` is deliberate: tests mock `auth-pa
 - **Draft routing in `ofw_get_message`**: drafts and messages share an ID space and the same `/pub/v3/messages/{id}` endpoint. When a caller asks for an id that exists in the drafts cache, `ofw_get_message` returns a synthesized `MessageRow` with `folder: 'drafts'` (alongside the usual `inbox`/`sent`), `fromUser: ''`, and `sentAt`/`fetchedBodyAt` mirroring the draft's `modifiedAt`. The drafts table is the source of truth for that id; any stale row in the messages table is evicted on the next sync (`syncDrafts` calls `deleteMessage` after `upsertDraft`).
 - Drafts folder ID is resolved dynamically via `/pub/v1/messageFolders` and persisted in the `meta` table
 - `syncDrafts` walks every page of the drafts folder (50/page until a short page). This matters because its reconciliation step deletes any cached draft not seen in the listing — a partial walk would evict real drafts
+
+## Response validation (issue #83)
+
+Every JSON response is validated with zod at the call site via `parseOFW(schema, raw, ctx, mode)` (`src/validate.ts`). Schemas are `z.looseObject(...)` covering ONLY the fields the code reads — unknown keys pass through (and survive into cached `listData`/`metadata`). Two modes:
+
+- **lenient** (default) — all read/sync paths. Mismatch → structured stderr warning naming the endpoint and fields, then the RAW response flows on through the existing `??` fallbacks. An OFW backend change degrades gracefully but never silently.
+- **strict** — write boundaries (`postMessageAndRefetch`'s POST + detail GET, `ofw_upload_attachment`). Mismatch → throw: proceeding on an unverifiable response risks deleting a draft, mis-reporting a send, or caching an unusable fileId. Absence of optional fields stays legal (handled by `verifyWriteLanded` WARNINGs); a present-but-mistyped field throws.
+
+When adding a new endpoint call, define a loose schema next to the call site and wrap the `client.request` in `parseOFW`. Sibling MCPs copy this pattern.
 
 ## OFW API Notes
 

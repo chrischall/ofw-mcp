@@ -6,22 +6,26 @@ import {
   upsertAttachmentForMessage,
   type MessageRow, type DraftRow, type FolderName,
 } from './cache.js';
-import { mapRecipients, type ApiRecipient } from './tools/_shared.js';
+import { z } from 'zod';
+import { ApiRecipientSchema, mapRecipients } from './tools/_shared.js';
+import { parseOFW } from './validate.js';
 
 // Each OFW message detail returns `files: [fileId, ...]`. We fetch the metadata
 // for each file id (cheap JSON call) so the model can see filenames/mime types
 // without downloading bytes. Bytes are pulled lazily by ofw_download_attachment.
 
-interface FileMetaResponse {
-  fileId: number;
-  label?: string;
-  fileName?: string;
-  fileType?: string;          // MIME
-  fileSize?: number;
-  shared?: boolean;
-  shareClass?: string;
-  lastUpdateDate?: { dateTime?: string };
-}
+// All sync-path schemas are validated LENIENT (issue #83): a mismatch logs a
+// structured warning to stderr and the raw response flows on through the
+// existing `??` fallbacks — a small OFW backend change degrades gracefully
+// instead of bricking sync, but no longer silently. Loose objects keep
+// unknown keys, so cached `metadata`/`listData` blobs stay verbatim.
+const FileMetaSchema = z.looseObject({
+  fileId: z.number(),
+  label: z.string().optional(),
+  fileName: z.string().optional(),
+  fileType: z.string().optional(),   // MIME
+  fileSize: z.number().optional(),
+});
 
 // Fetches OFW attachment metadata for one file id and writes it to the cache.
 // Throws on network/HTTP errors — callers in bulk-sync paths wrap this in the
@@ -32,7 +36,11 @@ export async function fetchAttachmentMeta(
   fileId: number,
   messageId: number,
 ): Promise<void> {
-  const meta = await client.request<FileMetaResponse>('GET', `/pub/v1/myfiles/${fileId}`);
+  const meta = parseOFW(
+    FileMetaSchema,
+    await client.request('GET', `/pub/v1/myfiles/${fileId}`),
+    'GET /pub/v1/myfiles/{fileId}',
+  );
   upsertAttachmentForMessage({
     fileId: meta.fileId ?? fileId,
     fileName: meta.fileName ?? `file-${fileId}`,
@@ -62,15 +70,15 @@ export interface FolderIds {
   drafts: string;
 }
 
-interface FoldersResponse {
-  systemFolders?: Array<{ id: string; folderType: string; name: string }>;
-  userFolders?: Array<{ id: string; folderType: string; name: string }>;
-}
+const FoldersSchema = z.looseObject({
+  systemFolders: z.array(z.looseObject({ id: z.string(), folderType: z.string() })).optional(),
+});
 
 export async function resolveFolderIds(client: OFWClient): Promise<FolderIds> {
-  const data = await client.request<FoldersResponse>(
-    'GET',
-    '/pub/v1/messageFolders?includeFolderCounts=true'
+  const data = parseOFW(
+    FoldersSchema,
+    await client.request('GET', '/pub/v1/messageFolders?includeFolderCounts=true'),
+    'GET /pub/v1/messageFolders',
   );
   const sys = data.systemFolders ?? [];
   const find = (type: string): string => {
@@ -87,17 +95,24 @@ export async function resolveFolderIds(client: OFWClient): Promise<FolderIds> {
   return ids;
 }
 
-interface ListItem {
-  id: number;
-  subject: string;
-  date: { dateTime: string };
-  from?: { name?: string };
-  showNeverViewed: boolean;
-  recipients?: ApiRecipient[];
-}
+// Required fields are the ones the sync loop reads unguarded (id keys the
+// cache; showNeverViewed drives unread semantics — per CLAUDE.md it's the
+// only reliable unread indicator, so its disappearance must warn loudly).
+const ListItemSchema = z.looseObject({
+  id: z.number(),
+  subject: z.string(),
+  date: z.looseObject({ dateTime: z.string() }),
+  from: z.looseObject({ name: z.string().optional() }).optional(),
+  showNeverViewed: z.boolean(),
+  recipients: z.array(ApiRecipientSchema).optional(),
+});
+type ListItem = z.infer<typeof ListItemSchema>;
 
-interface ListResponse { data?: ListItem[] }
-interface DetailResponse { body?: string; files?: number[] }
+const ListResponseSchema = z.looseObject({ data: z.array(ListItemSchema).optional() });
+const DetailResponseSchema = z.looseObject({
+  body: z.string().optional(),
+  files: z.array(z.number()).optional(),
+});
 
 export interface UnreadHint {
   id: number;
@@ -124,7 +139,11 @@ export async function syncMessageFolder(
 
   while (true) {
     const path = `/pub/v3/messages?folders=${encodeURIComponent(folderId)}&page=${page}&size=50&sort=date&sortDirection=desc`;
-    const list = await client.request<ListResponse>('GET', path);
+    const list = parseOFW(
+      ListResponseSchema,
+      await client.request('GET', path),
+      `GET /pub/v3/messages?folders={${folder}}`,
+    );
     const items = list.data ?? [];
     if (items.length === 0) break;
 
@@ -142,7 +161,11 @@ export async function syncMessageFolder(
       let fetchedBodyAt: string | null = null;
       let detailFileIds: number[] = [];
       if (shouldFetchBody) {
-        const detail = await client.request<DetailResponse>('GET', `/pub/v3/messages/${item.id}`);
+        const detail = parseOFW(
+          DetailResponseSchema,
+          await client.request('GET', `/pub/v3/messages/${item.id}`),
+          'GET /pub/v3/messages/{id} (sync)',
+        );
         body = detail.body ?? '';
         fetchedBodyAt = new Date().toISOString();
         if (Array.isArray(detail.files) && detail.files.length > 0) {
@@ -194,19 +217,20 @@ export async function syncMessageFolder(
   return { synced, unread };
 }
 
-interface DraftListItem {
-  id: number;
-  subject: string;
-  date: { dateTime: string };
-  replyToId: number | null;
-  recipients?: ApiRecipient[];
-}
-interface DraftListResponse { data?: DraftListItem[] }
-interface DraftDetailResponse {
-  body?: string;
-  subject?: string;
-  recipientIds?: number[];
-}
+const DraftListItemSchema = z.looseObject({
+  id: z.number(),
+  subject: z.string(),
+  date: z.looseObject({ dateTime: z.string() }),
+  replyToId: z.number().nullable().optional(),
+  recipients: z.array(ApiRecipientSchema).optional(),
+});
+type DraftListItem = z.infer<typeof DraftListItemSchema>;
+
+const DraftListResponseSchema = z.looseObject({ data: z.array(DraftListItemSchema).optional() });
+const DraftDetailSchema = z.looseObject({
+  body: z.string().optional(),
+  subject: z.string().optional(),
+});
 
 export interface DraftSyncResult { synced: number }
 
@@ -218,7 +242,11 @@ export async function syncDrafts(client: OFWClient, draftsFolderId: string): Pro
   let page = 1;
   while (true) {
     const path = `/pub/v3/messages?folders=${encodeURIComponent(draftsFolderId)}&page=${page}&size=50&sort=date&sortDirection=desc`;
-    const list = await client.request<DraftListResponse>('GET', path);
+    const list = parseOFW(
+      DraftListResponseSchema,
+      await client.request('GET', path),
+      'GET /pub/v3/messages?folders={drafts}',
+    );
     const pageItems = list.data ?? [];
     items.push(...pageItems);
     if (pageItems.length < 50) break;
@@ -234,7 +262,11 @@ export async function syncDrafts(client: OFWClient, draftsFolderId: string): Pro
     // timestamp for drafts — direct UI edits don't bump it — so we can't
     // use it to skip the detail fetch. Always re-fetch; drafts are few.
     const existing = getDraft(item.id);
-    const detail = await client.request<DraftDetailResponse>('GET', `/pub/v3/messages/${item.id}`);
+    const detail = parseOFW(
+      DraftDetailSchema,
+      await client.request('GET', `/pub/v3/messages/${item.id}`),
+      'GET /pub/v3/messages/{id} (drafts sync)',
+    );
     const row: DraftRow = {
       id: item.id,
       subject: detail.subject ?? item.subject ?? '(no subject)',

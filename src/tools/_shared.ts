@@ -1,6 +1,8 @@
 import { expandPath as expandPathUtil, rawTextResult, textResult } from '@chrischall/mcp-utils';
+import { z } from 'zod';
 import type { Recipient } from '../cache.js';
 import type { OFWClient } from '../client.js';
+import { parseOFW } from '../validate.js';
 
 // Pretty-printed JSON tool result. Thin wrapper over @chrischall/mcp-utils'
 // `textResult` so the rest of the codebase keeps the local name.
@@ -10,12 +12,13 @@ export const jsonResponse = textResult;
 export const textResponse = rawTextResult;
 
 // OFW API shape for `recipients[]` on message/draft list and detail
-// responses. Used wherever we type the response of a `/pub/v3/messages*`
-// call. Exported so call sites stop inlining `Array<{ user: ..., viewed: ... }>`.
-export interface ApiRecipient {
-  user?: { id?: number; name?: string };
-  viewed?: { dateTime: string } | null;
-}
+// responses. Used wherever we validate the response of a `/pub/v3/messages*`
+// call. Loose: unknown keys pass through (and survive into cached listData).
+export const ApiRecipientSchema = z.looseObject({
+  user: z.looseObject({ id: z.number().optional(), name: z.string().optional() }).optional(),
+  viewed: z.looseObject({ dateTime: z.string() }).nullable().optional(),
+});
+export type ApiRecipient = z.infer<typeof ApiRecipientSchema>;
 
 // Translates OFW API recipient shape into the cache's normalized Recipient.
 // Used wherever we surface or persist recipients (sync, get_message, send,
@@ -58,6 +61,16 @@ export function verifyWriteLanded(
   return `WARNING: the ${kind} re-fetched from OFW does not contain the ${mismatches.join(' and ')} that was posted — OFW may have silently dropped or altered the write. Verify the ${kind} on ourfamilywizard.com before relying on it.`;
 }
 
+// POST /pub/v3/messages response: minimal, `{entityId: <id>}` or legacy
+// `{id: <id>}`, sometimes an empty body (→ null). Validated STRICT: a
+// mistyped id (e.g. entityId as a string) must throw rather than silently
+// degrade into the "unconfirmed send" path when the write actually landed.
+// Absence of both ids stays legal — callers handle it with a WARNING.
+const PostMessagesResponseSchema = z.looseObject({
+  id: z.number().optional(),
+  entityId: z.number().optional(),
+}).nullable();
+
 /**
  * POST a payload to /pub/v3/messages, then immediately GET the detail
  * endpoint for the resulting message id. This is the only correct way to
@@ -70,26 +83,40 @@ export function verifyWriteLanded(
  *    when the server silently no-ops, so the GET is also how we verify
  *    the write landed (callers compare detail.body to args.body).
  *
+ * Both responses are validated STRICT against `detailSchema` / the POST
+ * schema (this is the write-verification boundary — issue #83); `ctx`
+ * names the calling tool in the error message.
+ *
  * Returns a discriminated union so callers can narrow with
  * `if (result.id !== null)`. When id is null (no id field in the
  * response — never observed in production, but defensive), `raw`
  * carries the POST response so the caller can still surface it.
  */
-export async function postMessageAndRefetch<TDetail>(
+export async function postMessageAndRefetch<S extends z.ZodType>(
   client: OFWClient,
   payload: unknown,
+  detailSchema: S,
+  ctx: string,
 ): Promise<
-  | { id: number; detail: TDetail; raw: unknown }
+  | { id: number; detail: z.output<S>; raw: unknown }
   | { id: null; detail: null; raw: unknown }
 > {
-  const raw = await client.request<{ id?: number; entityId?: number } & Record<string, unknown>>(
-    'POST', '/pub/v3/messages', payload,
+  const raw = parseOFW(
+    PostMessagesResponseSchema,
+    await client.request('POST', '/pub/v3/messages', payload),
+    `POST /pub/v3/messages (${ctx})`,
+    'strict',
   );
   const id =
     typeof raw?.id === 'number' ? raw.id
     : typeof raw?.entityId === 'number' ? raw.entityId
     : null;
   if (id === null) return { id: null, detail: null, raw };
-  const detail = await client.request<TDetail>('GET', `/pub/v3/messages/${id}`);
+  const detail = parseOFW(
+    detailSchema,
+    await client.request('GET', `/pub/v3/messages/${id}`),
+    `GET /pub/v3/messages/{id} (${ctx})`,
+    'strict',
+  );
   return { id, detail, raw };
 }

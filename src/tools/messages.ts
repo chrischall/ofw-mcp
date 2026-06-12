@@ -13,7 +13,57 @@ import { getAttachmentsDir, getDefaultInlineAttachments, getWriteMode } from '..
 import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, extname, join } from 'node:path';
 import { fileBlob } from '@chrischall/mcp-utils';
-import { expandPath, jsonResponse, mapRecipients, postMessageAndRefetch, textResponse, verifyWriteLanded, type ApiRecipient } from './_shared.js';
+import { ApiRecipientSchema, expandPath, jsonResponse, mapRecipients, postMessageAndRefetch, textResponse, verifyWriteLanded } from './_shared.js';
+import { parseOFW } from '../validate.js';
+
+// Schemas for the load-bearing fields of each /pub/v3 response this file
+// reads (issue #83). Loose: unknown keys pass through into cached listData.
+const DateSchema = z.looseObject({ dateTime: z.string() });
+
+// Detail GET after a send/save POST — validated STRICT inside
+// postMessageAndRefetch (write-verification boundary). All fields optional:
+// absence is handled by verifyWriteLanded's WARNING; a present-but-mistyped
+// field throws.
+const SentDetailSchema = z.looseObject({
+  subject: z.string().optional(),
+  body: z.string().optional(),
+  date: DateSchema.optional(),
+  from: z.looseObject({ name: z.string().optional() }).optional(),
+  recipients: z.array(ApiRecipientSchema).optional(),
+});
+const SavedDraftDetailSchema = z.looseObject({
+  subject: z.string().optional(),
+  body: z.string().optional(),
+  date: DateSchema.optional(),
+  replyToId: z.number().nullable().optional(),
+  recipients: z.array(ApiRecipientSchema).optional(),
+});
+
+// ofw_get_message's uncached detail fetch — lenient: a mismatch warns to
+// stderr and the existing ?? fallbacks keep the tool serving.
+const MessageDetailSchema = z.looseObject({
+  id: z.number(),
+  subject: z.string(),
+  body: z.string().optional(),
+  date: DateSchema,
+  from: z.looseObject({ name: z.string().optional() }).optional(),
+  files: z.array(z.number()).optional(),
+  recipients: z.array(ApiRecipientSchema).optional(),
+});
+
+// Attachment-backfill detail fetch reads only `files`.
+const DetailFilesSchema = z.looseObject({ files: z.array(z.number()).optional() });
+
+// Upload response — STRICT: fileId is the whole point of the call; caching
+// or returning an undefined/mistyped fileId produces an unusable attachment.
+const UploadedFileSchema = z.looseObject({
+  fileId: z.number(),
+  fileName: z.string().optional(),
+  label: z.string().optional(),
+  fileType: z.string().optional(),
+  sizeInBytes: z.number().optional(),
+  shareClass: z.string().optional(),
+});
 
 // Lightweight mime sniff from extension. OFW re-derives mime from the filename
 // server-side anyway, so this is just a polite Content-Type for the Blob.
@@ -161,7 +211,11 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
       // OFW state isn't changing).
       if (attachments.length === 0 && listDataHintsAtFiles(cached.listData)) {
         try {
-          const detail = await client.request<{ files?: number[] }>('GET', `/pub/v3/messages/${id}`);
+          const detail = parseOFW(
+            DetailFilesSchema,
+            await client.request('GET', `/pub/v3/messages/${id}`),
+            'GET /pub/v3/messages/{id} (attachment backfill)',
+          );
           if (Array.isArray(detail.files) && detail.files.length > 0) {
             await fetchAttachmentMetaForMessage(client, id, detail.files);
             attachments = listAttachmentsForMessage(id);
@@ -173,12 +227,11 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
       return jsonResponse({ ...cached, attachments });
     }
 
-    const detail = await client.request<{
-      id: number; body?: string; subject: string; from?: { name?: string };
-      date: { dateTime: string };
-      files?: number[];
-      recipients?: ApiRecipient[];
-    }>('GET', `/pub/v3/messages/${encodeURIComponent(args.messageId)}`);
+    const detail = parseOFW(
+      MessageDetailSchema,
+      await client.request('GET', `/pub/v3/messages/${encodeURIComponent(args.messageId)}`),
+      'GET /pub/v3/messages/{id} (ofw_get_message)',
+    );
 
     const folder: 'inbox' | 'sent' = cached?.folder ?? 'inbox';
     const row: MessageRow = {
@@ -276,11 +329,7 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
     }
 
     const myFileIDs = args.myFileIDs ?? [];
-    const { id: newId, detail, raw } = await postMessageAndRefetch<{
-      id: number; subject?: string; body?: string;
-      date?: { dateTime: string }; from?: { name?: string };
-      recipients?: ApiRecipient[];
-    }>(client, {
+    const { id: newId, detail, raw } = await postMessageAndRefetch(client, {
       subject,
       body,
       recipientIds,
@@ -288,7 +337,7 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
       draft: false,
       includeOriginal: resolvedReplyTo !== null,
       replyToId: resolvedReplyTo,
-    });
+    }, SentDetailSchema, 'ofw_send_message');
 
     let persisted: MessageRow | null = null;
     let verifyNote: string | null = null;
@@ -402,12 +451,9 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
       replyToId: resolvedReplyTo,
     };
 
-    const { id: newId, detail, raw } = await postMessageAndRefetch<{
-      id: number; subject?: string; body?: string;
-      date?: { dateTime: string };
-      replyToId?: number | null;
-      recipients?: ApiRecipient[];
-    }>(client, payload);
+    const { id: newId, detail, raw } = await postMessageAndRefetch(
+      client, payload, SavedDraftDetailSchema, 'ofw_save_draft',
+    );
 
     let persisted: DraftRow | null = null;
     let replaceNote: string | null = null;
@@ -513,10 +559,12 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
     form.append('fileName', fileName);
     form.append('shareClass', args.shareClass ?? 'PRIVATE');
 
-    const meta = await client.request<{
-      fileId: number; fileName?: string; label?: string;
-      fileType?: string; sizeInBytes?: number; shareClass?: string;
-    }>('POST', '/pub/v3/myfiles/multipart', form);
+    const meta = parseOFW(
+      UploadedFileSchema,
+      await client.request('POST', '/pub/v3/myfiles/multipart', form),
+      'POST /pub/v3/myfiles/multipart (ofw_upload_attachment)',
+      'strict',
+    );
 
     // Cache metadata so subsequent ofw_get_message calls can surface it and
     // ofw_download_attachment can short-circuit. messageId is 0 (the
