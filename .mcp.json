@@ -4,8 +4,11 @@
       "command": "npx",
       "args": ["-y", "ofw-mcp"],
       "env": {
-        "OFW_USERNAME": "${OFW_USERNAME}",
-        "OFW_PASSWORD": "${OFW_PASSWORD}"
+        "OFW_USERNAME": "${user_config.ofw_username}",
+        "OFW_PASSWORD": "${user_config.ofw_password}",
+        "OFW_INLINE_ATTACHMENTS": "${user_config.ofw_inline_attachments}",
+        "OFW_ATTACHMENTS_DIR": "${user_config.ofw_attachments_dir}",
+        "OFW_WRITE_MODE": "${user_config.ofw_write_mode}"
       }
     }
   }
