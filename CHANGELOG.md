@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.4.2](https://github.com/chrischall/ofw-mcp/compare/v2.4.1...v2.4.2) (2026-06-13)
+
+
+### Bug Fixes
+
+* revert userConfig migration, realign .mcp.json with the fleet ([#97](https://github.com/chrischall/ofw-mcp/issues/97)) ([6319764](https://github.com/chrischall/ofw-mcp/commit/6319764ec2a8babcdd758405d36f08576821793a))
+
 ## [2.4.1](https://github.com/chrischall/ofw-mcp/compare/v2.4.0...v2.4.1) (2026-06-13)
 
 
