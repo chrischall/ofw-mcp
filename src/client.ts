@@ -4,14 +4,7 @@ import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import { resolveAuth } from './auth.js';
 import { parseBoolEnv } from './config.js';
-import { clearBlankInjectedEnv } from './env-bootstrap.js';
 import { BASE_URL, OFW_PROTOCOL_HEADERS, OFW_TOKEN_TTL_MS, OFW_TOKEN_EXPIRY_SKEW_MS } from './protocol.js';
-
-// When the plugin runs via a host that maps creds from optional
-// `${user_config.*}` fields, an unset field can be injected as a blank /
-// placeholder env value. Clear those first so the next step's .env (and the
-// shell env) can still populate them — a filled field keeps its real value.
-clearBlankInjectedEnv();
 
 // Load .env for local dev; silently skip if dotenv is unavailable (e.g. mcpb
 // bundle). loadDotenvSafely applies override:false + quiet:true and swallows a
