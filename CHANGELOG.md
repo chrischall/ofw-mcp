@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.4.1](https://github.com/chrischall/ofw-mcp/compare/v2.4.0...v2.4.1) (2026-06-13)
+
+
+### Bug Fixes
+
+* make OFW credentials editable in the plugin/Connectors UI via userConfig ([#95](https://github.com/chrischall/ofw-mcp/issues/95)) ([26a2f15](https://github.com/chrischall/ofw-mcp/commit/26a2f154be228520db02f689f7ec0f4313f08250))
+
 ## [2.4.0](https://github.com/chrischall/ofw-mcp/compare/v2.3.2...v2.4.0) (2026-06-12)
 
 
