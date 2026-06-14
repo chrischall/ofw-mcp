@@ -183,7 +183,7 @@ PR titles use conventional-commit prefixes — release-please reads them to pick
 
 The bullet text in the CHANGELOG is the part after the prefix — write it like a user-facing changelog entry (`ofw_sync_messages: resume from saved cursor`), not internal shorthand (`sync tweaks`).
 
-Open with `gh pr create`; you don't need any labels. Let Claude's review verdict add `ready-to-merge` for you. If you want to skip the review on a trivial chore, add `--label ready-to-merge` at PR-create time and it'll arm immediately. Dependabot PRs auto-arm without it. The repo blocks squash merges (rebase is allowed at the repo level but unused — every workflow calls `gh pr merge --merge` so all PRs land as merge commits); if you call `gh pr merge` manually, don't pass `--squash` or the call will fail.
+Open with `gh pr create`; you don't need any labels. Let Claude's review verdict add `ready-to-merge` for you. If you want to skip the review on a trivial chore, add `--label ready-to-merge` at PR-create time and it'll arm immediately. Dependabot PRs auto-arm without it. The repo is squash-only (merge commits and rebase are blocked — `auto-merge.yml` calls `gh pr merge --auto --squash`, so every PR lands as a single squash commit whose subject is the PR title); if you call `gh pr merge` manually, don't pass `--merge`/`--rebase` or the call will fail.
 
 `main` is protected by two rulesets: *Block force-push and deletion on main* and *main protection (PR + ci)* — the latter requires every change to go through a PR and `ci` to pass (strict mode = branch must be up-to-date with main). No bypass actors; admins are not exempt. See `gh api /repos/chrischall/ofw-mcp/rulesets` to inspect.
 
