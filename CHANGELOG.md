@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.4.3](https://github.com/chrischall/ofw-mcp/compare/v2.4.2...v2.4.3) (2026-06-14)
+
+
+### Documentation
+
+* correct inverted merge-model guidance (repo is squash-only) ([#99](https://github.com/chrischall/ofw-mcp/issues/99)) ([0673060](https://github.com/chrischall/ofw-mcp/commit/0673060e3eac79b7e85ded3d473cb94193c72d37))
+
 ## [2.4.2](https://github.com/chrischall/ofw-mcp/compare/v2.4.1...v2.4.2) (2026-06-13)
 
 
