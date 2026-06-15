@@ -17,7 +17,8 @@ npm run dev          # node --env-file=.env dist/index.js (requires built dist)
 
 ```
 src/
-  index.ts          MCP server entry — McpServer + StdioServerTransport, registers all tools
+  index.ts          MCP server entry — SQLite-warning shim, then runMcp() from @chrischall/mcp-utils (builds McpServer, applies registrars with client as deps, prints banner, wires shutdown + stdio transport)
+  protocol.ts       Wire-level constants (BASE_URL, OFW_PROTOCOL_HEADERS, token TTL). Leaf module to break the client→auth→auth-password import cycle
   client.ts         OFWClient (Bearer token, 401/429 retry, JSON + binary). Delegates auth to ./auth.ts
   auth.ts           resolveAuth(): three-path priority (env vars → fetchproxy fallback → error). Template for sibling MCPs
   auth-password.ts  loginWithPassword(): legacy OFW Spring Security form login (kept as own module so auth.ts can mock it cleanly)
@@ -35,7 +36,7 @@ src/
 tests/              mirrors src/; mocks OFWClient.request via vi.spyOn; cache tests use OFW_CACHE_DIR + tmp dir
 ```
 
-Tool files use `server.registerTool(name, schema, handler)`. `index.ts` wires `registerXTools(server, client)` for each domain.
+Tool files use `server.registerTool(name, schema, handler)` and export `registerXTools(server: McpServer, client: OFWClient)`. `index.ts` passes those registrars to `runMcp({ tools: [...], deps: client })`, which calls each as `registerXTools(server, client)`.
 
 ## Environment
 
@@ -150,20 +151,33 @@ PR handling is **source-aware**:
 
 | PR author                          | `auto-review` (Claude verdict + Copilot) | Auto-merge                                                                                       |
 |------------------------------------|-------------------------------------------|--------------------------------------------------------------------------------------------------|
-| **You / same-repo collaborators**  | Yes                                       | Yes when Claude verdict = `pass` AND CI is green. `warn` / `fail` → manual `ready-to-merge`.     |
+| **You / same-repo collaborators**  | Yes                                       | Yes when Claude verdict = `pass` OR `warn` AND CI is green. Only `fail` requires a manual `ready-to-merge`. |
 | **External fork PRs**              | No (workflow skips — fork PRs can't see secrets). Manual: `@claude review this` in a comment triggers `claude.yml`. | No — you merge manually after reviewing |
 | **Dependabot / bots**              | No (skipped to keep noise down)           | Yes, armed immediately; merges when CI is green                                                  |
 
-`pr-auto-review.yml` runs `claude-code-action` on `pull_request` events with a JSON-schema-bound verdict (`pass` / `warn` / `fail`). Claude (posting as `claude[bot]` via the installed Claude GitHub App) leaves inline comments on specific lines plus a top-level summary, and emits the verdict to `structured_output`. On `verdict == pass` the workflow adds `ready-to-merge` via RELEASE_PAT and `auto-merge.yml` arms `gh pr merge --auto`. Required status check `ci` still gates the actual merge.
+`pr-auto-review.yml` is a thin stub that calls `chrischall/workflows/.github/workflows/reusable-pr-auto-review.yml@main` on `pull_request` events; the reusable pipeline runs `claude-code-action` with a JSON-schema-bound verdict (`pass` / `warn` / `fail`). Claude (posting as `claude[bot]` via the installed Claude GitHub App) leaves inline comments on specific lines plus a top-level summary, and emits the verdict to `structured_output`. On `verdict == pass` OR `warn` the pipeline adds `ready-to-merge` via RELEASE_PAT and `auto-merge.yml` (also a stub → `reusable-auto-merge.yml@main`) arms `gh pr merge --auto`. Required status check `ci` still gates the actual merge.
 
 The workflow uses `pull_request` (not `pull_request_target`) because Anthropic's GitHub App OIDC backend doesn't accept `pull_request_target` events (see [anthropics/claude-code-action#713](https://github.com/anthropics/claude-code-action/issues/713)). The tradeoff is that fork PRs are skipped entirely — for those, mention `@claude` in a PR comment to invoke the ad-hoc dispatch in `claude.yml`.
 
 Verdict semantics (Claude follows the official `code-review` plugin's severity model with confidence ≥80 to count):
-- `pass` — no 🔴 Important findings.
-- `warn` — at least one 🟡 Nit but no 🔴 Important.
-- `fail` — at least one 🔴 Important finding.
+- `pass` — no 🔴 Important findings. Arms auto-merge.
+- `warn` — at least one 🟡 Nit but no 🔴 Important. Still arms auto-merge; the nits are carried forward to an `auto-review-followup` issue (see below).
+- `fail` — at least one 🔴 Important finding. Blocks: opens/updates the follow-up issue and does NOT arm `ready-to-merge`.
 
-Override: if you want to merge through a `warn` or `fail`, add `ready-to-merge` by hand — it still arms auto-merge. To suppress auto-merge on a `pass`, remove the label or close-and-reopen the PR draft.
+Override: only a `fail` needs a manual override — add `ready-to-merge` by hand and it still arms auto-merge. To suppress auto-merge on a `pass`/`warn`, remove the label or close-and-reopen the PR draft.
+
+### Auto-review follow-up issues
+
+When a PR's auto-review verdict is `warn` or `fail`, the `chrischall/workflows` pipeline opens or updates a single `auto-review-followup` issue ("Auto-review follow-ups for PR #N") whose checklist captures every finding, and links it from the PR's `<!-- auto-review-verdict -->` comment (`📋 Tracking follow-ups: #N`). `warn` (nits only) still auto-merges — the issue carries the nits forward, so most nits are fixed in a *later* PR; `fail` blocks until the important findings are addressed on the PR itself.
+
+When asked to address the auto-review comments / review findings on a PR:
+
+1. Read the verdict comment, open the linked `auto-review-followup` issue, and treat its checklist as the work list (alongside any inline review comments).
+2. Resolve each item, checking off only what you've **verified** is genuinely fixed.
+3. If every item is resolved on the current PR, add `Closes #<issue>` to that PR's body so the merge closes it; if some are deferred, check off only the resolved ones and leave the issue open.
+4. For nits whose `warn` PR already auto-merged, address them in a follow-up PR that references `Closes #<issue>`.
+
+(Mirrors the fleet-wide convention in `~/.claude/CLAUDE.md`.)
 
 PR titles use conventional-commit prefixes — release-please reads them to pick the next version and to write the CHANGELOG entry (see [Conventional Commits](https://www.conventionalcommits.org/)):
 
