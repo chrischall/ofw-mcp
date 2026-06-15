@@ -1,5 +1,18 @@
 # Changelog
 
+## [2.4.3](https://github.com/chrischall/ofw-mcp/compare/v2.4.2...v2.4.3) (2026-06-15)
+
+
+### Refactor
+
+* remove drifted root plugin.json cruft ([#104](https://github.com/chrischall/ofw-mcp/issues/104)) ([f5d5c0f](https://github.com/chrischall/ofw-mcp/commit/f5d5c0f6ffce52fffff1f84fca2f841d1e5ec8fb))
+
+
+### Documentation
+
+* correct inverted merge-model guidance (repo is squash-only) ([#99](https://github.com/chrischall/ofw-mcp/issues/99)) ([0673060](https://github.com/chrischall/ofw-mcp/commit/0673060e3eac79b7e85ded3d473cb94193c72d37))
+* refresh CLAUDE.md architecture + auto-review follow-up convention ([#103](https://github.com/chrischall/ofw-mcp/issues/103)) ([ab92c37](https://github.com/chrischall/ofw-mcp/commit/ab92c3747b5c39b3d8ed0ee90d4ae57385777d81))
+
 ## [2.4.2](https://github.com/chrischall/ofw-mcp/compare/v2.4.1...v2.4.2) (2026-06-13)
 
 
