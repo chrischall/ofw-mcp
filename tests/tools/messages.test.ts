@@ -1922,3 +1922,58 @@ describe('response validation (issue #83)', () => {
     expect(warning).toContain('files');
   });
 });
+
+describe('ofw_get_message — sent view-status refresh', () => {
+  it('refreshes view status for a cached sent message the recipient has since read', async () => {
+    upsertMessage({
+      id: 600, folder: 'sent', subject: 'Sent', fromUser: '',
+      sentAt: '2026-06-15T00:00:00Z',
+      recipients: [{ userId: 1, name: 'Co-parent', viewedAt: null }],
+      body: 'sent-body', fetchedBodyAt: '2026-06-15T00:01:00Z',
+      replyToId: null, chainRootId: null, listData: {},
+    });
+    const client = new OFWClient();
+    vi.spyOn(client, 'request').mockResolvedValueOnce({
+      id: 600, subject: 'Sent', body: 'sent-body', date: { dateTime: '2026-06-15T00:00:00Z' },
+      recipients: [{ user: { id: 1, name: 'Co-parent' }, viewed: { dateTime: '2026-06-16T15:49:20' } }],
+    });
+    setup(client);
+    const result = await handlers.get('ofw_get_message')!({ messageId: '600' });
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.recipients[0].viewedAt).toBe('2026-06-16T15:49:20');
+    expect(getMessage(600)?.recipients[0].viewedAt).toBe('2026-06-16T15:49:20');
+  });
+
+  it('falls back to the cached row when the refresh fetch fails', async () => {
+    upsertMessage({
+      id: 601, folder: 'sent', subject: 'Sent', fromUser: '',
+      sentAt: '2026-06-15T00:00:00Z',
+      recipients: [{ userId: 1, name: 'Co-parent', viewedAt: null }],
+      body: 'sent-body', fetchedBodyAt: '2026-06-15T00:01:00Z',
+      replyToId: null, chainRootId: null, listData: {},
+    });
+    const client = new OFWClient();
+    vi.spyOn(client, 'request').mockRejectedValueOnce(new Error('network'));
+    setup(client);
+    const result = await handlers.get('ofw_get_message')!({ messageId: '601' });
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.body).toBe('sent-body');
+    expect(parsed.recipients[0].viewedAt).toBeNull();
+  });
+
+  it('does not refetch a cached sent message that already has a view timestamp', async () => {
+    upsertMessage({
+      id: 602, folder: 'sent', subject: 'Sent', fromUser: '',
+      sentAt: '2026-06-15T00:00:00Z',
+      recipients: [{ userId: 1, name: 'Co-parent', viewedAt: '2026-06-16T15:49:20' }],
+      body: 'sent-body', fetchedBodyAt: '2026-06-15T00:01:00Z',
+      replyToId: null, chainRootId: null, listData: {},
+    });
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request');
+    setup(client);
+    const result = await handlers.get('ofw_get_message')!({ messageId: '602' });
+    expect(JSON.parse(result.content[0].text).recipients[0].viewedAt).toBe('2026-06-16T15:49:20');
+    expect(spy).not.toHaveBeenCalled();
+  });
+});

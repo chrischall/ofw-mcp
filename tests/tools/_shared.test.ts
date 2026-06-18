@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { isAbsolute } from 'node:path';
-import { expandPath, jsonResponse, mapRecipients, textResponse, verifyWriteLanded } from '../../src/tools/_shared.js';
+import { expandPath, hasRealView, jsonResponse, mapRecipients, textResponse, verifyWriteLanded } from '../../src/tools/_shared.js';
 
 describe('jsonResponse', () => {
   it('wraps a payload as a single text content block with pretty-printed JSON', () => {
@@ -115,5 +115,16 @@ describe('verifyWriteLanded', () => {
   it('warns on both when the detail carries neither field', () => {
     const warning = verifyWriteLanded('message', sent, {});
     expect(warning).toMatch(/does not contain the subject and body that was posted/);
+  });
+});
+
+describe('hasRealView', () => {
+  it('is false for no recipients, null view, or the epoch-zero placeholder', () => {
+    expect(hasRealView([])).toBe(false);
+    expect(hasRealView([{ viewedAt: null }])).toBe(false);
+    expect(hasRealView([{ viewedAt: '1970-01-01T00:00:00' }])).toBe(false);
+  });
+  it('is true when any recipient has a real view timestamp', () => {
+    expect(hasRealView([{ viewedAt: null }, { viewedAt: '2026-06-16T15:49:20' }])).toBe(true);
   });
 });

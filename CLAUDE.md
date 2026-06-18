@@ -86,8 +86,7 @@ When adding a new endpoint call, define a loose schema next to the call site and
 
 ## OFW API Notes
 
-- List endpoints (e.g. `/pub/v3/messages?folders=...`) return rich data including nested `recipients[].viewed` status — prefer list data over N+1 detail calls
-- `showNeverViewed` (boolean on list items) is the reliable unread-sent indicator; the detail endpoint's `viewed` field is inconsistent (returns `null` for read messages instead of the epoch sentinel the list endpoint uses)
+- **Recipient view status has two sources that disagree** (verified against live payloads): the LIST endpoint (`/pub/v3/messages?folders=...`) carries the reliable `showNeverViewed` boolean but only an **epoch-zero placeholder** (`recipients[].viewed.dateTime === "1970-01-01T00:00:00"`) for the timestamp — even on read messages. The **DETAIL endpoint** (`/pub/v3/messages/{id}`) carries the **real "First Viewed" timestamp** in `recipients[].viewed.dateTime` (plus top-level `read` / `firstView`). Use `showNeverViewed` (list) for the read/unread boolean, and the DETAIL endpoint for the actual view time. `mapRecipients` maps the epoch placeholder → `null`; `syncMessageFolder` and `ofw_get_message` re-fetch detail to fill in the real timestamp once a sent message flips to read (older code trusted the list `viewed` field, so sent messages were stuck reporting "never viewed").
 - `ofw-version: 1.0.0` header is required on all API requests — this is the OFW protocol version, not our package version
 - Auth: `GET /ofw/login.form` to capture SESSION cookie, then `POST /ofw/login` (form-urlencoded) returns `{ auth: "<bearer>" }`. Tokens cached for 6h; 401 triggers one re-auth+replay, 429 waits 2s and replays once
 
