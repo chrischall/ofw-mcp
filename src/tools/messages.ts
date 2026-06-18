@@ -216,7 +216,15 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
             await client.request('GET', `/pub/v3/messages/${id}`),
             'GET /pub/v3/messages/{id} (view-status refresh)',
           );
-          row = { ...cached, recipients: mapRecipients(detail.recipients) };
+          const recipients = mapRecipients(detail.recipients);
+          // Keep the raw listData read-flag in step with the refreshed
+          // recipients so `showNeverViewed` can't contradict `viewedAt`.
+          // (Spreading a null/absent listData is a no-op, so no guard needed.)
+          row = {
+            ...cached,
+            recipients,
+            listData: { ...(cached.listData as Record<string, unknown> | null), showNeverViewed: !hasRealView(recipients) },
+          };
           upsertMessage(row);
         } catch {
           // Best-effort: fall back to the cached row on any fetch/parse error.

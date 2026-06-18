@@ -1942,6 +1942,28 @@ describe('ofw_get_message — sent view-status refresh', () => {
     const parsed = JSON.parse(result.content[0].text);
     expect(parsed.recipients[0].viewedAt).toBe('2026-06-16T15:49:20');
     expect(getMessage(600)?.recipients[0].viewedAt).toBe('2026-06-16T15:49:20');
+    // listData read-flag reconciled so it can't contradict recipients
+    expect(parsed.listData.showNeverViewed).toBe(false);
+  });
+
+  it('keeps showNeverViewed true when the refresh confirms the recipient still has not viewed', async () => {
+    upsertMessage({
+      id: 603, folder: 'sent', subject: 'Sent', fromUser: '',
+      sentAt: '2026-06-15T00:00:00Z',
+      recipients: [{ userId: 1, name: 'Co-parent', viewedAt: null }],
+      body: 'sent-body', fetchedBodyAt: '2026-06-15T00:01:00Z',
+      replyToId: null, chainRootId: null, listData: { showNeverViewed: true },
+    });
+    const client = new OFWClient();
+    vi.spyOn(client, 'request').mockResolvedValueOnce({
+      id: 603, subject: 'Sent', body: 'sent-body', date: { dateTime: '2026-06-15T00:00:00Z' },
+      recipients: [{ user: { id: 1, name: 'Co-parent' }, viewed: null }],
+    });
+    setup(client);
+    const result = await handlers.get('ofw_get_message')!({ messageId: '603' });
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.recipients[0].viewedAt).toBeNull();
+    expect(parsed.listData.showNeverViewed).toBe(true);
   });
 
   it('falls back to the cached row when the refresh fetch fails', async () => {
