@@ -156,8 +156,8 @@ describe('resolveAuth', () => {
   });
 
   describe('env-var sanitization', () => {
-    // readEnv() in auth.ts treats blanks, the literal strings 'undefined' /
-    // 'null', and unsubstituted `${VAR}` placeholders as unset — defends
+    // mcp-utils' readEnvVar() (used in auth.ts) treats blanks, the literal
+    // strings 'undefined' / 'null', and unsubstituted `${VAR}` placeholders as unset — defends
     // against MCP hosts that pass env blocks through without expansion.
     it('treats each sanitized OFW_PASSWORD value as unset and falls through to fetchproxy', async () => {
       const sanitized = ['undefined', 'null', '${OFW_PASSWORD}', '   ', ''];

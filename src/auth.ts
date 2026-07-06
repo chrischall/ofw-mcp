@@ -46,11 +46,10 @@
 //     specifically so it can be mocked here too. This keeps the
 //     selection logic independent of either implementation.
 
-import { readEnvVar } from '@chrischall/mcp-utils';
+import { parseBoolEnv, readEnvVar } from '@chrischall/mcp-utils';
 import { bootstrap } from '@fetchproxy/bootstrap';
 import { classifyBridgeError, FetchproxyBridgeDownError } from '@chrischall/mcp-utils/fetchproxy';
 import { loginWithPassword } from './auth-password.js';
-import { parseBoolEnv } from './config.js';
 import pkg from '../package.json' with { type: 'json' };
 
 /** Result of resolving auth, regardless of which path was taken. */
@@ -61,17 +60,6 @@ export interface ResolvedAuth {
   expiresAt?: Date;
   /** Which path produced the token. Used for diagnostics + future cache keying. */
   source: 'env' | 'fetchproxy';
-}
-
-/**
- * Read an env var, trim, and treat blank / `${UNEXPANDED}` placeholders as
- * unset. Defends against MCP hosts that pass `.mcp.json` env blocks through
- * without variable expansion. Delegates to @chrischall/mcp-utils' `readEnvVar`,
- * which applies the identical sanitization (blank, `undefined`/`null`,
- * `${...}` placeholder → unset).
- */
-function readEnv(key: string): string | undefined {
-  return readEnvVar(key);
 }
 
 /** True if the user has explicitly disabled the fetchproxy fallback. */
@@ -89,8 +77,11 @@ function fetchproxyDisabled(): boolean {
  */
 export async function resolveAuth(): Promise<ResolvedAuth> {
   // ── Path 1: env-var credentials (unchanged from pre-fetchproxy behavior).
-  const username = readEnv('OFW_USERNAME');
-  const password = readEnv('OFW_PASSWORD');
+  // `readEnvVar` trims and treats blank / `"undefined"` / `"null"` /
+  // `${UNEXPANDED}` placeholders as unset — defends against MCP hosts that
+  // pass `.mcp.json` env blocks through without variable expansion.
+  const username = readEnvVar('OFW_USERNAME');
+  const password = readEnvVar('OFW_PASSWORD');
   if (username && password) {
     const { token, expiresAt } = await loginWithPassword(username, password);
     return { token, expiresAt, source: 'env' };
