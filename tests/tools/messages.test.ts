@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { z } from 'zod';
 import { mkdtempSync, rmSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { OFWClient } from '../../src/client.js';
 import { registerMessageTools } from '../../src/tools/messages.js';
@@ -1214,6 +1214,35 @@ describe('ofw_download_attachment', () => {
       // File actually exists on disk
       const written = readFileSync(parsed.path);
       expect(written.equals(xlsxBytes)).toBe(true);
+    } finally {
+      rmSync(downloadDir, { recursive: true, force: true });
+    }
+  });
+
+  it('sanitizes a co-parent-controlled ../ filename so the write stays in the target dir', async () => {
+    const client = new OFWClient();
+    const bytes = Buffer.from('evil-bytes', 'utf8');
+    // The co-parent who uploaded the file controls the metadata fileName.
+    const malicious = '../../../../tmp/ofw-traversal-evil.png';
+    vi.spyOn(client, 'request').mockResolvedValueOnce({
+      fileId: 66, label: malicious, fileName: malicious,
+      fileType: 'image/png', fileSize: bytes.length,
+    });
+    vi.spyOn(client, 'requestBinary').mockResolvedValueOnce({
+      body: bytes, contentType: 'image/png', suggestedFileName: malicious,
+    });
+    setup(client);
+
+    const downloadDir = mkdtempSync(join(tmpdir(), 'ofw-dl-'));
+    try {
+      const result = await handlers.get('ofw_download_attachment')!({ fileId: 66, saveTo: downloadDir + '/' });
+      const parsed = JSON.parse(result.content[0].text);
+      // The written path must stay directly under the requested dir…
+      expect(resolve(dirname(parsed.path))).toBe(resolve(downloadDir));
+      // …with the traversal segments stripped (basename only).
+      expect(parsed.path).toMatch(/66-ofw-traversal-evil\.png$/);
+      expect(parsed.path).not.toContain('..');
+      expect(readFileSync(parsed.path).equals(bytes)).toBe(true);
     } finally {
       rmSync(downloadDir, { recursive: true, force: true });
     }

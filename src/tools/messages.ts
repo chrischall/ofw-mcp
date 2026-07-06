@@ -640,13 +640,18 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
     }
 
     let dest: string;
+    // The filename comes from OFW file metadata — i.e. it is controlled by the
+    // co-parent who uploaded the attachment. basename() it before interpolating
+    // into a path so a crafted `../…` name can't escape the target directory
+    // (the upload path at :549 already applies basename to its input).
+    const safeName = basename(cached.fileName);
     if (args.saveTo) {
       // Treat saveTo as a directory if it ends with a separator; otherwise as a full path.
       const isDirArg = args.saveTo.endsWith('/') || args.saveTo.endsWith('\\');
       const abs = expandPath(args.saveTo);
-      dest = isDirArg ? join(abs, `${fileId}-${cached.fileName}`) : abs;
+      dest = isDirArg ? join(abs, `${fileId}-${safeName}`) : abs;
     } else {
-      dest = join(getAttachmentsDir(), `${fileId}-${cached.fileName}`);
+      dest = join(getAttachmentsDir(), `${fileId}-${safeName}`);
     }
 
     if (!args.force && cached.downloadedPath === dest) {
