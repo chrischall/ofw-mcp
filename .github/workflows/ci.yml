@@ -1,12 +1,20 @@
 name: CI
 
 # Thin stub — the gate and steps live in chrischall/workflows.
-# NOTE: converting to a reusable workflow renames the required check from
-# `ci` to `ci / ci`; scripts/update-ruleset.sh flips the ruleset.
+# Status-mode gate: un-armed PRs are blocked by a yellow `ci-gated: pending`
+# commit status (not a red failing job); the repo ruleset must require the
+# `ci-gated` status context (scripts/update-ruleset.sh flips it from `ci / ci`).
+# The permissions block is load-bearing: the reusable workflow posts the
+# `ci-gated` status with this token, and (a) callers pass read-only by default,
+# (b) dependabot-triggered runs are read-only unless permissions are explicit.
 
 on:
   pull_request:
     types: [opened, synchronize, reopened, labeled]
+
+permissions:
+  contents: read
+  statuses: write
 
 jobs:
   ci:
@@ -15,3 +23,4 @@ jobs:
       node-version: "26"
       build-command: npm run build
       test-command: npm run test:coverage
+      gate-mode: status
