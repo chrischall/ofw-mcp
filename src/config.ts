@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { parseBoolEnv as parseBoolEnvUtil } from '@chrischall/mcp-utils';
+import { parseBoolEnv, readEnvVar } from '@chrischall/mcp-utils';
 
 // Cache identity drives the per-user SQLite DB filename. Order of preference:
 //   1. OFW_CACHE_IDENTITY — explicit override for users who want to label the
@@ -12,11 +12,7 @@ import { parseBoolEnv as parseBoolEnvUtil } from '@chrischall/mcp-utils';
 //      Single-user installs are fine on this; multi-account users should set
 //      OFW_CACHE_IDENTITY explicitly so their caches don't collide.
 function readCacheIdentity(): string {
-  const explicit = process.env.OFW_CACHE_IDENTITY;
-  if (typeof explicit === 'string' && explicit.trim().length > 0) return explicit.trim();
-  const username = process.env.OFW_USERNAME;
-  if (typeof username === 'string' && username.trim().length > 0) return username.trim();
-  return '_default';
+  return readEnvVar('OFW_CACHE_IDENTITY') ?? readEnvVar('OFW_USERNAME') ?? '_default';
 }
 
 export function getCacheDir(): string {
@@ -40,20 +36,6 @@ export function getAttachmentsDir(): string {
   // just downloaded them. Downloads is the standard "user-accessible files"
   // location across macOS/Linux/Windows.
   return join(homedir(), 'Downloads', 'ofw-mcp');
-}
-
-/**
- * True when a boolean-shaped env var is set to "1", "true", "yes", or "on"
- * (case-insensitive, trimmed). Anything else — unset, empty, or other
- * values — is false. Used for OFW_INLINE_ATTACHMENTS, OFW_DISABLE_FETCHPROXY,
- * OFW_DEBUG_LOG, etc.
- *
- * Delegates to @chrischall/mcp-utils' `parseBoolEnv` (which also recognizes
- * the falsy set 0/false/no/off — behavior-equivalent here since callers only
- * care about the truthy case and everything else defaults to false).
- */
-export function parseBoolEnv(name: string): boolean {
-  return parseBoolEnvUtil(name);
 }
 
 export type WriteMode = 'none' | 'drafts' | 'all';
