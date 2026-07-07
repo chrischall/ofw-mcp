@@ -91,14 +91,23 @@ const PostMessagesResponseSchema = z.looseObject({
  * `if (result.id !== null)`. When id is null (no id field in the
  * response — never observed in production, but defensive), `raw`
  * carries the POST response so the caller can still surface it.
+ *
+ * The generic is parametrized on the schema's OUTPUT type `T`
+ * (`detailSchema: z.ZodType<T>`, `detail: T`) rather than on the schema
+ * type itself. This mirrors `parseLenient`'s own signature
+ * (`<T>(schema: ZodType<T>, …): T`) exactly, so `T` is inferred straight
+ * from the schema and flows into the return type with no `as` cast — the
+ * compiler verifies that `detail` matches `detailSchema`'s output. (A
+ * `<S extends z.ZodType>` constraint would widen the output to `unknown`
+ * and force a cast at this call site.)
  */
-export async function postMessageAndRefetch<S extends z.ZodType>(
+export async function postMessageAndRefetch<T>(
   client: OFWClient,
   payload: unknown,
-  detailSchema: S,
+  detailSchema: z.ZodType<T>,
   ctx: string,
 ): Promise<
-  | { id: number; detail: z.output<S>; raw: unknown }
+  | { id: number; detail: T; raw: unknown }
   | { id: null; detail: null; raw: unknown }
 > {
   const raw = parseLenient(
@@ -115,6 +124,6 @@ export async function postMessageAndRefetch<S extends z.ZodType>(
     detailSchema,
     await client.request('GET', `/pub/v3/messages/${id}`),
     { label: 'ofw-mcp', context: `GET /pub/v3/messages/{id} (${ctx})`, mode: 'strict' },
-  ) as z.output<S>;
+  );
   return { id, detail, raw };
 }
