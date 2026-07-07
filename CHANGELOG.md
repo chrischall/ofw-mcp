@@ -1,5 +1,24 @@
 # Changelog
 
+## [2.4.4](https://github.com/chrischall/ofw-mcp/compare/v2.4.3...v2.4.4) (2026-07-07)
+
+
+### Bug Fixes
+
+* bump @chrischall/mcp-utils to 0.12.0 ([#120](https://github.com/chrischall/ofw-mcp/issues/120)) ([6420871](https://github.com/chrischall/ofw-mcp/commit/6420871101d7658fddda1b65558c61943d475e51))
+* sanitize co-parent-controlled attachment filename on download (path traversal) ([#115](https://github.com/chrischall/ofw-mcp/issues/115)) ([82232d6](https://github.com/chrischall/ofw-mcp/commit/82232d639b24b78a494ff6a4300f2e564c18a760))
+
+
+### Refactor
+
+* adopt mcp-utils parseLenient ([#117](https://github.com/chrischall/ofw-mcp/issues/117)) ([ffd8183](https://github.com/chrischall/ofw-mcp/commit/ffd818310779c3b9f41be08499bfa17054bfc5c7))
+* tighten parseLenient generic call site in ofw _shared ([#119](https://github.com/chrischall/ofw-mcp/issues/119)) ([51836de](https://github.com/chrischall/ofw-mcp/commit/51836de1e84f535b56d1fd5d8d6ce4b698b2f2b3))
+
+
+### Documentation
+
+* document first-party dependency-bump label exception ([#121](https://github.com/chrischall/ofw-mcp/issues/121)) ([4fd8948](https://github.com/chrischall/ofw-mcp/commit/4fd894886f00cffe723c294bed7ba2965910462b))
+
 ## [2.4.3](https://github.com/chrischall/ofw-mcp/compare/v2.4.2...v2.4.3) (2026-06-15)
 
 
