@@ -2,7 +2,7 @@ import { expandPath as expandPathUtil, rawTextResult, textResult } from '@chrisc
 import { z } from 'zod';
 import type { Recipient } from '../cache.js';
 import type { OFWClient } from '../client.js';
-import { parseOFW } from '../validate.js';
+import { parseLenient } from '@chrischall/mcp-utils';
 
 // Pretty-printed JSON tool result. Thin wrapper over @chrischall/mcp-utils'
 // `textResult` so the rest of the codebase keeps the local name.
@@ -101,22 +101,20 @@ export async function postMessageAndRefetch<S extends z.ZodType>(
   | { id: number; detail: z.output<S>; raw: unknown }
   | { id: null; detail: null; raw: unknown }
 > {
-  const raw = parseOFW(
+  const raw = parseLenient(
     PostMessagesResponseSchema,
     await client.request('POST', '/pub/v3/messages', payload),
-    `POST /pub/v3/messages (${ctx})`,
-    'strict',
+    { label: 'ofw-mcp', context: `POST /pub/v3/messages (${ctx})`, mode: 'strict' },
   );
   const id =
     typeof raw?.id === 'number' ? raw.id
     : typeof raw?.entityId === 'number' ? raw.entityId
     : null;
   if (id === null) return { id: null, detail: null, raw };
-  const detail = parseOFW(
+  const detail = parseLenient(
     detailSchema,
     await client.request('GET', `/pub/v3/messages/${id}`),
-    `GET /pub/v3/messages/{id} (${ctx})`,
-    'strict',
-  );
+    { label: 'ofw-mcp', context: `GET /pub/v3/messages/{id} (${ctx})`, mode: 'strict' },
+  ) as z.output<S>;
   return { id, detail, raw };
 }

@@ -1898,7 +1898,7 @@ describe('response validation (issue #83)', () => {
     vi.spyOn(client, 'request').mockResolvedValueOnce({ entityId: '42' }); // string, not number
     setup(client);
     await expect(handlers.get('ofw_send_message')!({ subject: 'S', body: 'B', recipientIds: [1] }))
-      .rejects.toThrow(/OFW response for POST \/pub\/v3\/messages \(ofw_send_message\) failed validation: entityId/);
+      .rejects.toThrow(/Unexpected POST \/pub\/v3\/messages \(ofw_send_message\) shape from the upstream API\. entityId/);
   });
 
   it('send_message: strict — a mistyped field in the re-fetched detail throws', async () => {
@@ -1908,7 +1908,7 @@ describe('response validation (issue #83)', () => {
       .mockResolvedValueOnce({ subject: 123 }); // detail subject mistyped
     setup(client);
     await expect(handlers.get('ofw_send_message')!({ subject: 'S', body: 'B', recipientIds: [1] }))
-      .rejects.toThrow(/GET \/pub\/v3\/messages\/\{id\} \(ofw_send_message\) failed validation: subject/);
+      .rejects.toThrow(/Unexpected GET \/pub\/v3\/messages\/\{id\} \(ofw_send_message\) shape from the upstream API\. subject/);
   });
 
   it('save_draft: strict — a mistyped replyToId in the re-fetched detail throws', async () => {
@@ -1918,7 +1918,7 @@ describe('response validation (issue #83)', () => {
       .mockResolvedValueOnce({ replyToId: 'nope' });
     setup(client);
     await expect(handlers.get('ofw_save_draft')!({ subject: 'S', body: 'B' }))
-      .rejects.toThrow(/\(ofw_save_draft\) failed validation: replyToId/);
+      .rejects.toThrow(/\(ofw_save_draft\) shape from the upstream API\. replyToId/);
   });
 
   it('upload_attachment: strict — a missing fileId in the upload response throws', async () => {
@@ -1930,7 +1930,7 @@ describe('response validation (issue #83)', () => {
     writeFileSync(filePath, 'x');
     try {
       await expect(handlers.get('ofw_upload_attachment')!({ path: filePath }))
-        .rejects.toThrow(/POST \/pub\/v3\/myfiles\/multipart \(ofw_upload_attachment\) failed validation: fileId/);
+        .rejects.toThrow(/Unexpected POST \/pub\/v3\/myfiles\/multipart \(ofw_upload_attachment\) shape from the upstream API\. fileId/);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -1946,7 +1946,7 @@ describe('response validation (issue #83)', () => {
     setup(client);
     const result = await handlers.get('ofw_get_message')!({ messageId: 60 });
     expect(JSON.parse(result.content[0].text).id).toBe(60); // raw flows through
-    const warning = err.mock.calls.map((c) => c[0]).find((m) => typeof m === 'string' && m.includes('failed validation'));
+    const warning = err.mock.calls.map((c) => c[0]).find((m) => typeof m === 'string' && m.includes('proceeding with the raw response'));
     expect(warning).toContain('GET /pub/v3/messages/{id} (ofw_get_message)');
     expect(warning).toContain('files');
   });

@@ -25,7 +25,6 @@ src/
   config.ts         env-driven cache dir + sha256(OFW_CACHE_IDENTITY|OFW_USERNAME|"_default") DB path + attachments dir
   cache.ts          node:sqlite cache (messages, drafts, attachments, sync_state, meta) with typed CRUD + findLatestReplyTip
   sync.ts           resolveFolderIds + syncMessageFolder/syncDrafts/syncAll + attachment-meta fetch
-  validate.ts       parseOFW(): zod validation of OFW responses at call sites (lenient reads / strict writes)
   tools/
     _shared.ts      recipient mapping, response helpers, path expansion
     user.ts         ofw_get_profile, ofw_get_notifications
@@ -78,12 +77,12 @@ The split into `auth.ts` + `auth-password.ts` is deliberate: tests mock `auth-pa
 
 ## Response validation (issue #83)
 
-Every JSON response is validated with zod at the call site via `parseOFW(schema, raw, ctx, mode)` (`src/validate.ts`). Schemas are `z.looseObject(...)` covering ONLY the fields the code reads — unknown keys pass through (and survive into cached `listData`/`metadata`). Two modes:
+Every JSON response is validated with zod at the call site via `parseLenient(schema, raw, { label, context, mode })` from `@chrischall/mcp-utils` (the fleet helper that consolidated ofw's old `parseOFW`). Schemas are `z.looseObject(...)` covering ONLY the fields the code reads — unknown keys pass through (and survive into cached `listData`/`metadata`). Pass `label: 'ofw-mcp'` and a per-call `context` string. Two modes:
 
-- **lenient** (default) — all read/sync paths. Mismatch → structured stderr warning naming the endpoint and fields, then the RAW response flows on through the existing `??` fallbacks. An OFW backend change degrades gracefully but never silently.
-- **strict** — write boundaries (`postMessageAndRefetch`'s POST + detail GET, `ofw_upload_attachment`). Mismatch → throw: proceeding on an unverifiable response risks deleting a draft, mis-reporting a send, or caching an unusable fileId. Absence of optional fields stays legal (handled by `verifyWriteLanded` WARNINGs); a present-but-mistyped field throws.
+- **lenient** (default) — all read/sync paths. Mismatch → structured stderr warning (`[ofw-mcp] WARNING: unexpected <context> shape …`) naming the endpoint and fields, then the RAW response flows on through the existing `??` fallbacks. An OFW backend change degrades gracefully but never silently.
+- **strict** (`mode: 'strict'`) — write boundaries (`postMessageAndRefetch`'s POST + detail GET, `ofw_upload_attachment`). Mismatch → throw an `McpToolError`: proceeding on an unverifiable response risks deleting a draft, mis-reporting a send, or caching an unusable fileId. Absence of optional fields stays legal (handled by `verifyWriteLanded` WARNINGs); a present-but-mistyped field throws.
 
-When adding a new endpoint call, define a loose schema next to the call site and wrap the `client.request` in `parseOFW`. Sibling MCPs copy this pattern.
+When adding a new endpoint call, define a loose schema next to the call site and wrap the `client.request` in `parseLenient`. Sibling MCPs copy this pattern.
 
 ## OFW API Notes
 

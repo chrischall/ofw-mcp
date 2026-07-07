@@ -14,7 +14,7 @@ import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, extname, join } from 'node:path';
 import { fileBlob } from '@chrischall/mcp-utils';
 import { ApiRecipientSchema, expandPath, jsonResponse, mapRecipients, postMessageAndRefetch, textResponse, verifyWriteLanded } from './_shared.js';
-import { parseOFW } from '../validate.js';
+import { parseLenient } from '@chrischall/mcp-utils';
 
 // Schemas for the load-bearing fields of each /pub/v3 response this file
 // reads (issue #83). Loose: unknown keys pass through into cached listData.
@@ -211,10 +211,10 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
       // OFW state isn't changing).
       if (attachments.length === 0 && listDataHintsAtFiles(cached.listData)) {
         try {
-          const detail = parseOFW(
+          const detail = parseLenient(
             DetailFilesSchema,
             await client.request('GET', `/pub/v3/messages/${id}`),
-            'GET /pub/v3/messages/{id} (attachment backfill)',
+            { label: 'ofw-mcp', context: 'GET /pub/v3/messages/{id} (attachment backfill)' },
           );
           if (Array.isArray(detail.files) && detail.files.length > 0) {
             await fetchAttachmentMetaForMessage(client, id, detail.files);
@@ -227,10 +227,10 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
       return jsonResponse({ ...cached, attachments });
     }
 
-    const detail = parseOFW(
+    const detail = parseLenient(
       MessageDetailSchema,
       await client.request('GET', `/pub/v3/messages/${encodeURIComponent(args.messageId)}`),
-      'GET /pub/v3/messages/{id} (ofw_get_message)',
+      { label: 'ofw-mcp', context: 'GET /pub/v3/messages/{id} (ofw_get_message)' },
     );
 
     const folder: 'inbox' | 'sent' = cached?.folder ?? 'inbox';
@@ -559,11 +559,10 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
     form.append('fileName', fileName);
     form.append('shareClass', args.shareClass ?? 'PRIVATE');
 
-    const meta = parseOFW(
+    const meta = parseLenient(
       UploadedFileSchema,
       await client.request('POST', '/pub/v3/myfiles/multipart', form),
-      'POST /pub/v3/myfiles/multipart (ofw_upload_attachment)',
-      'strict',
+      { label: 'ofw-mcp', context: 'POST /pub/v3/myfiles/multipart (ofw_upload_attachment)', mode: 'strict' },
     );
 
     // Cache metadata so subsequent ofw_get_message calls can surface it and
