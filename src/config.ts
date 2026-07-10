@@ -85,6 +85,27 @@ export function getWriteMode(): WriteMode {
   return 'none';
 }
 
+/**
+ * Calendar-write opt-in for 'drafts' deployments.
+ *
+ * Messages have a draft stage (the human sends from the web UI), so 'drafts'
+ * mode keeps a human between model output and the court-visible record.
+ * Calendar events have no draft stage — but unlike a sent message they are
+ * fully reversible (editable and deletable), so a drafts-mode user may accept
+ * direct calendar writes without accepting sends. Setting
+ * OFW_CALENDAR_WRITES=true registers the calendar write tools
+ * (ofw_create_event, ofw_update_event, ofw_delete_event) alongside the
+ * draft-level message writes.
+ *
+ * The flag never overrides 'none': that mode is the hard read-only guarantee,
+ * including the fail-closed result of an unrecognized OFW_WRITE_MODE.
+ */
+export function getCalendarWritesAllowed(): boolean {
+  const mode = getWriteMode();
+  if (mode === 'all') return true;
+  return mode === 'drafts' && parseBoolEnv('OFW_CALENDAR_WRITES');
+}
+
 // Default for ofw_download_attachment's `inline` arg when the caller doesn't
 // pass one. Set OFW_INLINE_ATTACHMENTS=true to have attachments returned as
 // MCP content blocks by default (skipping disk) — useful on sandboxed MCP

@@ -2,11 +2,12 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import type { OFWClient } from '../client.js';
 import { jsonResponse, textResponse } from './_shared.js';
-import { getWriteMode } from '../config.js';
+import { getCalendarWritesAllowed } from '../config.js';
 
 export function registerCalendarTools(server: McpServer, client: OFWClient): void {
-  // Calendar writes land on the court-visible record — OFW_WRITE_MODE 'all' only.
-  const allowWrites = getWriteMode() === 'all';
+  // Calendar writes land on the court-visible record with no draft stage, but
+  // events are reversible — 'all' mode, or 'drafts' + OFW_CALENDAR_WRITES=true.
+  const allowWrites = getCalendarWritesAllowed();
 
   server.registerTool('ofw_list_events', {
     description: 'List OurFamilyWizard calendar events in a date range',

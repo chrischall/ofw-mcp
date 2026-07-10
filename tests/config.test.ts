@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { getAttachmentsDir, getCacheDbPath, getDefaultInlineAttachments, getCacheDir, getWriteMode } from '../src/config.js';
+import { getAttachmentsDir, getCacheDbPath, getCalendarWritesAllowed, getDefaultInlineAttachments, getCacheDir, getWriteMode } from '../src/config.js';
 
 describe('getCacheDbPath', () => {
   let tmp: string;
@@ -173,5 +173,53 @@ describe('getWriteMode', () => {
     process.env.OFW_WRITE_MODE = 'readonly';
     expect(getWriteMode()).toBe('none');
     expect(err).toHaveBeenCalledWith(expect.stringContaining('Unrecognized OFW_WRITE_MODE "readonly"'));
+  });
+});
+
+describe('getCalendarWritesAllowed', () => {
+  let originalMode: string | undefined;
+  let originalFlag: string | undefined;
+  beforeEach(() => {
+    originalMode = process.env.OFW_WRITE_MODE;
+    originalFlag = process.env.OFW_CALENDAR_WRITES;
+    delete process.env.OFW_WRITE_MODE;
+    delete process.env.OFW_CALENDAR_WRITES;
+  });
+  afterEach(() => {
+    if (originalMode === undefined) delete process.env.OFW_WRITE_MODE;
+    else process.env.OFW_WRITE_MODE = originalMode;
+    if (originalFlag === undefined) delete process.env.OFW_CALENDAR_WRITES;
+    else process.env.OFW_CALENDAR_WRITES = originalFlag;
+    vi.restoreAllMocks();
+  });
+
+  it('is true in mode "all" regardless of the flag', () => {
+    process.env.OFW_WRITE_MODE = 'all';
+    expect(getCalendarWritesAllowed()).toBe(true);
+    process.env.OFW_CALENDAR_WRITES = 'false';
+    expect(getCalendarWritesAllowed()).toBe(true);
+  });
+
+  it('is false in mode "drafts" without the flag', () => {
+    process.env.OFW_WRITE_MODE = 'drafts';
+    expect(getCalendarWritesAllowed()).toBe(false);
+    process.env.OFW_CALENDAR_WRITES = 'no';
+    expect(getCalendarWritesAllowed()).toBe(false);
+  });
+
+  it('is true in mode "drafts" with OFW_CALENDAR_WRITES set', () => {
+    process.env.OFW_WRITE_MODE = 'drafts';
+    process.env.OFW_CALENDAR_WRITES = 'true';
+    expect(getCalendarWritesAllowed()).toBe(true);
+  });
+
+  it('never overrides mode "none", including the unrecognized-mode fail-closed path', () => {
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    process.env.OFW_CALENDAR_WRITES = 'true';
+    process.env.OFW_WRITE_MODE = 'none';
+    expect(getCalendarWritesAllowed()).toBe(false);
+    process.env.OFW_WRITE_MODE = 'readonly'; // fails closed to 'none'
+    expect(getCalendarWritesAllowed()).toBe(false);
+    expect(err).toHaveBeenCalled();
   });
 });

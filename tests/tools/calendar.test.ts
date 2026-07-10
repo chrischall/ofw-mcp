@@ -106,16 +106,21 @@ describe('ofw_delete_event', () => {
 
 
 describe('OFW_WRITE_MODE gating', () => {
-  let original: string | undefined;
+  let originalMode: string | undefined;
+  let originalFlag: string | undefined;
   beforeEach(() => {
-    original = process.env.OFW_WRITE_MODE;
+    originalMode = process.env.OFW_WRITE_MODE;
+    originalFlag = process.env.OFW_CALENDAR_WRITES;
+    delete process.env.OFW_CALENDAR_WRITES;
   });
   afterEach(() => {
-    if (original === undefined) delete process.env.OFW_WRITE_MODE;
-    else process.env.OFW_WRITE_MODE = original;
+    if (originalMode === undefined) delete process.env.OFW_WRITE_MODE;
+    else process.env.OFW_WRITE_MODE = originalMode;
+    if (originalFlag === undefined) delete process.env.OFW_CALENDAR_WRITES;
+    else process.env.OFW_CALENDAR_WRITES = originalFlag;
   });
 
-  it('calendar writes are absent below mode "all"', () => {
+  it('calendar writes are absent below mode "all" without the opt-in flag', () => {
     for (const mode of ['none', 'drafts']) {
       process.env.OFW_WRITE_MODE = mode;
       setup(makeClient({}));
@@ -132,5 +137,23 @@ describe('OFW_WRITE_MODE gating', () => {
     expect(handlers.has('ofw_create_event')).toBe(true);
     expect(handlers.has('ofw_update_event')).toBe(true);
     expect(handlers.has('ofw_delete_event')).toBe(true);
+  });
+
+  it('OFW_CALENDAR_WRITES=true registers calendar writes in mode "drafts"', () => {
+    process.env.OFW_WRITE_MODE = 'drafts';
+    process.env.OFW_CALENDAR_WRITES = 'true';
+    setup(makeClient({}));
+    expect(handlers.has('ofw_create_event')).toBe(true);
+    expect(handlers.has('ofw_update_event')).toBe(true);
+    expect(handlers.has('ofw_delete_event')).toBe(true);
+  });
+
+  it('OFW_CALENDAR_WRITES does not override mode "none"', () => {
+    process.env.OFW_WRITE_MODE = 'none';
+    process.env.OFW_CALENDAR_WRITES = 'true';
+    setup(makeClient({}));
+    expect(handlers.has('ofw_create_event')).toBe(false);
+    expect(handlers.has('ofw_update_event')).toBe(false);
+    expect(handlers.has('ofw_delete_event')).toBe(false);
   });
 });
