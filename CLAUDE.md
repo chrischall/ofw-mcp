@@ -17,14 +17,14 @@ npm run dev          # node --env-file=.env dist/index.js (requires built dist)
 
 ```
 src/
-  index.ts          MCP server entry — McpServer + StdioServerTransport, registers all tools
+  index.ts          MCP server entry — SQLite-warning shim, then runMcp() from @chrischall/mcp-utils (builds McpServer, applies registrars with client as deps, prints banner, wires shutdown + stdio transport)
+  protocol.ts       Wire-level constants (BASE_URL, OFW_PROTOCOL_HEADERS, token TTL). Leaf module to break the client→auth→auth-password import cycle
   client.ts         OFWClient (Bearer token, 401/429 retry, JSON + binary). Delegates auth to ./auth.ts
   auth.ts           resolveAuth(): three-path priority (env vars → fetchproxy fallback → error). Template for sibling MCPs
   auth-password.ts  loginWithPassword(): legacy OFW Spring Security form login (kept as own module so auth.ts can mock it cleanly)
   config.ts         env-driven cache dir + sha256(OFW_CACHE_IDENTITY|OFW_USERNAME|"_default") DB path + attachments dir
   cache.ts          node:sqlite cache (messages, drafts, attachments, sync_state, meta) with typed CRUD + findLatestReplyTip
   sync.ts           resolveFolderIds + syncMessageFolder/syncDrafts/syncAll + attachment-meta fetch
-  validate.ts       parseOFW(): zod validation of OFW responses at call sites (lenient reads / strict writes)
   tools/
     _shared.ts      recipient mapping, response helpers, path expansion
     user.ts         ofw_get_profile, ofw_get_notifications
@@ -35,7 +35,7 @@ src/
 tests/              mirrors src/; mocks OFWClient.request via vi.spyOn; cache tests use OFW_CACHE_DIR + tmp dir
 ```
 
-Tool files use `server.registerTool(name, schema, handler)`. `index.ts` wires `registerXTools(server, client)` for each domain.
+Tool files use `server.registerTool(name, schema, handler)` and export `registerXTools(server: McpServer, client: OFWClient)`. `index.ts` passes those registrars to `runMcp({ tools: [...], deps: client })`, which calls each as `registerXTools(server, client)`.
 
 ## Environment
 
@@ -78,12 +78,12 @@ The split into `auth.ts` + `auth-password.ts` is deliberate: tests mock `auth-pa
 
 ## Response validation (issue #83)
 
-Every JSON response is validated with zod at the call site via `parseOFW(schema, raw, ctx, mode)` (`src/validate.ts`). Schemas are `z.looseObject(...)` covering ONLY the fields the code reads — unknown keys pass through (and survive into cached `listData`/`metadata`). Two modes:
+Every JSON response is validated with zod at the call site via `parseLenient(schema, raw, { label, context, mode })` from `@chrischall/mcp-utils` (the fleet helper that consolidated ofw's old `parseOFW`). Schemas are `z.looseObject(...)` covering ONLY the fields the code reads — unknown keys pass through (and survive into cached `listData`/`metadata`). Pass `label: 'ofw-mcp'` and a per-call `context` string. Two modes:
 
-- **lenient** (default) — all read/sync paths. Mismatch → structured stderr warning naming the endpoint and fields, then the RAW response flows on through the existing `??` fallbacks. An OFW backend change degrades gracefully but never silently.
-- **strict** — write boundaries (`postMessageAndRefetch`'s POST + detail GET, `ofw_upload_attachment`). Mismatch → throw: proceeding on an unverifiable response risks deleting a draft, mis-reporting a send, or caching an unusable fileId. Absence of optional fields stays legal (handled by `verifyWriteLanded` WARNINGs); a present-but-mistyped field throws.
+- **lenient** (default) — all read/sync paths. Mismatch → structured stderr warning (`[ofw-mcp] WARNING: unexpected <context> shape …`) naming the endpoint and fields, then the RAW response flows on through the existing `??` fallbacks. An OFW backend change degrades gracefully but never silently.
+- **strict** (`mode: 'strict'`) — write boundaries (`postMessageAndRefetch`'s POST + detail GET, `ofw_upload_attachment`). Mismatch → throw an `McpToolError`: proceeding on an unverifiable response risks deleting a draft, mis-reporting a send, or caching an unusable fileId. Absence of optional fields stays legal (handled by `verifyWriteLanded` WARNINGs); a present-but-mistyped field throws.
 
-When adding a new endpoint call, define a loose schema next to the call site and wrap the `client.request` in `parseOFW`. Sibling MCPs copy this pattern.
+When adding a new endpoint call, define a loose schema next to the call site and wrap the `client.request` in `parseLenient`. Sibling MCPs copy this pattern.
 
 ## OFW API Notes
 
@@ -151,20 +151,33 @@ PR handling is **source-aware**:
 
 | PR author                          | `auto-review` (Claude verdict + Copilot) | Auto-merge                                                                                       |
 |------------------------------------|-------------------------------------------|--------------------------------------------------------------------------------------------------|
-| **You / same-repo collaborators**  | Yes                                       | Yes when Claude verdict = `pass` AND CI is green. `warn` / `fail` → manual `ready-to-merge`.     |
+| **You / same-repo collaborators**  | Yes                                       | Yes when Claude verdict = `pass` OR `warn` AND CI is green. Only `fail` requires a manual `ready-to-merge`. |
 | **External fork PRs**              | No (workflow skips — fork PRs can't see secrets). Manual: `@claude review this` in a comment triggers `claude.yml`. | No — you merge manually after reviewing |
 | **Dependabot / bots**              | No (skipped to keep noise down)           | Yes, armed immediately; merges when CI is green                                                  |
 
-`pr-auto-review.yml` runs `claude-code-action` on `pull_request` events with a JSON-schema-bound verdict (`pass` / `warn` / `fail`). Claude (posting as `claude[bot]` via the installed Claude GitHub App) leaves inline comments on specific lines plus a top-level summary, and emits the verdict to `structured_output`. On `verdict == pass` the workflow adds `ready-to-merge` via RELEASE_PAT and `auto-merge.yml` arms `gh pr merge --auto`. Required status check `ci` still gates the actual merge.
+`pr-auto-review.yml` is a thin stub that calls `chrischall/workflows/.github/workflows/reusable-pr-auto-review.yml@main` on `pull_request` events; the reusable pipeline runs `claude-code-action` with a JSON-schema-bound verdict (`pass` / `warn` / `fail`). Claude (posting as `claude[bot]` via the installed Claude GitHub App) leaves inline comments on specific lines plus a top-level summary, and emits the verdict to `structured_output`. On `verdict == pass` OR `warn` the pipeline adds `ready-to-merge` via RELEASE_PAT and `auto-merge.yml` (also a stub → `reusable-auto-merge.yml@main`) arms `gh pr merge --auto`. Required status check `ci` still gates the actual merge.
 
 The workflow uses `pull_request` (not `pull_request_target`) because Anthropic's GitHub App OIDC backend doesn't accept `pull_request_target` events (see [anthropics/claude-code-action#713](https://github.com/anthropics/claude-code-action/issues/713)). The tradeoff is that fork PRs are skipped entirely — for those, mention `@claude` in a PR comment to invoke the ad-hoc dispatch in `claude.yml`.
 
 Verdict semantics (Claude follows the official `code-review` plugin's severity model with confidence ≥80 to count):
-- `pass` — no 🔴 Important findings.
-- `warn` — at least one 🟡 Nit but no 🔴 Important.
-- `fail` — at least one 🔴 Important finding.
+- `pass` — no 🔴 Important findings. Arms auto-merge.
+- `warn` — at least one 🟡 Nit but no 🔴 Important. Still arms auto-merge; the nits are carried forward to an `auto-review-followup` issue (see below).
+- `fail` — at least one 🔴 Important finding. Blocks: opens/updates the follow-up issue and does NOT arm `ready-to-merge`.
 
-Override: if you want to merge through a `warn` or `fail`, add `ready-to-merge` by hand — it still arms auto-merge. To suppress auto-merge on a `pass`, remove the label or close-and-reopen the PR draft.
+Override: only a `fail` needs a manual override — add `ready-to-merge` by hand and it still arms auto-merge. To suppress auto-merge on a `pass`/`warn`, remove the label or close-and-reopen the PR draft.
+
+### Auto-review follow-up issues
+
+When a PR's auto-review verdict is `warn` or `fail`, the `chrischall/workflows` pipeline opens or updates a single `auto-review-followup` issue ("Auto-review follow-ups for PR #N") whose checklist captures every finding, and links it from the PR's `<!-- auto-review-verdict -->` comment (`📋 Tracking follow-ups: #N`). `warn` (nits only) still auto-merges — the issue carries the nits forward, so most nits are fixed in a *later* PR; `fail` blocks until the important findings are addressed on the PR itself.
+
+When asked to address the auto-review comments / review findings on a PR:
+
+1. Read the verdict comment, open the linked `auto-review-followup` issue, and treat its checklist as the work list (alongside any inline review comments).
+2. Resolve each item, checking off only what you've **verified** is genuinely fixed.
+3. If every item is resolved on the current PR, add `Closes #<issue>` to that PR's body so the merge closes it; if some are deferred, check off only the resolved ones and leave the issue open.
+4. For nits whose `warn` PR already auto-merged, address them in a follow-up PR that references `Closes #<issue>`.
+
+(Mirrors the fleet-wide convention in `~/.claude/CLAUDE.md`.)
 
 PR titles use conventional-commit prefixes — release-please reads them to pick the next version and to write the CHANGELOG entry (see [Conventional Commits](https://www.conventionalcommits.org/)):
 
@@ -184,7 +197,9 @@ PR titles use conventional-commit prefixes — release-please reads them to pick
 
 The bullet text in the CHANGELOG is the part after the prefix — write it like a user-facing changelog entry (`ofw_sync_messages: resume from saved cursor`), not internal shorthand (`sync tweaks`).
 
-Open with `gh pr create`; you don't need any labels. Let Claude's review verdict add `ready-to-merge` for you. If you want to skip the review on a trivial chore, add `--label ready-to-merge` at PR-create time and it'll arm immediately. Dependabot PRs auto-arm without it. The repo blocks squash merges (rebase is allowed at the repo level but unused — every workflow calls `gh pr merge --merge` so all PRs land as merge commits); if you call `gh pr merge` manually, don't pass `--squash` or the call will fail.
+**Exception for first-party dependency bumps.** When bumping a package we own (`@chrischall/mcp-utils`, `@chrischall/realty-core`, `@fetchproxy/server` — anything published from a chrischall-owned repo), use a `feat:` or `fix:` prefix instead of `chore:`/`build(deps):` (and if you're labeling the PR, `enhancement`/`bug` instead of `dependencies`). Those bumps deliver real product fixes or features through us, so they should drive a release-please version bump and show up under Features/Bug Fixes in the release notes — not get hidden as an invisible `chore`/under "Dependencies" (which doesn't trigger a release).
+
+Open with `gh pr create`; you don't need any labels. Let Claude's review verdict add `ready-to-merge` for you. If you want to skip the review on a trivial chore, add `--label ready-to-merge` at PR-create time and it'll arm immediately. Dependabot PRs auto-arm without it. The repo is squash-only (merge commits and rebase are blocked — `auto-merge.yml` calls `gh pr merge --auto --squash`, so every PR lands as a single squash commit whose subject is the PR title); if you call `gh pr merge` manually, don't pass `--merge`/`--rebase` or the call will fail.
 
 `main` is protected by two rulesets: *Block force-push and deletion on main* and *main protection (PR + ci)* — the latter requires every change to go through a PR and `ci` to pass (strict mode = branch must be up-to-date with main). No bypass actors; admins are not exempt. See `gh api /repos/chrischall/ofw-mcp/rulesets` to inspect.
 

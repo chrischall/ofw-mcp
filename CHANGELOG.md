@@ -1,5 +1,51 @@
 # Changelog
 
+## [2.4.4](https://github.com/chrischall/ofw-mcp/compare/v2.4.3...v2.4.4) (2026-07-07)
+
+
+### Bug Fixes
+
+* bump @chrischall/mcp-utils to 0.12.0 ([#120](https://github.com/chrischall/ofw-mcp/issues/120)) ([6420871](https://github.com/chrischall/ofw-mcp/commit/6420871101d7658fddda1b65558c61943d475e51))
+* sanitize co-parent-controlled attachment filename on download (path traversal) ([#115](https://github.com/chrischall/ofw-mcp/issues/115)) ([82232d6](https://github.com/chrischall/ofw-mcp/commit/82232d639b24b78a494ff6a4300f2e564c18a760))
+
+
+### Refactor
+
+* adopt mcp-utils parseLenient ([#117](https://github.com/chrischall/ofw-mcp/issues/117)) ([ffd8183](https://github.com/chrischall/ofw-mcp/commit/ffd818310779c3b9f41be08499bfa17054bfc5c7))
+* tighten parseLenient generic call site in ofw _shared ([#119](https://github.com/chrischall/ofw-mcp/issues/119)) ([51836de](https://github.com/chrischall/ofw-mcp/commit/51836de1e84f535b56d1fd5d8d6ce4b698b2f2b3))
+
+
+### Documentation
+
+* document first-party dependency-bump label exception ([#121](https://github.com/chrischall/ofw-mcp/issues/121)) ([4fd8948](https://github.com/chrischall/ofw-mcp/commit/4fd894886f00cffe723c294bed7ba2965910462b))
+
+## [2.4.3](https://github.com/chrischall/ofw-mcp/compare/v2.4.2...v2.4.3) (2026-06-15)
+
+
+### Refactor
+
+* remove drifted root plugin.json cruft ([#104](https://github.com/chrischall/ofw-mcp/issues/104)) ([f5d5c0f](https://github.com/chrischall/ofw-mcp/commit/f5d5c0f6ffce52fffff1f84fca2f841d1e5ec8fb))
+
+
+### Documentation
+
+* correct inverted merge-model guidance (repo is squash-only) ([#99](https://github.com/chrischall/ofw-mcp/issues/99)) ([0673060](https://github.com/chrischall/ofw-mcp/commit/0673060e3eac79b7e85ded3d473cb94193c72d37))
+* refresh CLAUDE.md architecture + auto-review follow-up convention ([#103](https://github.com/chrischall/ofw-mcp/issues/103)) ([ab92c37](https://github.com/chrischall/ofw-mcp/commit/ab92c3747b5c39b3d8ed0ee90d4ae57385777d81))
+
+## [2.4.2](https://github.com/chrischall/ofw-mcp/compare/v2.4.1...v2.4.2) (2026-06-13)
+
+
+### Bug Fixes
+
+* revert userConfig migration, realign .mcp.json with the fleet ([#97](https://github.com/chrischall/ofw-mcp/issues/97)) ([6319764](https://github.com/chrischall/ofw-mcp/commit/6319764ec2a8babcdd758405d36f08576821793a))
+
+## [2.4.1](https://github.com/chrischall/ofw-mcp/compare/v2.4.0...v2.4.1) (2026-06-13)
+
+
+### Bug Fixes
+
+* make OFW credentials editable in the plugin/Connectors UI via userConfig ([#95](https://github.com/chrischall/ofw-mcp/issues/95)) ([26a2f15](https://github.com/chrischall/ofw-mcp/commit/26a2f154be228520db02f689f7ec0f4313f08250))
+
 ## [2.4.0](https://github.com/chrischall/ofw-mcp/compare/v2.3.2...v2.4.0) (2026-06-12)
 
 

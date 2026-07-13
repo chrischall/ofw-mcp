@@ -1,9 +1,8 @@
-import { loadDotenvSafely } from '@chrischall/mcp-utils';
+import { loadDotenvSafely, parseBoolEnv, redactSecrets } from '@chrischall/mcp-utils';
 import { TokenManager } from '@chrischall/mcp-utils/session';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import { resolveAuth } from './auth.js';
-import { parseBoolEnv } from './config.js';
 import { BASE_URL, OFW_PROTOCOL_HEADERS, OFW_TOKEN_TTL_MS, OFW_TOKEN_EXPIRY_SKEW_MS } from './protocol.js';
 
 // Load .env for local dev; silently skip if dotenv is unavailable (e.g. mcpb
@@ -36,13 +35,6 @@ function parseContentDispositionFilename(cd: string): string | null {
 // only when debugging, never in normal use.
 function debugLogEnabled(): boolean {
   return parseBoolEnv('OFW_DEBUG_LOG');
-}
-
-function redactHeaders(h: Record<string, string>): Record<string, string> {
-  const out = { ...h };
-  /* v8 ignore next -- request headers always carry Authorization (set in request()); the guard is defensive for arbitrary header maps */
-  if (out.Authorization) out.Authorization = `Bearer ${out.Authorization.slice(7, 17)}…`;
-  return out;
 }
 
 // Per-request timeout. Overridable via OFW_REQUEST_TIMEOUT_MS. The default
@@ -175,7 +167,9 @@ export class OFWClient {
           ? `<FormData entries=${Array.from((body as FormData).keys()).join(',')}>`
           : JSON.stringify(body);
       console.error(`[ofw-debug] → ${method} ${url}${isRetry ? ' (retry)' : ''}`);
-      console.error(`[ofw-debug]   headers: ${JSON.stringify(redactHeaders(headers))}`);
+      // redactSecrets scrubs the Bearer token (and any other secret shapes)
+      // from the serialized header map — shared fleet redaction, never bespoke.
+      console.error(`[ofw-debug]   headers: ${redactSecrets(JSON.stringify(headers))}`);
       console.error(`[ofw-debug]   body: ${bodyPreview}`);
     }
 

@@ -666,7 +666,7 @@ describe('sync — response validation (issue #83)', () => {
     const result = await syncMessageFolder(client, 'inbox', '111', { fetchUnreadBodies: false });
     expect(result.synced).toBe(1);              // sync still lands the message
     expect(getMessage(90)?.body).toBe('B');
-    const warning = err.mock.calls.map((c) => c[0]).find((m) => typeof m === 'string' && m.includes('failed validation'));
+    const warning = err.mock.calls.map((c) => c[0]).find((m) => typeof m === 'string' && m.includes('proceeding with the raw response'));
     expect(warning).toContain('GET /pub/v3/messages?folders={inbox}');
     expect(warning).toContain('showNeverViewed');
   });

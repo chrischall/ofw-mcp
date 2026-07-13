@@ -2,7 +2,7 @@ import { expandPath as expandPathUtil, rawTextResult, textResult } from '@chrisc
 import { z } from 'zod';
 import type { Recipient } from '../cache.js';
 import type { OFWClient } from '../client.js';
-import { parseOFW } from '../validate.js';
+import { parseLenient } from '@chrischall/mcp-utils';
 
 // Pretty-printed JSON tool result. Thin wrapper over @chrischall/mcp-utils'
 // `textResult` so the rest of the codebase keeps the local name.
@@ -109,32 +109,39 @@ const PostMessagesResponseSchema = z.looseObject({
  * `if (result.id !== null)`. When id is null (no id field in the
  * response — never observed in production, but defensive), `raw`
  * carries the POST response so the caller can still surface it.
+ *
+ * The generic is parametrized on the schema's OUTPUT type `T`
+ * (`detailSchema: z.ZodType<T>`, `detail: T`) rather than on the schema
+ * type itself. This mirrors `parseLenient`'s own signature
+ * (`<T>(schema: ZodType<T>, …): T`) exactly, so `T` is inferred straight
+ * from the schema and flows into the return type with no `as` cast — the
+ * compiler verifies that `detail` matches `detailSchema`'s output. (A
+ * `<S extends z.ZodType>` constraint would widen the output to `unknown`
+ * and force a cast at this call site.)
  */
-export async function postMessageAndRefetch<S extends z.ZodType>(
+export async function postMessageAndRefetch<T>(
   client: OFWClient,
   payload: unknown,
-  detailSchema: S,
+  detailSchema: z.ZodType<T>,
   ctx: string,
 ): Promise<
-  | { id: number; detail: z.output<S>; raw: unknown }
+  | { id: number; detail: T; raw: unknown }
   | { id: null; detail: null; raw: unknown }
 > {
-  const raw = parseOFW(
+  const raw = parseLenient(
     PostMessagesResponseSchema,
     await client.request('POST', '/pub/v3/messages', payload),
-    `POST /pub/v3/messages (${ctx})`,
-    'strict',
+    { label: 'ofw-mcp', context: `POST /pub/v3/messages (${ctx})`, mode: 'strict' },
   );
   const id =
     typeof raw?.id === 'number' ? raw.id
     : typeof raw?.entityId === 'number' ? raw.entityId
     : null;
   if (id === null) return { id: null, detail: null, raw };
-  const detail = parseOFW(
+  const detail = parseLenient(
     detailSchema,
     await client.request('GET', `/pub/v3/messages/${id}`),
-    `GET /pub/v3/messages/{id} (${ctx})`,
-    'strict',
+    { label: 'ofw-mcp', context: `GET /pub/v3/messages/{id} (${ctx})`, mode: 'strict' },
   );
   return { id, detail, raw };
 }

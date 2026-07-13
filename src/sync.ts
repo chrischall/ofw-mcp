@@ -8,7 +8,7 @@ import {
 } from './cache.js';
 import { z } from 'zod';
 import { ApiRecipientSchema, hasRealView, mapRecipients } from './tools/_shared.js';
-import { parseOFW } from './validate.js';
+import { parseLenient } from '@chrischall/mcp-utils';
 
 // Each OFW message detail returns `files: [fileId, ...]`. We fetch the metadata
 // for each file id (cheap JSON call) so the model can see filenames/mime types
@@ -36,10 +36,10 @@ export async function fetchAttachmentMeta(
   fileId: number,
   messageId: number,
 ): Promise<void> {
-  const meta = parseOFW(
+  const meta = parseLenient(
     FileMetaSchema,
     await client.request('GET', `/pub/v1/myfiles/${fileId}`),
-    'GET /pub/v1/myfiles/{fileId}',
+    { label: 'ofw-mcp', context: 'GET /pub/v1/myfiles/{fileId}' },
   );
   upsertAttachmentForMessage({
     fileId: meta.fileId ?? fileId,
@@ -75,10 +75,10 @@ const FoldersSchema = z.looseObject({
 });
 
 export async function resolveFolderIds(client: OFWClient): Promise<FolderIds> {
-  const data = parseOFW(
+  const data = parseLenient(
     FoldersSchema,
     await client.request('GET', '/pub/v1/messageFolders?includeFolderCounts=true'),
-    'GET /pub/v1/messageFolders',
+    { label: 'ofw-mcp', context: 'GET /pub/v1/messageFolders' },
   );
   const sys = data.systemFolders ?? [];
   const find = (type: string): string => {
@@ -142,10 +142,10 @@ export async function syncMessageFolder(
 
   while (true) {
     const path = `/pub/v3/messages?folders=${encodeURIComponent(folderId)}&page=${page}&size=50&sort=date&sortDirection=desc`;
-    const list = parseOFW(
+    const list = parseLenient(
       ListResponseSchema,
       await client.request('GET', path),
-      `GET /pub/v3/messages?folders={${folder}}`,
+      { label: 'ofw-mcp', context: `GET /pub/v3/messages?folders={${folder}}` },
     );
     const items = list.data ?? [];
     if (items.length === 0) break;
@@ -163,10 +163,10 @@ export async function syncMessageFolder(
         // and we don't yet hold a real viewed time, re-fetch detail to capture
         // it (no body re-fetch — only the recipient view fields can change).
         if (folder === 'sent' && item.showNeverViewed === false && !hasRealView(existing.recipients)) {
-          const detail = parseOFW(
+          const detail = parseLenient(
             DetailResponseSchema,
             await client.request('GET', `/pub/v3/messages/${item.id}`),
-            'GET /pub/v3/messages/{id} (view-status refresh)',
+            { label: 'ofw-mcp', context: 'GET /pub/v3/messages/{id} (view-status refresh)' },
           );
           upsertMessage({ ...existing, recipients: mapRecipients(detail.recipients), listData: item });
           synced++;
@@ -182,10 +182,10 @@ export async function syncMessageFolder(
       let fetchedBodyAt: string | null = null;
       let detailFileIds: number[] = [];
       if (shouldFetchBody) {
-        const detail = parseOFW(
+        const detail = parseLenient(
           DetailResponseSchema,
           await client.request('GET', `/pub/v3/messages/${item.id}`),
-          'GET /pub/v3/messages/{id} (sync)',
+          { label: 'ofw-mcp', context: 'GET /pub/v3/messages/{id} (sync)' },
         );
         body = detail.body ?? '';
         fetchedBodyAt = new Date().toISOString();
@@ -263,10 +263,10 @@ export async function syncDrafts(client: OFWClient, draftsFolderId: string): Pro
   let page = 1;
   while (true) {
     const path = `/pub/v3/messages?folders=${encodeURIComponent(draftsFolderId)}&page=${page}&size=50&sort=date&sortDirection=desc`;
-    const list = parseOFW(
+    const list = parseLenient(
       DraftListResponseSchema,
       await client.request('GET', path),
-      'GET /pub/v3/messages?folders={drafts}',
+      { label: 'ofw-mcp', context: 'GET /pub/v3/messages?folders={drafts}' },
     );
     const pageItems = list.data ?? [];
     items.push(...pageItems);
@@ -283,10 +283,10 @@ export async function syncDrafts(client: OFWClient, draftsFolderId: string): Pro
     // timestamp for drafts — direct UI edits don't bump it — so we can't
     // use it to skip the detail fetch. Always re-fetch; drafts are few.
     const existing = getDraft(item.id);
-    const detail = parseOFW(
+    const detail = parseLenient(
       DraftDetailSchema,
       await client.request('GET', `/pub/v3/messages/${item.id}`),
-      'GET /pub/v3/messages/{id} (drafts sync)',
+      { label: 'ofw-mcp', context: 'GET /pub/v3/messages/{id} (drafts sync)' },
     );
     const row: DraftRow = {
       id: item.id,

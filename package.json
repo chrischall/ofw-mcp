@@ -1,6 +1,6 @@
 {
   "name": "ofw-mcp",
-  "version": "2.4.0",
+  "version": "2.4.4",
   "license": "MIT",
   "mcpName": "io.github.chrischall/ofw-mcp",
   "description": "OurFamilyWizard MCP server for Claude — developed and maintained by AI (Claude Code)",
@@ -32,17 +32,17 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "@chrischall/mcp-utils": "^0.9.0",
+    "@chrischall/mcp-utils": "^0.13.0",
     "@fetchproxy/bootstrap": "^1.3.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "dotenv": "^17.4.2",
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "@types/node": "^25.9.1",
+    "@types/node": "^26.0.0",
     "@vitest/coverage-v8": "^4.1.7",
     "esbuild": "^0.28.0",
-    "typescript": "^6.0.3",
+    "typescript": "^7.0.2",
     "vitest": "^4.1.7"
   }
 }

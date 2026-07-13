@@ -157,7 +157,7 @@ describe('ofw_create_event', () => {
     setup(client);
     const handler = handlers.get('ofw_create_event')!;
     await expect(handler({ title: 'X', startDate: '2026-07-11', allDay: true }))
-      .rejects.toThrow('failed validation');
+      .rejects.toThrow(/Unexpected POST \/pub\/v3\/events shape from the upstream API/);
   });
 });
 
@@ -266,7 +266,7 @@ describe('ofw_update_event', () => {
     const spy = vi.spyOn(client, 'request').mockResolvedValueOnce({ nope: true });
     setup(client);
     const handler = handlers.get('ofw_update_event')!;
-    await expect(handler({ eventId: '5', title: 'X' })).rejects.toThrow('failed validation');
+    await expect(handler({ eventId: '5', title: 'X' })).rejects.toThrow(/Unexpected GET \/pub\/v3\/events\/5 shape from the upstream API/);
     expect(spy).toHaveBeenCalledTimes(1);
   });
 });

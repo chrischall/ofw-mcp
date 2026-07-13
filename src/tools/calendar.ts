@@ -3,7 +3,7 @@ import { z } from 'zod';
 import type { OFWClient } from '../client.js';
 import { jsonResponse, textResponse } from './_shared.js';
 import { getCalendarWritesAllowed } from '../config.js';
-import { parseOFW } from '../validate.js';
+import { parseLenient } from '@chrischall/mcp-utils';
 
 // OFW's real event-write API (reverse-engineered from the web app bundle):
 //   POST   /pub/v3/events                       create — 201 with the full event
@@ -150,7 +150,7 @@ export function registerCalendarTools(server: McpServer, client: OFWClient): voi
     },
   }, async (args) => {
     const raw = await client.request('POST', '/pub/v3/events', buildEventPayload(args as EventWriteArgs));
-    const event = parseOFW(eventDetailSchema, raw, 'POST /pub/v3/events', 'strict');
+    const event = parseLenient(eventDetailSchema, raw, { label: 'ofw-mcp', context: 'POST /pub/v3/events', mode: 'strict' });
     return jsonResponse({
       note: `Event created. Use eventRecurrenceId ${event.eventRecurrenceId} as eventId for ofw_update_event/ofw_delete_event.`,
       event,
@@ -181,13 +181,13 @@ export function registerCalendarTools(server: McpServer, client: OFWClient): voi
     const { eventId, ...changes } = args;
     const id = encodeURIComponent(eventId);
     const rawDetail = await client.request('GET', `/pub/v3/events/${id}`);
-    const current = parseOFW(eventDetailSchema, rawDetail, `GET /pub/v3/events/${eventId}`, 'strict');
+    const current = parseLenient(eventDetailSchema, rawDetail, { label: 'ofw-mcp', context: `GET /pub/v3/events/${eventId}`, mode: 'strict' });
     const defined = Object.fromEntries(Object.entries(changes).filter(([, v]) => v !== undefined));
     const merged: EventWriteArgs = { ...detailToWriteArgs(current), ...defined };
     await client.request('PUT', `/pub/v3/events/${id}`, buildEventPayload(merged));
     // PUT responses aren't documented — re-fetch the detail as authoritative state.
     const rawAfter = await client.request('GET', `/pub/v3/events/${id}`);
-    const event = parseOFW(eventDetailSchema, rawAfter, `GET /pub/v3/events/${eventId} (post-update)`, 'strict');
+    const event = parseLenient(eventDetailSchema, rawAfter, { label: 'ofw-mcp', context: `GET /pub/v3/events/${eventId} (post-update)`, mode: 'strict' });
     return jsonResponse({ note: 'Event updated; returning re-fetched event state.', event });
   });
 

@@ -14,7 +14,7 @@ import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, extname, join } from 'node:path';
 import { fileBlob } from '@chrischall/mcp-utils';
 import { ApiRecipientSchema, expandPath, hasRealView, jsonResponse, mapRecipients, postMessageAndRefetch, textResponse, verifyWriteLanded } from './_shared.js';
-import { parseOFW } from '../validate.js';
+import { parseLenient } from '@chrischall/mcp-utils';
 
 // Schemas for the load-bearing fields of each /pub/v3 response this file
 // reads (issue #83). Loose: unknown keys pass through into cached listData.
@@ -211,10 +211,10 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
       // read on OFW.
       if (cached.folder === 'sent' && !hasRealView(cached.recipients)) {
         try {
-          const detail = parseOFW(
+          const detail = parseLenient(
             MessageDetailSchema,
             await client.request('GET', `/pub/v3/messages/${id}`),
-            'GET /pub/v3/messages/{id} (view-status refresh)',
+            { label: 'ofw-mcp', context: 'GET /pub/v3/messages/{id} (view-status refresh)' },
           );
           const recipients = mapRecipients(detail.recipients);
           // Keep the raw listData read-flag in step with the refreshed
@@ -240,10 +240,10 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
       // OFW state isn't changing).
       if (attachments.length === 0 && listDataHintsAtFiles(row.listData)) {
         try {
-          const detail = parseOFW(
+          const detail = parseLenient(
             DetailFilesSchema,
             await client.request('GET', `/pub/v3/messages/${id}`),
-            'GET /pub/v3/messages/{id} (attachment backfill)',
+            { label: 'ofw-mcp', context: 'GET /pub/v3/messages/{id} (attachment backfill)' },
           );
           if (Array.isArray(detail.files) && detail.files.length > 0) {
             await fetchAttachmentMetaForMessage(client, id, detail.files);
@@ -256,10 +256,10 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
       return jsonResponse({ ...row, attachments });
     }
 
-    const detail = parseOFW(
+    const detail = parseLenient(
       MessageDetailSchema,
       await client.request('GET', `/pub/v3/messages/${encodeURIComponent(args.messageId)}`),
-      'GET /pub/v3/messages/{id} (ofw_get_message)',
+      { label: 'ofw-mcp', context: 'GET /pub/v3/messages/{id} (ofw_get_message)' },
     );
 
     const folder: 'inbox' | 'sent' = cached?.folder ?? 'inbox';
@@ -588,11 +588,10 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
     form.append('fileName', fileName);
     form.append('shareClass', args.shareClass ?? 'PRIVATE');
 
-    const meta = parseOFW(
+    const meta = parseLenient(
       UploadedFileSchema,
       await client.request('POST', '/pub/v3/myfiles/multipart', form),
-      'POST /pub/v3/myfiles/multipart (ofw_upload_attachment)',
-      'strict',
+      { label: 'ofw-mcp', context: 'POST /pub/v3/myfiles/multipart (ofw_upload_attachment)', mode: 'strict' },
     );
 
     // Cache metadata so subsequent ofw_get_message calls can surface it and
@@ -669,13 +668,18 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
     }
 
     let dest: string;
+    // The filename comes from OFW file metadata — i.e. it is controlled by the
+    // co-parent who uploaded the attachment. basename() it before interpolating
+    // into a path so a crafted `../…` name can't escape the target directory
+    // (the upload path at :549 already applies basename to its input).
+    const safeName = basename(cached.fileName);
     if (args.saveTo) {
       // Treat saveTo as a directory if it ends with a separator; otherwise as a full path.
       const isDirArg = args.saveTo.endsWith('/') || args.saveTo.endsWith('\\');
       const abs = expandPath(args.saveTo);
-      dest = isDirArg ? join(abs, `${fileId}-${cached.fileName}`) : abs;
+      dest = isDirArg ? join(abs, `${fileId}-${safeName}`) : abs;
     } else {
-      dest = join(getAttachmentsDir(), `${fileId}-${cached.fileName}`);
+      dest = join(getAttachmentsDir(), `${fileId}-${safeName}`);
     }
 
     if (!args.force && cached.downloadedPath === dest) {

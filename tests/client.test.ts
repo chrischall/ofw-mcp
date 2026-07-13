@@ -543,8 +543,10 @@ describe('OFWClient', () => {
       const debugLines = lines.filter((l) => l.startsWith('[ofw-debug]'));
       expect(debugLines.some((l) => l.includes('→ POST'))).toBe(true);
       expect(debugLines.some((l) => l.includes('"foo":"bar"'))).toBe(true);
-      // Authorization header is redacted (only the prefix is logged).
-      expect(debugLines.some((l) => l.includes('"Authorization":"Bearer ') && l.includes('…"'))).toBe(true);
+      // Authorization header is redacted via mcp-utils redactSecrets — the
+      // token never appears in the log, only the [REDACTED] placeholder.
+      expect(debugLines.some((l) => l.includes('"Authorization":"Bearer [REDACTED]"'))).toBe(true);
+      expect(debugLines.some((l) => l.includes(MOCK_TOKEN) && l.includes('headers:'))).toBe(false);
       expect(debugLines.some((l) => l.includes('← 200'))).toBe(true);
       expect(debugLines.some((l) => l.includes('response body:'))).toBe(true);
     });

@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { z } from 'zod';
 import { mkdtempSync, rmSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { OFWClient } from '../../src/client.js';
 import { registerMessageTools } from '../../src/tools/messages.js';
@@ -1219,6 +1219,35 @@ describe('ofw_download_attachment', () => {
     }
   });
 
+  it('sanitizes a co-parent-controlled ../ filename so the write stays in the target dir', async () => {
+    const client = new OFWClient();
+    const bytes = Buffer.from('evil-bytes', 'utf8');
+    // The co-parent who uploaded the file controls the metadata fileName.
+    const malicious = '../../../../tmp/ofw-traversal-evil.png';
+    vi.spyOn(client, 'request').mockResolvedValueOnce({
+      fileId: 66, label: malicious, fileName: malicious,
+      fileType: 'image/png', fileSize: bytes.length,
+    });
+    vi.spyOn(client, 'requestBinary').mockResolvedValueOnce({
+      body: bytes, contentType: 'image/png', suggestedFileName: malicious,
+    });
+    setup(client);
+
+    const downloadDir = mkdtempSync(join(tmpdir(), 'ofw-dl-'));
+    try {
+      const result = await handlers.get('ofw_download_attachment')!({ fileId: 66, saveTo: downloadDir + '/' });
+      const parsed = JSON.parse(result.content[0].text);
+      // The written path must stay directly under the requested dir…
+      expect(resolve(dirname(parsed.path))).toBe(resolve(downloadDir));
+      // …with the traversal segments stripped (basename only).
+      expect(parsed.path).toMatch(/66-ofw-traversal-evil\.png$/);
+      expect(parsed.path).not.toContain('..');
+      expect(readFileSync(parsed.path).equals(bytes)).toBe(true);
+    } finally {
+      rmSync(downloadDir, { recursive: true, force: true });
+    }
+  });
+
   it('inline:true returns ImageContent for image MIME and writes no file', async () => {
     const client = new OFWClient();
     const pngBytes = Buffer.from('\x89PNGfake-png-bytes', 'binary');
@@ -1869,7 +1898,7 @@ describe('response validation (issue #83)', () => {
     vi.spyOn(client, 'request').mockResolvedValueOnce({ entityId: '42' }); // string, not number
     setup(client);
     await expect(handlers.get('ofw_send_message')!({ subject: 'S', body: 'B', recipientIds: [1] }))
-      .rejects.toThrow(/OFW response for POST \/pub\/v3\/messages \(ofw_send_message\) failed validation: entityId/);
+      .rejects.toThrow(/Unexpected POST \/pub\/v3\/messages \(ofw_send_message\) shape from the upstream API\. entityId/);
   });
 
   it('send_message: strict — a mistyped field in the re-fetched detail throws', async () => {
@@ -1879,7 +1908,7 @@ describe('response validation (issue #83)', () => {
       .mockResolvedValueOnce({ subject: 123 }); // detail subject mistyped
     setup(client);
     await expect(handlers.get('ofw_send_message')!({ subject: 'S', body: 'B', recipientIds: [1] }))
-      .rejects.toThrow(/GET \/pub\/v3\/messages\/\{id\} \(ofw_send_message\) failed validation: subject/);
+      .rejects.toThrow(/Unexpected GET \/pub\/v3\/messages\/\{id\} \(ofw_send_message\) shape from the upstream API\. subject/);
   });
 
   it('save_draft: strict — a mistyped replyToId in the re-fetched detail throws', async () => {
@@ -1889,7 +1918,7 @@ describe('response validation (issue #83)', () => {
       .mockResolvedValueOnce({ replyToId: 'nope' });
     setup(client);
     await expect(handlers.get('ofw_save_draft')!({ subject: 'S', body: 'B' }))
-      .rejects.toThrow(/\(ofw_save_draft\) failed validation: replyToId/);
+      .rejects.toThrow(/\(ofw_save_draft\) shape from the upstream API\. replyToId/);
   });
 
   it('upload_attachment: strict — a missing fileId in the upload response throws', async () => {
@@ -1901,7 +1930,7 @@ describe('response validation (issue #83)', () => {
     writeFileSync(filePath, 'x');
     try {
       await expect(handlers.get('ofw_upload_attachment')!({ path: filePath }))
-        .rejects.toThrow(/POST \/pub\/v3\/myfiles\/multipart \(ofw_upload_attachment\) failed validation: fileId/);
+        .rejects.toThrow(/Unexpected POST \/pub\/v3\/myfiles\/multipart \(ofw_upload_attachment\) shape from the upstream API\. fileId/);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -1917,7 +1946,7 @@ describe('response validation (issue #83)', () => {
     setup(client);
     const result = await handlers.get('ofw_get_message')!({ messageId: 60 });
     expect(JSON.parse(result.content[0].text).id).toBe(60); // raw flows through
-    const warning = err.mock.calls.map((c) => c[0]).find((m) => typeof m === 'string' && m.includes('failed validation'));
+    const warning = err.mock.calls.map((c) => c[0]).find((m) => typeof m === 'string' && m.includes('proceeding with the raw response'));
     expect(warning).toContain('GET /pub/v3/messages/{id} (ofw_get_message)');
     expect(warning).toContain('files');
   });
