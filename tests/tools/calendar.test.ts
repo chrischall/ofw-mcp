@@ -131,6 +131,16 @@ describe('ofw_create_event', () => {
     }));
   });
 
+  it('sends an explicit empty children array as-is (verified live: POST accepts [])', async () => {
+    const client = makeClient(EVENT_DETAIL);
+    setup(client);
+    const handler = handlers.get('ofw_create_event')!;
+    await handler({ title: 'Solo errand', startDate: '2026-07-20', allDay: true, children: [] });
+    expect(client.request).toHaveBeenCalledWith('POST', '/pub/v3/events', expect.objectContaining({
+      children: [],
+    }));
+  });
+
   it('all-day events get placeholder times like the web form', async () => {
     const client = makeClient(EVENT_DETAIL);
     setup(client);
@@ -219,6 +229,24 @@ describe('ofw_update_event', () => {
       eventParentId: '111',
       dropOffParentId: '222',
       pickUpParentId: '333',
+    }));
+  });
+
+  it('clears all child tags when the caller passes children: []', async () => {
+    // Verified live 2026-07-13: PUT with children omitted PRESERVES existing
+    // tags; PUT with an explicit children: [] CLEARS them. So [] must survive
+    // into the payload rather than being dropped as falsy-ish.
+    const tagged = { ...EVENT_DETAIL, children: [{ userId: 2737713, name: 'Paige' }] };
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request')
+      .mockResolvedValueOnce(tagged)
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce({ ...tagged, children: [] });
+    setup(client);
+    const handler = handlers.get('ofw_update_event')!;
+    await handler({ eventId: '128246904', children: [] });
+    expect(spy).toHaveBeenNthCalledWith(2, 'PUT', '/pub/v3/events/128246904', expect.objectContaining({
+      children: [],
     }));
   });
 

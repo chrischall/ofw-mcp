@@ -89,7 +89,9 @@ function buildEventPayload(a: EventWriteArgs): Record<string, unknown> {
   if (a.location) payload.location = a.location;
   if (a.notes) payload.notes = a.notes;
   if (a.reminderMinutes !== undefined) payload.reminderMinutes = String(a.reminderMinutes);
-  if (a.children?.length) payload.children = a.children;
+  // Omitted `children` PRESERVES existing tags on PUT; an explicit [] CLEARS
+  // them (verified live 2026-07-13) — so send the array whenever it's defined.
+  if (a.children !== undefined) payload.children = a.children;
   if (a.eventParentId !== undefined) payload.eventParentId = String(a.eventParentId);
   if (a.dropOffParentId !== undefined) payload.dropOffParentId = String(a.dropOffParentId);
   if (a.pickUpParentId !== undefined) payload.pickUpParentId = String(a.pickUpParentId);
@@ -112,7 +114,9 @@ function detailToWriteArgs(d: EventDetail): EventWriteArgs {
     location: d.location ?? undefined,
     notes: d.notes ?? undefined,
     reminderMinutes: d.reminderMinutes ?? undefined,
-    children: d.children?.map((c) => c.userId),
+    // Untagged (nullish or empty) → undefined, so the merged PUT omits the
+    // field (omission preserves; only a CALLER-supplied [] should clear).
+    children: d.children?.length ? d.children.map((c) => c.userId) : undefined,
     eventParentId: d.eventParent?.userId,
     dropOffParentId: d.dropOffParent?.userId,
     pickUpParentId: d.pickUpParent?.userId,
@@ -172,7 +176,7 @@ export function registerCalendarTools(server: McpServer, client: OFWClient): voi
       location: eventWriteFields.location,
       notes: eventWriteFields.notes,
       reminderMinutes: eventWriteFields.reminderMinutes,
-      children: eventWriteFields.children,
+      children: z.array(z.number()).describe('Child userIds to tag; pass [] to remove all child tags (omit to keep current tags)').optional(),
       eventParentId: eventWriteFields.eventParentId,
       dropOffParentId: eventWriteFields.dropOffParentId,
       pickUpParentId: eventWriteFields.pickUpParentId,
