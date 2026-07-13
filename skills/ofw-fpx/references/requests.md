@@ -82,7 +82,7 @@ BODY=$(jq -n \
 RESP=$(curl -s -X POST 'https://ofw.ourfamilywizard.com/pub/v3/messages' \
   "${AUTH_HEADERS[@]}" -H 'Content-Type: application/json' --data "$BODY")
 
-NEW_ID=$(jq -r '.entityId // .id // empty' <<<"$RESP")
+NEW_ID=$(jq -r '.id // .entityId // empty' <<<"$RESP")
 [ -n "$NEW_ID" ] || { echo "SEND UNCONFIRMED: no id in response: $RESP" >&2; exit 1; }
 
 # Re-GET immediately — the only honest way to confirm the write landed.
@@ -233,7 +233,10 @@ curl -s -X POST 'https://ofw.ourfamilywizard.com/pub/v1/journals' \
 ## Auth-error / retry recipe (wrap any of the above)
 
 ```sh
-call() { curl -s -o /tmp/ofw-resp.json -w '%{http_code}' "$@" "${AUTH_HEADERS[@]}"; }
+RESP_FILE=$(mktemp /tmp/ofw-resp.XXXXXX.json)
+trap 'rm -f "$RESP_FILE"' EXIT
+
+call() { curl -s -o "$RESP_FILE" -w '%{http_code}' "$@" "${AUTH_HEADERS[@]}"; }
 
 STATUS=$(call 'https://ofw.ourfamilywizard.com/pub/v2/profiles')
 if [ "$STATUS" = "429" ]; then
@@ -244,6 +247,6 @@ if [ "$STATUS" = "401" ]; then
   echo "token expired — reload/sign in on the ourfamilywizard.com tab, then re-run the fpx local-storage capture" >&2
   exit 1
 fi
-[ "$STATUS" -lt 300 ] || { echo "OFW API error: $STATUS $(cat /tmp/ofw-resp.json)" >&2; exit 1; }
-jq . /tmp/ofw-resp.json
+[ "$STATUS" -lt 300 ] || { echo "OFW API error: $STATUS $(cat "$RESP_FILE")" >&2; exit 1; }
+jq . "$RESP_FILE"
 ```
