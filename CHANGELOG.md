@@ -1,5 +1,18 @@
 # Changelog
 
+## [2.5.0](https://github.com/chrischall/ofw-mcp/compare/v2.4.4...v2.5.0) (2026-07-13)
+
+
+### Features
+
+* OFW_CALENDAR_WRITES opt-in enables calendar writes in drafts mode ([#122](https://github.com/chrischall/ofw-mcp/issues/122)) ([c885bb9](https://github.com/chrischall/ofw-mcp/commit/c885bb993d93f4ae7d2567dd7ca70e0e6d024d07))
+* **skill:** add OurFamilyWizard fpx access skill ([#126](https://github.com/chrischall/ofw-mcp/issues/126)) ([3a5da32](https://github.com/chrischall/ofw-mcp/commit/3a5da326f1874bcdfac5f30764fe974b38359815))
+
+
+### Bug Fixes
+
+* **skill:** correct requests.md retry-recipe temp file and id/entityId precedence ([#129](https://github.com/chrischall/ofw-mcp/issues/129)) ([24d550a](https://github.com/chrischall/ofw-mcp/commit/24d550ad916c2ac71d7f9fe9ea8e4ff05ee52582))
+
 ## [2.4.4](https://github.com/chrischall/ofw-mcp/compare/v2.4.3...v2.4.4) (2026-07-07)
 
 
