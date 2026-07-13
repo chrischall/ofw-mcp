@@ -671,3 +671,50 @@ describe('sync — response validation (issue #83)', () => {
     expect(warning).toContain('showNeverViewed');
   });
 });
+
+describe('syncMessageFolder — view-status refresh (read receipts)', () => {
+  it('re-fetches detail to capture the real viewed timestamp when a cached sent message flips to read', async () => {
+    // First cached while unread — recipient has no real view time.
+    upsertMessage({
+      id: 5, folder: 'sent', subject: 'Subject 5', fromUser: 'Me',
+      sentAt: '2026-05-04T12:00:00Z',
+      recipients: [{ userId: 1, name: 'Bob', viewedAt: null }],
+      body: 'body-5', fetchedBodyAt: '2026-05-04T12:01:00Z',
+      replyToId: null, chainRootId: null, listData: { showNeverViewed: true },
+    });
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request')
+      .mockResolvedValueOnce(listResponse([{ id: 5, unread: false }]))   // list now shows read
+      .mockResolvedValueOnce({                                            // detail carries the REAL time
+        recipients: [{ user: { id: 1, name: 'Bob' }, viewed: { dateTime: '2026-06-16T15:49:20' } }],
+      });
+
+    const result = await syncMessageFolder(client, 'sent', '222', { fetchUnreadBodies: false });
+
+    expect(getMessage(5)?.recipients[0].viewedAt).toBe('2026-06-16T15:49:20');
+    expect(result.synced).toBe(1);
+    expect(spy).toHaveBeenCalledWith('GET', '/pub/v3/messages/5');
+  });
+});
+
+describe('syncMessageFolder — self-heals a stale epoch-placeholder row', () => {
+  it('re-fetches detail when a cached sent row holds the 1970 placeholder (pre-fix data)', async () => {
+    upsertMessage({
+      id: 9, folder: 'sent', subject: 'Subject 9', fromUser: 'Me',
+      sentAt: '2026-05-04T12:00:00Z',
+      recipients: [{ userId: 1, name: 'Bob', viewedAt: '1970-01-01T00:00:00' }],
+      body: 'body-9', fetchedBodyAt: '2026-05-04T12:01:00Z',
+      replyToId: null, chainRootId: null, listData: { showNeverViewed: false },
+    });
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce(listResponse([{ id: 9, unread: false }]))
+      .mockResolvedValueOnce({
+        recipients: [{ user: { id: 1, name: 'Bob' }, viewed: { dateTime: '2026-06-16T15:49:20' } }],
+      });
+
+    await syncMessageFolder(client, 'sent', '222', { fetchUnreadBodies: false });
+
+    expect(getMessage(9)?.recipients[0].viewedAt).toBe('2026-06-16T15:49:20');
+  });
+});

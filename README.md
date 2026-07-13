@@ -144,9 +144,9 @@ Read-only tools run automatically. Write tools ask for your confirmation first. 
 | `ofw_delete_draft` | Delete a draft | Confirm | `drafts` |
 | `ofw_upload_attachment` | Upload a local file to My Files; returns a fileId to attach via `ofw_send_message`/`ofw_save_draft` | Auto | `drafts` |
 | `ofw_list_events` | Calendar events in a date range | Auto | any |
-| `ofw_create_event` | Create a calendar event | Confirm | `all` |
-| `ofw_update_event` | Update a calendar event | Confirm | `all` |
-| `ofw_delete_event` | Delete a calendar event | Confirm | `all` |
+| `ofw_create_event` | Create a calendar event | Confirm | `all` (or `drafts` + `OFW_CALENDAR_WRITES`) |
+| `ofw_update_event` | Update a calendar event | Confirm | `all` (or `drafts` + `OFW_CALENDAR_WRITES`) |
+| `ofw_delete_event` | Delete a calendar event | Confirm | `all` (or `drafts` + `OFW_CALENDAR_WRITES`) |
 | `ofw_get_expense_totals` | Expense summary totals | Auto | any |
 | `ofw_list_expenses` | Expense history | Auto | any |
 | `ofw_create_expense` | Log a new expense | Confirm | `all` |
@@ -164,6 +164,10 @@ The "Confirm" permission above is a *hint* to the MCP host — a host configured
 | `all` | Everything (the default — fully backward compatible). |
 
 Unrecognized values fail closed to `none`, with a warning on stderr — a typo never silently grants write access.
+
+#### Calendar opt-in (`OFW_CALENDAR_WRITES`)
+
+Calendar events sit between the two message tiers: they have no draft stage (a created event is immediately visible on the shared record), but unlike a sent message they are reversible — an event can be edited or deleted afterward. If you run in `drafts` mode but are comfortable with direct calendar writes, set `OFW_CALENDAR_WRITES=true` to additionally register `ofw_create_event`, `ofw_update_event`, and `ofw_delete_event`. The flag is redundant in `all` mode and never overrides `none`.
 
 ## Troubleshooting
 

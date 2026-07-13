@@ -7,7 +7,7 @@ import {
   type MessageRow, type DraftRow, type FolderName,
 } from './cache.js';
 import { z } from 'zod';
-import { ApiRecipientSchema, mapRecipients } from './tools/_shared.js';
+import { ApiRecipientSchema, hasRealView, mapRecipients } from './tools/_shared.js';
 import { parseLenient } from '@chrischall/mcp-utils';
 
 // Each OFW message detail returns `files: [fileId, ...]`. We fetch the metadata
@@ -112,6 +112,9 @@ const ListResponseSchema = z.looseObject({ data: z.array(ListItemSchema).optiona
 const DetailResponseSchema = z.looseObject({
   body: z.string().optional(),
   files: z.array(z.number()).optional(),
+  // The detail endpoint carries the REAL recipient view timestamps (the list
+  // endpoint only has an epoch placeholder) — used by the view-status refresh.
+  recipients: z.array(ApiRecipientSchema).optional(),
 });
 
 export interface UnreadHint {
@@ -151,7 +154,25 @@ export async function syncMessageFolder(
     for (const item of items) {
       if (newestId === null || item.id > newestId) newestId = item.id;
       const existing = getMessage(item.id);
-      if (existing) continue;
+      if (existing) {
+        // A sent message's read status changes AFTER it's first cached, when
+        // the recipient opens it — so we can't just skip existing rows. The
+        // list item carries the reliable `showNeverViewed` boolean but only an
+        // epoch placeholder for the timestamp; the real "First Viewed" time is
+        // on the detail endpoint. So when a sent message has flipped to read
+        // and we don't yet hold a real viewed time, re-fetch detail to capture
+        // it (no body re-fetch — only the recipient view fields can change).
+        if (folder === 'sent' && item.showNeverViewed === false && !hasRealView(existing.recipients)) {
+          const detail = parseLenient(
+            DetailResponseSchema,
+            await client.request('GET', `/pub/v3/messages/${item.id}`),
+            { label: 'ofw-mcp', context: 'GET /pub/v3/messages/{id} (view-status refresh)' },
+          );
+          upsertMessage({ ...existing, recipients: mapRecipients(detail.recipients), listData: item });
+          synced++;
+        }
+        continue;
+      }
       pageHadNewItem = true;
 
       const isInboxUnread = folder === 'inbox' && item.showNeverViewed === true;

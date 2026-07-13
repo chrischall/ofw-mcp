@@ -13,7 +13,7 @@ import { getAttachmentsDir, getDefaultInlineAttachments, getWriteMode } from '..
 import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, extname, join } from 'node:path';
 import { fileBlob } from '@chrischall/mcp-utils';
-import { ApiRecipientSchema, expandPath, jsonResponse, mapRecipients, postMessageAndRefetch, textResponse, verifyWriteLanded } from './_shared.js';
+import { ApiRecipientSchema, expandPath, hasRealView, jsonResponse, mapRecipients, postMessageAndRefetch, textResponse, verifyWriteLanded } from './_shared.js';
 import { parseLenient } from '@chrischall/mcp-utils';
 
 // Schemas for the load-bearing fields of each /pub/v3 response this file
@@ -201,6 +201,35 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
 
     const cached = getMessage(id);
     if (cached && cached.body !== null) {
+      let row = cached;
+      // Refresh view status for a sent message we still believe is unviewed:
+      // the recipient may have opened it since the last sync, and the detail
+      // endpoint carries the real "First Viewed" timestamp (a list-synced row
+      // only knows the showNeverViewed boolean / epoch placeholder). Best-
+      // effort and one-way — once a real viewed time is cached we stop re-
+      // fetching. Sent-only: re-hitting an unread INBOX detail would mark it
+      // read on OFW.
+      if (cached.folder === 'sent' && !hasRealView(cached.recipients)) {
+        try {
+          const detail = parseLenient(
+            MessageDetailSchema,
+            await client.request('GET', `/pub/v3/messages/${id}`),
+            { label: 'ofw-mcp', context: 'GET /pub/v3/messages/{id} (view-status refresh)' },
+          );
+          const recipients = mapRecipients(detail.recipients);
+          // Keep the raw listData read-flag in step with the refreshed
+          // recipients so `showNeverViewed` can't contradict `viewedAt`.
+          // (Spreading a null/absent listData is a no-op, so no guard needed.)
+          row = {
+            ...cached,
+            recipients,
+            listData: { ...(cached.listData as Record<string, unknown> | null), showNeverViewed: !hasRealView(recipients) },
+          };
+          upsertMessage(row);
+        } catch {
+          // Best-effort: fall back to the cached row on any fetch/parse error.
+        }
+      }
       let attachments = listAttachmentsForMessage(id);
       // Lazy attachment backfill. The list-endpoint payload (stored in
       // listData) hints at attachments via `files: <count>` but doesn't
@@ -209,7 +238,7 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
       // attachments table is empty even though OFW has files. Re-hit
       // detail to harvest fileIds (idempotent: body is already cached so
       // OFW state isn't changing).
-      if (attachments.length === 0 && listDataHintsAtFiles(cached.listData)) {
+      if (attachments.length === 0 && listDataHintsAtFiles(row.listData)) {
         try {
           const detail = parseLenient(
             DetailFilesSchema,
@@ -224,7 +253,7 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
           // Backfill is best-effort. Fall through with whatever we have.
         }
       }
-      return jsonResponse({ ...cached, attachments });
+      return jsonResponse({ ...row, attachments });
     }
 
     const detail = parseLenient(

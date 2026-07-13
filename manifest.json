@@ -39,7 +39,8 @@
         "OFW_PASSWORD": "${user_config.ofw_password}",
         "OFW_INLINE_ATTACHMENTS": "${user_config.ofw_inline_attachments}",
         "OFW_ATTACHMENTS_DIR": "${user_config.ofw_attachments_dir}",
-        "OFW_WRITE_MODE": "${user_config.ofw_write_mode}"
+        "OFW_WRITE_MODE": "${user_config.ofw_write_mode}",
+        "OFW_CALENDAR_WRITES": "${user_config.ofw_calendar_writes}"
       }
     }
   },
@@ -76,6 +77,13 @@
       "description": "Structural write gate. \"none\" = no write tools registered (read/sync/search only); \"drafts\" = draft-level writes only (save/delete drafts, upload attachments — never send or calendar/expense/journal writes); \"all\" = everything (default). Unrecognized values fail closed to \"none\".",
       "required": false,
       "default": "all"
+    },
+    "ofw_calendar_writes": {
+      "type": "boolean",
+      "title": "Calendar writes in drafts mode",
+      "description": "When Write mode is \"drafts\", also register the calendar write tools (create/update/delete event). Calendar events have no draft stage but are reversible (editable/deletable), unlike a sent message. Redundant in \"all\"; never overrides \"none\".",
+      "required": false,
+      "default": false
     }
   },
   "tools": [

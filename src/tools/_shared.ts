@@ -22,13 +22,31 @@ export type ApiRecipient = z.infer<typeof ApiRecipientSchema>;
 
 // Translates OFW API recipient shape into the cache's normalized Recipient.
 // Used wherever we surface or persist recipients (sync, get_message, send,
-// save_draft) — all five call sites had near-identical inline mappings.
+// save_draft).
+//
+// `viewedAt` is the recipient's true "First Viewed" time, or null if not yet
+// viewed. Only the DETAIL endpoint (/pub/v3/messages/{id}) carries a real
+// timestamp; the LIST endpoint returns an epoch-zero PLACEHOLDER
+// ("1970-01-01T00:00:00") in the SAME field even for read messages (on the
+// list, read status lives in `showNeverViewed`, not the timestamp). So treat
+// the epoch placeholder as "no real view time" — otherwise a list-sourced row
+// reports a bogus 1970 read time. A detail re-fetch is what fills in the truth.
 export function mapRecipients(items: ApiRecipient[] | undefined | null): Recipient[] {
-  return (items ?? []).map((r) => ({
-    userId: r.user?.id ?? 0,
-    name: r.user?.name ?? '',
-    viewedAt: r.viewed?.dateTime ?? null,
-  }));
+  return (items ?? []).map((r) => {
+    const dt = r.viewed?.dateTime;
+    const viewedAt = typeof dt === 'string' && !dt.startsWith('1970-01-01') ? dt : null;
+    return { userId: r.user?.id ?? 0, name: r.user?.name ?? '', viewedAt };
+  });
+}
+
+// True if any recipient has a *real* "First Viewed" time — i.e. present and
+// not the epoch-zero placeholder. After mapRecipients a fresh `viewedAt` is
+// only ever a real timestamp or null, but a cache row written by older code
+// (which trusted the list endpoint's `viewed`) may still hold the literal
+// "1970-01-01T00:00:00". Treating that as "not viewed" lets sync/get_message
+// re-fetch detail and self-heal the stale row to the real timestamp.
+export function hasRealView(recipients: { viewedAt: string | null }[]): boolean {
+  return recipients.some((r) => r.viewedAt !== null && !r.viewedAt.startsWith('1970-01-01'));
 }
 
 // Expand a user-provided path: ~ → home, relative → absolute. Re-exports
