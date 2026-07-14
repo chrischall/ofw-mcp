@@ -102,7 +102,18 @@ it prints the deployed URL:
 https://ofw-connector.<your-subdomain>.workers.dev
 ```
 
-Note that URL — it's what you'll share and what gets added as a connector.
+Because `wrangler.jsonc` also declares a custom-domain route
+(`connector.ofw.nullnet.app`, matching untappd-mcp's
+`connector.untappd.nullnet.app`), the connector is additionally served at:
+
+```
+https://connector.ofw.nullnet.app
+```
+
+Use the custom domain as the stable production URL you share. (The zone must be
+in the deploying Cloudflare account; if it isn't, remove the `routes` entry from
+`wrangler.jsonc` and use the `*.workers.dev` URL instead.) Note whichever URL you
+use — it's what gets added as a connector, with `/mcp` appended.
 
 > **Message-cache Durable Object.** The connector's `ofw_sync_messages` /
 > message-read tools store each user's synced OFW message history in an
@@ -136,8 +147,9 @@ npm run worker:test
 ### 5. Add it as a connector in claude.ai
 
 1. Go to claude.ai → **Settings** → **Connectors** → **Add custom connector**.
-2. Paste the deployed URL with `/mcp` appended:
-   `https://ofw-connector.<your-subdomain>.workers.dev/mcp`
+2. Paste the deployed URL with `/mcp` appended — the custom domain
+   `https://connector.ofw.nullnet.app/mcp` (or, without a custom domain,
+   `https://ofw-connector.<your-subdomain>.workers.dev/mcp`).
 3. Claude will open the connector's login page (served by the Worker at
    `/authorize`) and prompt for an **OFW email or username** and **OFW
    password**. Complete that login — this is the individual user's own

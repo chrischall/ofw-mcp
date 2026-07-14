@@ -23,8 +23,10 @@
     "OFW_WRITE_MODE": "all",
     "OFW_INLINE_ATTACHMENTS": "true"
   },
-  // Operator step: attach a custom domain/route once DNS is ready, e.g.
-  // "routes": [{ "pattern": "connector.ofw.example.app", "custom_domain": true }],
+  // Production custom domain (matches untappd-mcp's connector.untappd.nullnet.app).
+  // The zone must be in the deploying account's Cloudflare; wrangler provisions
+  // the hostname on deploy. Remove this route to deploy to *.workers.dev only.
+  "routes": [{ "pattern": "connector.ofw.nullnet.app", "custom_domain": true }],
   "workers_dev": true,
   "observability": {
     "enabled": true
