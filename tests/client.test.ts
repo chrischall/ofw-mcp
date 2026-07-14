@@ -846,3 +846,50 @@ describe('OFWClient — config/auth fallback branches', () => {
     expect(spy).toHaveBeenCalled();
   });
 });
+
+describe('OFWClient — injectable auth resolver', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('uses the injected resolver to supply the bearer token on requests', async () => {
+    // No OFW_USERNAME/OFW_PASSWORD needed: the injected resolver is the sole
+    // source of credentials. The mocked fetch has only ONE response (the API
+    // call) — there are no login fetches because the global resolveAuth path
+    // is never taken.
+    delete process.env.OFW_USERNAME;
+    delete process.env.OFW_PASSWORD;
+    const injected = vi.fn(async () => ({
+      token: 'injected-token-xyz',
+      expiresAt: new Date(Date.now() + 3_600_000),
+      source: 'env' as const,
+    }));
+    const spy = mockFetch([{ status: 200, body: { ok: true } }]);
+
+    const client = new OFWClient({ resolveAuth: injected });
+    await client.request('GET', '/pub/v1/test');
+
+    expect(injected).toHaveBeenCalled();
+    // Only the API fetch — no login round-trip.
+    expect(spy).toHaveBeenCalledTimes(1);
+    const init = spy.mock.calls[0][1] as RequestInit;
+    expect((init.headers as Record<string, string>)['Authorization']).toBe('Bearer injected-token-xyz');
+  });
+
+  it('drives the global resolveAuth path when constructed with no args', async () => {
+    process.env.OFW_USERNAME = 'test@example.com';
+    process.env.OFW_PASSWORD = 'testpass';
+    const auth = await import('../src/auth.js');
+    const globalSpy = vi.spyOn(auth, 'resolveAuth').mockResolvedValue({
+      token: 'global-token',
+      expiresAt: undefined,
+      source: 'env',
+    });
+    const spy = mockFetch([{ status: 200, body: { ok: true } }]);
+
+    const client = new OFWClient();
+    await client.request('GET', '/pub/v1/test');
+
+    expect(globalSpy).toHaveBeenCalled();
+    const init = spy.mock.calls[0][1] as RequestInit;
+    expect((init.headers as Record<string, string>)['Authorization']).toBe('Bearer global-token');
+  });
+});

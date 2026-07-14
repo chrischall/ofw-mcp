@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { MessageRow } from '../src/cache.js';
+import type { MessageRow } from '../src/cache/store.js';
 
 /**
  * Build a complete MessageRow with sensible defaults; spread overrides

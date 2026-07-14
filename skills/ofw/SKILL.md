@@ -10,6 +10,8 @@ MCP server for OurFamilyWizard — provides read/write access to messages, calen
 - **npm:** [npmjs.com/package/ofw-mcp](https://www.npmjs.com/package/ofw-mcp)
 - **Source:** [github.com/chrischall/ofw-mcp](https://github.com/chrischall/ofw-mcp)
 
+> These tools are also available via the hosted [claude.ai](https://claude.ai) remote connector (a Cloudflare Worker) — the tool set and behaviour are identical to the local stdio install. See the repo's `docs/DEPLOY-CONNECTOR.md`.
+
 ## Setup
 
 ### Option A — Claude Code (direct MCP, no mcporter)

@@ -2,17 +2,10 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import type { OFWClient } from '../client.js';
 import { syncAll, fetchAttachmentMeta, fetchAttachmentMetaForMessage } from '../sync.js';
-import {
-  listMessages, countMessages, listDrafts, getMessage, upsertMessage,
-  upsertDraft, deleteDraft, deleteMessage, findLatestReplyTip,
-  listAttachmentsForMessage, getAttachment, upsertAttachmentForMessage, markAttachmentDownloaded,
-  getDraft,
-  type MessageRow, type DraftRow,
-} from '../cache.js';
+import type { CacheStore, MessageRow, DraftRow } from '../cache/store.js';
+import type { AttachmentIO } from './attachments.js';
 import { getAttachmentsDir, getDefaultInlineAttachments, getWriteMode } from '../config.js';
-import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
-import { basename, dirname, extname, join } from 'node:path';
-import { fileBlob } from '@chrischall/mcp-utils';
+import { basename, join } from 'node:path';
 import { ApiRecipientSchema, expandPath, hasRealView, jsonResponse, mapRecipients, postMessageAndRefetch, textResponse, verifyWriteLanded } from './_shared.js';
 import { parseLenient } from '@chrischall/mcp-utils';
 
@@ -65,34 +58,6 @@ const UploadedFileSchema = z.looseObject({
   shareClass: z.string().optional(),
 });
 
-// Lightweight mime sniff from extension. OFW re-derives mime from the filename
-// server-side anyway, so this is just a polite Content-Type for the Blob.
-const MIME_BY_EXT: Record<string, string> = {
-  '.pdf': 'application/pdf',
-  '.png': 'image/png',
-  '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
-  '.gif': 'image/gif',
-  '.webp': 'image/webp',
-  '.heic': 'image/heic',
-  '.txt': 'text/plain',
-  '.md': 'text/markdown',
-  '.csv': 'text/csv',
-  '.html': 'text/html', '.htm': 'text/html',
-  '.json': 'application/json',
-  '.xml': 'application/xml',
-  '.doc': 'application/msword',
-  '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-  '.xls': 'application/vnd.ms-excel',
-  '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-  '.ppt': 'application/vnd.ms-powerpoint',
-  '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-  '.zip': 'application/zip',
-  '.ics': 'text/calendar',
-};
-function mimeFromName(name: string): string {
-  return MIME_BY_EXT[extname(name).toLowerCase()] ?? 'application/octet-stream';
-}
-
 // The list endpoint payload (cached as `listData`) reports attachments via
 // `files: <count>` (a number) — the actual fileIds only appear on the detail
 // endpoint as `files: [number, ...]`. Some intermediate shapes return an
@@ -105,7 +70,12 @@ function listDataHintsAtFiles(listData: unknown): boolean {
   return false;
 }
 
-export function registerMessageTools(server: McpServer, client: OFWClient): void {
+export function registerMessageTools(
+  server: McpServer,
+  client: OFWClient,
+  cacheProvider: () => CacheStore,
+  attachmentIO: AttachmentIO,
+): void {
   // OFW_WRITE_MODE gate (see config.ts). Send lands on the court-visible
   // record, so it is 'all'-only; draft-level writes (save/delete drafts,
   // upload attachments) also register under 'drafts'. Read/sync/download
@@ -149,9 +119,10 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
       });
     }
 
+    const cache = cacheProvider();
     const filter = { folder, since: args.since, until: args.until, q: args.q };
-    const total = countMessages(filter);
-    const messages = listMessages({ ...filter, page, size });
+    const total = await cache.countMessages(filter);
+    const messages = await cache.listMessages({ ...filter, page, size });
 
     const payload: Record<string, unknown> = { messages, total, page, size };
     if (total === 0) {
@@ -171,6 +142,7 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
     },
   }, async (args) => {
     const id = Number(args.messageId);
+    const cache = cacheProvider();
 
     // Draft routing: if this id is in the drafts cache, return a
     // MessageRow-shaped synthesis built from the draft. The drafts table
@@ -178,7 +150,7 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
     // the messages-table cache for the same id is stale by construction
     // when ofw_get_message was called on a draft id before sync caught
     // up — see syncDrafts, which also evicts these stale rows.
-    const draftRow = getDraft(id);
+    const draftRow = await cache.getDraft(id);
     if (draftRow !== null) {
       return jsonResponse({
         id: draftRow.id,
@@ -199,7 +171,7 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
       });
     }
 
-    const cached = getMessage(id);
+    const cached = await cache.getMessage(id);
     if (cached && cached.body !== null) {
       let row = cached;
       // Refresh view status for a sent message we still believe is unviewed:
@@ -225,12 +197,12 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
             recipients,
             listData: { ...(cached.listData as Record<string, unknown> | null), showNeverViewed: !hasRealView(recipients) },
           };
-          upsertMessage(row);
+          await cache.upsertMessage(row);
         } catch {
           // Best-effort: fall back to the cached row on any fetch/parse error.
         }
       }
-      let attachments = listAttachmentsForMessage(id);
+      let attachments = await cache.listAttachmentsForMessage(id);
       // Lazy attachment backfill. The list-endpoint payload (stored in
       // listData) hints at attachments via `files: <count>` but doesn't
       // expose the fileIds — those live only on /pub/v3/messages/{id}.
@@ -246,8 +218,8 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
             { label: 'ofw-mcp', context: 'GET /pub/v3/messages/{id} (attachment backfill)' },
           );
           if (Array.isArray(detail.files) && detail.files.length > 0) {
-            await fetchAttachmentMetaForMessage(client, id, detail.files);
-            attachments = listAttachmentsForMessage(id);
+            await fetchAttachmentMetaForMessage(client, id, detail.files, cache);
+            attachments = await cache.listAttachmentsForMessage(id);
           }
         } catch {
           // Backfill is best-effort. Fall through with whatever we have.
@@ -276,11 +248,11 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
       chainRootId: cached?.chainRootId ?? null,
       listData: cached?.listData ?? detail,
     };
-    upsertMessage(row);
+    await cache.upsertMessage(row);
     if (Array.isArray(detail.files) && detail.files.length > 0) {
-      await fetchAttachmentMetaForMessage(client, detail.id, detail.files);
+      await fetchAttachmentMetaForMessage(client, detail.id, detail.files, cache);
     }
-    const attachments = listAttachmentsForMessage(detail.id);
+    const attachments = await cache.listAttachmentsForMessage(detail.id);
     return jsonResponse({ ...row, attachments });
   });
 
@@ -301,6 +273,7 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
       throw new Error(`messageId (${args.messageId}) and draftId (${args.draftId}) refer to different drafts; pass only one.`);
     }
     const draftRef = args.messageId ?? args.draftId;
+    const cache = cacheProvider();
 
     // Best-effort draft lookup: when draftRef points at a cached draft, use
     // its stored fields (including replyToId) as defaults for anything the
@@ -315,7 +288,7 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
     let draftFound = false;
     if (draftRef !== undefined) {
       draftLookupAttempted = true;
-      const draft = getDraft(draftRef);
+      const draft = await cache.getDraft(draftRef);
       if (draft !== null) {
         draftFound = true;
         subject = subject ?? draft.subject;
@@ -349,11 +322,11 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
     let rewriteNote: string | null = null;
 
     if (requestedReplyTo !== null) {
-      resolvedReplyTo = findLatestReplyTip(requestedReplyTo);
+      resolvedReplyTo = await cache.findLatestReplyTip(requestedReplyTo);
       if (resolvedReplyTo !== requestedReplyTo) {
         rewriteNote = `replyToId rewritten from ${requestedReplyTo} to ${resolvedReplyTo} (later reply in same thread found in sent cache).`;
       }
-      const parent = getMessage(resolvedReplyTo);
+      const parent = await cache.getMessage(resolvedReplyTo);
       chainRootId = parent?.chainRootId ?? parent?.id ?? requestedReplyTo;
     }
 
@@ -385,13 +358,13 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
         chainRootId,
         listData: detail,
       };
-      upsertMessage(persisted);
+      await cache.upsertMessage(persisted);
       // Link attached files to the new message in the attachments cache.
       // We may not have full metadata if the upload happened in a prior
       // session — fall back to what we know.
       for (const fileId of myFileIDs) {
-        const existing = getAttachment(fileId);
-        upsertAttachmentForMessage({
+        const existing = await cache.getAttachment(fileId);
+        await cache.upsertAttachmentForMessage({
           fileId,
           fileName: existing?.fileName ?? `file-${fileId}`,
           label: existing?.label ?? existing?.fileName ?? `file-${fileId}`,
@@ -414,7 +387,7 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
       unconfirmedNote = `WARNING: OFW's send response did not include a message id, so the send could not be confirmed. ${draftClause} ourfamilywizard.com to see whether the message went out before retrying.`;
     } else if (draftRef !== undefined) {
       await deleteOFWMessages(client, [draftRef]);
-      deleteDraft(draftRef);
+      await cache.deleteDraft(draftRef);
     }
 
     const responseObj = persisted ?? raw;
@@ -433,7 +406,7 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
   }, async (args) => {
     const page = args.page ?? 1;
     const size = args.size ?? 50;
-    const drafts = listDrafts({ page, size });
+    const drafts = await cacheProvider().listDrafts({ page, size });
     const payload = drafts.length === 0
       ? { drafts: [], note: 'Cache empty. Call ofw_sync_messages to populate.' }
       : { drafts };
@@ -452,12 +425,13 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
       myFileIDs: z.array(z.number()).describe('Attachment file ids (from ofw_upload_attachment)').optional(),
     },
   }, async (args) => {
+    const cache = cacheProvider();
     const requestedReplyTo = args.replyToId ?? null;
     let resolvedReplyTo = requestedReplyTo;
     let rewriteNote: string | null = null;
 
     if (requestedReplyTo !== null) {
-      resolvedReplyTo = findLatestReplyTip(requestedReplyTo);
+      resolvedReplyTo = await cache.findLatestReplyTip(requestedReplyTo);
       if (resolvedReplyTo !== requestedReplyTo) {
         rewriteNote = `replyToId rewritten from ${requestedReplyTo} to ${resolvedReplyTo} (later reply in same thread found in sent cache).`;
       }
@@ -499,14 +473,14 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
         modifiedAt: detail.date?.dateTime ?? new Date().toISOString(),
         listData: detail,
       };
-      upsertDraft(persisted);
+      await cache.upsertDraft(persisted);
 
       // Replace-path: caller passed messageId, so they want the old draft
       // gone. Delete it after the new one is safely created+cached.
       if (args.messageId !== undefined && args.messageId !== newId) {
         try {
           await deleteOFWMessages(client, [args.messageId]);
-          deleteDraft(args.messageId);
+          await cache.deleteDraft(args.messageId);
           replaceNote = `NOTE: ofw_save_draft replaced draft ${args.messageId} via create-then-delete. The new draft id is ${newId}; the old draft has been deleted. (OFW's update-in-place endpoint silently no-ops on subsequent updates, so we never use it. If you cached the old id anywhere, replace it with the new one.)`;
         } catch (e) {
           replaceNote = `WARNING: New draft ${newId} created successfully, but failed to delete the old draft (${args.messageId}): ${(e as Error).message}. You may want to clean it up manually with ofw_delete_draft.`;
@@ -528,7 +502,7 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
     },
   }, async (args) => {
     const data = await deleteOFWMessages(client, [args.messageId]);
-    deleteDraft(args.messageId);
+    await cacheProvider().deleteDraft(args.messageId);
     return data ? jsonResponse(data) : textResponse('Draft deleted.');
   });
 
@@ -542,7 +516,7 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
   }, async (args) => {
     const page = args.page ?? 1;
     const size = args.size ?? 50;
-    const sent = listMessages({ folder: 'sent', page, size });
+    const sent = await cacheProvider().listMessages({ folder: 'sent', page, size });
 
     if (sent.length === 0) {
       return jsonResponse({ note: 'Sent cache is empty. Call ofw_sync_messages to populate.' });
@@ -572,16 +546,13 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
       description: z.string().describe('Description shown in OFW My Files (default: filename)').optional(),
     },
   }, async (args) => {
-    const abs = expandPath(args.path);
-    const stat = statSync(abs); // throws if missing
-    if (!stat.isFile()) throw new Error(`Not a file: ${abs}`);
-    const fileName = basename(abs);
-    const mime = mimeFromName(fileName);
+    // Resolve the upload source through the injected attachment-I/O boundary
+    // (disk read on node; an in-memory source on the hosted connector).
+    const { blob, fileName, mimeType: mime, sizeBytes } = await attachmentIO.resolveUpload(args.path);
 
     // Build the multipart payload matching the OFW web UI's request shape.
     const form = new FormData();
-    // fileBlob streams the file off disk (a file-backed Blob) instead of buffering it.
-    form.append('file', await fileBlob(abs, { type: mime }), fileName);
+    form.append('file', blob, fileName);
     form.append('source', 'message');
     form.append('description', args.description ?? fileName);
     form.append('label', args.label ?? fileName);
@@ -597,12 +568,12 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
     // Cache metadata so subsequent ofw_get_message calls can surface it and
     // ofw_download_attachment can short-circuit. messageId is 0 (the
     // not-yet-linked sentinel) until a message actually references this file.
-    upsertAttachmentForMessage({
+    await cacheProvider().upsertAttachmentForMessage({
       fileId: meta.fileId,
       fileName: meta.fileName ?? fileName,
       label: meta.label ?? args.label ?? fileName,
       mimeType: meta.fileType ?? mime,
-      sizeBytes: typeof meta.sizeInBytes === 'number' ? meta.sizeInBytes : stat.size,
+      sizeBytes: typeof meta.sizeInBytes === 'number' ? meta.sizeInBytes : sizeBytes,
       metadata: meta,
       messageId: 0,
     });
@@ -611,7 +582,7 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
       fileId: meta.fileId,
       fileName: meta.fileName ?? fileName,
       mimeType: meta.fileType ?? mime,
-      sizeBytes: meta.sizeInBytes ?? stat.size,
+      sizeBytes: meta.sizeInBytes ?? sizeBytes,
       shareClass: meta.shareClass ?? args.shareClass ?? 'PRIVATE',
       note: 'Pass this fileId to ofw_send_message or ofw_save_draft in myFileIDs to attach it.',
     });
@@ -628,13 +599,14 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
     },
   }, async (args) => {
     const fileId = args.fileId;
+    const cache = cacheProvider();
     const inline = args.inline ?? getDefaultInlineAttachments();
-    let cached = getAttachment(fileId);
+    let cached = await cache.getAttachment(fileId);
     if (!cached) {
       // Not in cache. Fetch metadata and store under the messageId=0
       // sentinel — gets re-linked if a message later references this file.
-      await fetchAttachmentMeta(client, fileId, 0);
-      cached = getAttachment(fileId);
+      await fetchAttachmentMeta(client, fileId, 0, cache);
+      cached = await cache.getAttachment(fileId);
       /* v8 ignore next -- fetchAttachmentMeta persists the row it just fetched; a still-null read here is an unreachable storage failure */
       if (!cached) throw new Error(`failed to fetch metadata for fileId ${fileId}`);
     }
@@ -645,7 +617,7 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
       let mimeType = cached.mimeType;
       let fileName = cached.fileName;
       if (cached.downloadedPath) {
-        try { bytes = readFileSync(cached.downloadedPath); } catch { /* on-disk copy missing; fall through */ }
+        bytes = attachmentIO.readDownloaded(cached.downloadedPath);
       }
       if (bytes === null) {
         const response = await client.requestBinary('GET', `/pub/v1/myfiles/${fileId}/data`);
@@ -690,9 +662,8 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
     }
 
     const response = await client.requestBinary('GET', `/pub/v1/myfiles/${fileId}/data`);
-    mkdirSync(dirname(dest), { recursive: true });
-    writeFileSync(dest, response.body);
-    markAttachmentDownloaded(fileId, dest);
+    attachmentIO.writeDownload(dest, response.body);
+    await cache.markAttachmentDownloaded(fileId, dest);
 
     return jsonResponse({
       fileId,
@@ -716,7 +687,7 @@ export function registerMessageTools(server: McpServer, client: OFWClient): void
       folders: args.folders,
       fetchUnreadBodies: args.fetchUnreadBodies,
       deep: args.deep,
-    });
+    }, cacheProvider());
     return jsonResponse(result);
   });
 }

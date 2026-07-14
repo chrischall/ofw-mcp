@@ -124,6 +124,16 @@ Environment variables always take priority over the `.env` file. You can also pa
 OFW_USERNAME=you@example.com OFW_PASSWORD=yourpass node dist/index.js
 ```
 
+## Hosted connector (Cloudflare Worker)
+
+Instead of running `ofw-mcp` locally, you can add it to [claude.ai](https://claude.ai) as a **remote MCP connector** — a hosted Cloudflare Worker you reach from Settings → Connectors on Claude web, desktop, or mobile (connectors sync across all three). The same tool registrars back both targets, so the tools and behaviour are identical to the local stdio install; the Worker just wraps them with [`@chrischall/mcp-connector`](packages/mcp-connector) (the vendored OAuth + streamable-HTTP harness) and a per-user [Durable Object](src/cache/durable.ts) cache in place of the local SQLite file.
+
+- **How you connect.** Each person you share the connector URL with logs in through the connector's own OAuth page with their **own** OurFamilyWizard email and password. Those credentials are stored (encrypted at rest) per user because OFW bearer tokens expire after ~6h with no refresh token, so the connector must be able to re-login on its own. One user can never see another's account or cache.
+- **Attachments are inline-only.** The Worker has no local filesystem, so `ofw_download_attachment` always returns bytes as MCP content blocks (`OFW_INLINE_ATTACHMENTS=true`) rather than writing to disk.
+- **Write mode defaults to `all`.** The hosted connector registers every tool by default, configurable per deployment via `OFW_WRITE_MODE` / `OFW_CALENDAR_WRITES` in `wrangler.jsonc` — see [Write protection](#write-protection-ofw_write_mode).
+
+Standing this up requires a Cloudflare account and is a manual, one-time process for whoever hosts it (there is no CI/CD path for it) — see [`docs/DEPLOY-CONNECTOR.md`](docs/DEPLOY-CONNECTOR.md) for the full runbook. The placeholder URL in [`server.json`](server.json)'s `remotes` entry (`https://ofw-mcp.example.workers.dev/mcp`) is a stand-in the operator replaces with their deployed Worker URL after following that runbook. The local stdio / `.mcpb` install above remains the desktop-only alternative if you'd rather run it against just your own account.
+
 ## Available tools
 
 Read-only tools run automatically. Write tools ask for your confirmation first. The *Write mode* column shows the minimum `OFW_WRITE_MODE` a tool needs to be available at all — see [Write protection](#write-protection-ofw_write_mode) below.

@@ -29,7 +29,10 @@
     "dev": "node --env-file=.env dist/index.js",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "worker:dev": "wrangler dev",
+    "worker:deploy": "wrangler deploy",
+    "worker:test": "vitest run --config vitest.workers.config.ts"
   },
   "dependencies": {
     "@chrischall/mcp-utils": "^0.13.0",
@@ -39,10 +42,14 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@chrischall/mcp-connector": "file:./packages/mcp-connector",
+    "@cloudflare/vitest-pool-workers": "^0.18.4",
+    "@cloudflare/workers-types": "^5.20260708.1",
     "@types/node": "^26.0.0",
     "@vitest/coverage-v8": "^4.1.7",
     "esbuild": "^0.28.0",
     "typescript": "^7.0.2",
-    "vitest": "^4.1.7"
+    "vitest": "^4.1.7",
+    "wrangler": "^4.110.0"
   }
 }

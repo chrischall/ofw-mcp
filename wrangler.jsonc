@@ -1,0 +1,32 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "ofw-connector",
+  "main": "src/worker.ts",
+  "compatibility_date": "2025-11-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [
+      { "name": "MCP_OBJECT", "class_name": "OFWMcpAgent" },
+      { "name": "CACHE_DO", "class_name": "OFWCacheDO" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["OFWMcpAgent"] },
+    { "tag": "v2", "new_sqlite_classes": ["OFWCacheDO"] }
+  ],
+  // The operator must create this KV namespace and replace the placeholder id:
+  //   wrangler kv namespace create OAUTH_KV
+  "kv_namespaces": [{ "binding": "OAUTH_KV", "id": "REPLACE_WITH_OAUTH_KV_NAMESPACE_ID" }],
+  // Under nodejs_compat these populate process.env, so the existing write-mode
+  // gate and inline-attachment default in src/config.ts work in the Worker.
+  "vars": {
+    "OFW_WRITE_MODE": "all",
+    "OFW_INLINE_ATTACHMENTS": "true"
+  },
+  // Operator step: attach a custom domain/route once DNS is ready, e.g.
+  // "routes": [{ "pattern": "connector.ofw.example.app", "custom_domain": true }],
+  "workers_dev": true,
+  "observability": {
+    "enabled": true
+  }
+}

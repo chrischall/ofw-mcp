@@ -37,6 +37,20 @@ tests/              mirrors src/; mocks OFWClient.request via vi.spyOn; cache te
 
 Tool files use `server.registerTool(name, schema, handler)` and export `registerXTools(server: McpServer, client: OFWClient)`. `index.ts` passes those registrars to `runMcp({ tools: [...], deps: client })`, which calls each as `registerXTools(server, client)`.
 
+### Hosted connector (Cloudflare Worker)
+
+`ofw-mcp` is **dual-target**: the same tool registrars back both the local stdio entry (`src/index.ts`) and a hosted Cloudflare Worker "remote connector" for claude.ai (mirrors the sibling [`untappd-mcp`](https://github.com/chrischall/untappd-mcp) connector). The Worker files are node-incompatible (they import `cloudflare:workers` / `agents`), so they run under the Workers vitest pool, never the node pool.
+
+```
+src/worker.ts        Worker entry — createConnector() from @chrischall/mcp-connector wraps the SAME registrars (user/messages/calendar/expenses/journal); builds a per-client OFWClient and threads a Durable-Object cache provider via a WeakMap keyed on the client instance. Attachments are inline-only (no filesystem)
+src/ofw-auth.ts      ConnectorAuth impl — the OAuth login form collects each user's OFW email+password (loginWithPassword). OFWProps stores BOTH username AND password because OFW bearer tokens expire in ~6h with no refresh token; encrypted at rest in OAUTH_KV
+src/cache/durable.ts OFWCacheDO (Durable Object, SQLite-backed CacheStore) + durableCacheProvider — the remote equivalent of the local node cache; one durable cache per authenticated user
+packages/mcp-connector  Vendored OAuth + streamable-HTTP connector harness (has its own test suite). Its src/ is excluded from ofw's coverage gate
+wrangler.jsonc       Worker config (bindings: OAUTH_KV, CACHE_DO Durable Object; sets OFW_INLINE_ATTACHMENTS=true; OFW_WRITE_MODE defaults to "all")
+```
+
+Two vitest configs: `vitest.config.ts` (node pool, 100% gate on `src/**`, excludes `src/index.ts` + the Worker-only files `src/worker.ts`/`src/cache/durable.ts` + `packages/mcp-connector/src`) and `vitest.workers.config.ts` (Workers runtime pool for `tests/worker*.test.ts`). Scripts: `npm run worker:dev` (wrangler dev), `npm run worker:deploy` (wrangler deploy), `npm run worker:test` (Workers-pool suite). **Deploy is manual** — a one-time-per-operator process with no CI/CD path; see [`docs/DEPLOY-CONNECTOR.md`](docs/DEPLOY-CONNECTOR.md). Worker-only files MUST stay in `vitest.config.ts`'s `coverage.exclude` and must never be imported by a node (`tests/**`) test, or the node pool will fail to load `cloudflare:workers`.
+
 ## Environment
 
 ```

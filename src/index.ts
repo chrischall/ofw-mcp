@@ -17,6 +17,19 @@ import { registerMessageTools } from './tools/messages.js';
 import { registerCalendarTools } from './tools/calendar.js';
 import { registerExpenseTools } from './tools/expenses.js';
 import { registerJournalTools } from './tools/journal.js';
+import { OFWCache } from './cache/node.js';
+import { getCacheDbPath } from './config.js';
+import { NodeAttachmentIO } from './tools/attachments.js';
+import type { CacheStore } from './cache/store.js';
+
+// The stdio server backs the message cache with a local `node:sqlite` file,
+// opened lazily on first use (so the server still boots and answers the host's
+// install-time tools/list probe when no cache path is configured). The hosted
+// Cloudflare connector (a later task) injects a Durable-Object-backed
+// CacheStore + a filesystem-free AttachmentIO into the same registrar instead.
+let nodeCache: CacheStore | undefined;
+const nodeCacheProvider = (): CacheStore => (nodeCache ??= OFWCache.open(getCacheDbPath()));
+const nodeAttachmentIO = new NodeAttachmentIO();
 
 // runMcp builds the McpServer, applies the registrars (with `client` threaded
 // through as deps), prints the banner to stderr, wires SIGINT/SIGTERM graceful
@@ -30,7 +43,7 @@ await runMcp({
   deps: client,
   tools: [
     registerUserTools,
-    registerMessageTools,
+    (server, deps) => registerMessageTools(server, deps, nodeCacheProvider, nodeAttachmentIO),
     registerCalendarTools,
     registerExpenseTools,
     registerJournalTools,

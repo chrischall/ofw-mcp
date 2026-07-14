@@ -6,17 +6,34 @@ import { dirname, join, resolve } from 'node:path';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { OFWClient } from '../../src/client.js';
 import { registerMessageTools } from '../../src/tools/messages.js';
-import {
-  closeCache, upsertMessage, upsertDraft, getMessage, getDraft,
-  upsertAttachmentForMessage,
-} from '../../src/cache.js';
+import { NodeAttachmentIO } from '../../src/tools/attachments.js';
+import { OFWCache } from '../../src/cache/node.js';
+import type {
+  CacheStore, MessageRow, DraftRow, UpsertAttachmentInput, AttachmentRow,
+} from '../../src/cache/store.js';
 
 type ToolHandler = (args: Record<string, unknown>) => Promise<{ content: Array<{ type: string; text: string }> }>;
 
 let handlers: Map<string, ToolHandler>;
 let tmpDir: string;
-let originalCacheDir: string | undefined;
-let originalUsername: string | undefined;
+
+// The message tools take an injected async CacheStore + AttachmentIO. Tests
+// back the cache with an in-memory `:memory:` OFWCache and drive the disk
+// AttachmentIO against real tmp dirs, then seed/assert cache state through the
+// synchronous OFWCacheCore (`cache.core`) so the existing test bodies stay
+// synchronous.
+let cache: OFWCache;
+const cacheProvider = (): CacheStore => cache;
+const attachmentIO = new NodeAttachmentIO();
+
+// Synchronous cache helpers over the in-memory core — preserve the old
+// free-function call sites in the test bodies.
+const upsertMessage = (row: MessageRow): void => cache.core.upsertMessage(row);
+const upsertDraft = (row: DraftRow): void => cache.core.upsertDraft(row);
+const getMessage = (id: number): MessageRow | null => cache.core.getMessage(id);
+const getDraft = (id: number): DraftRow | null => cache.core.getDraft(id);
+const upsertAttachmentForMessage = (input: UpsertAttachmentInput): void => cache.core.upsertAttachmentForMessage(input);
+const listAttachmentsForMessage = (messageId: number): AttachmentRow[] => cache.core.listAttachmentsForMessage(messageId);
 
 function makeClient(returnValue: unknown) {
   const c = new OFWClient();
@@ -31,7 +48,7 @@ function setup(client: OFWClient) {
     handlers.set(name, cb as ToolHandler);
     return undefined as never;
   });
-  registerMessageTools(server, client);
+  registerMessageTools(server, client, cacheProvider, attachmentIO);
 }
 
 function setupWithClient(client: OFWClient): Map<string, ToolHandler> {
@@ -41,25 +58,18 @@ function setupWithClient(client: OFWClient): Map<string, ToolHandler> {
     localHandlers.set(name, cb as ToolHandler);
     return undefined as never;
   });
-  registerMessageTools(server, client);
+  registerMessageTools(server, client, cacheProvider, attachmentIO);
   return localHandlers;
 }
 
 beforeEach(() => {
   tmpDir = mkdtempSync(join(tmpdir(), 'ofw-tools-'));
-  originalCacheDir = process.env.OFW_CACHE_DIR;
-  originalUsername = process.env.OFW_USERNAME;
-  process.env.OFW_CACHE_DIR = tmpDir;
-  process.env.OFW_USERNAME = 'test@example.com';
+  cache = OFWCache.open(':memory:');
 });
 
 afterEach(() => {
-  closeCache();
+  cache.close();
   vi.restoreAllMocks();
-  if (originalCacheDir === undefined) delete process.env.OFW_CACHE_DIR;
-  else process.env.OFW_CACHE_DIR = originalCacheDir;
-  if (originalUsername === undefined) delete process.env.OFW_USERNAME;
-  else process.env.OFW_USERNAME = originalUsername;
   rmSync(tmpDir, { recursive: true, force: true });
 });
 
@@ -1178,7 +1188,6 @@ describe('ofw_send_message with attachments', () => {
       subject: 'x', body: 'y', recipientIds: [1], myFileIDs: [50015547],
     });
     // After send, the attachment should now be linked to message 200
-    const { listAttachmentsForMessage } = await import('../../src/cache.js');
     const atts = listAttachmentsForMessage(200);
     expect(atts).toHaveLength(1);
     expect(atts[0].fileId).toBe(50015547);
@@ -1831,7 +1840,7 @@ describe('pagination input schemas', () => {
       configs.set(name, config as { inputSchema?: z.ZodRawShape });
       return undefined as never;
     });
-    registerMessageTools(server, new OFWClient());
+    registerMessageTools(server, new OFWClient(), cacheProvider, attachmentIO);
 
     for (const tool of ['ofw_list_messages', 'ofw_list_drafts', 'ofw_get_unread_sent']) {
       const schema = z.object(configs.get(tool)!.inputSchema!);
