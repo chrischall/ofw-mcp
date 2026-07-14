@@ -62,8 +62,17 @@ export async function loginWithPassword(
 
   const contentType = response.headers.get('content-type') ?? '';
   if (!contentType.includes('application/json')) {
+    // OFW rejects bad credentials by re-serving its HTML login page (Spring
+    // Security re-renders the form rather than returning 401/JSON). Surface a
+    // clean, actionable message instead of dumping the HTML page — this is what
+    // the hosted connector's login page shows the user on a failed sign-in.
+    if (contentType.includes('text/html')) {
+      throw new Error(
+        'OFW login failed — your OurFamilyWizard email or password was not accepted. Check them and try again.',
+      );
+    }
     const body = await response.text();
-    throw new Error(`OFW login returned unexpected response (${contentType}): ${body.substring(0, 200)}`);
+    throw new Error(`OFW login returned unexpected response (${contentType || 'no content-type'}): ${body.substring(0, 200)}`);
   }
 
   const data = (await response.json()) as LoginResponse;
