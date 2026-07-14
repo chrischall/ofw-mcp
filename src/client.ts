@@ -7,9 +7,16 @@ import { BASE_URL, OFW_PROTOCOL_HEADERS, OFW_TOKEN_TTL_MS, OFW_TOKEN_EXPIRY_SKEW
 
 // Load .env for local dev; silently skip if dotenv is unavailable (e.g. mcpb
 // bundle). loadDotenvSafely applies override:false + quiet:true and swallows a
-// missing dotenv module, matching the prior inline try/catch exactly.
-const __dirname = dirname(fileURLToPath(import.meta.url));
-await loadDotenvSafely({ path: join(__dirname, '..', '.env') });
+// missing dotenv module. The try/catch additionally guards the Cloudflare
+// Worker runtime, where `import.meta.url` is undefined and
+// `fileURLToPath(undefined)` would otherwise throw at module init (Worker
+// startup validation) — there is no filesystem / .env to load there anyway.
+try {
+  const dir = dirname(fileURLToPath(import.meta.url));
+  await loadDotenvSafely({ path: join(dir, '..', '.env') });
+} catch {
+  /* v8 ignore next -- only reached in a non-Node runtime (Workers): no .env to load */
+}
 
 export interface BinaryResponse {
   body: Buffer;
