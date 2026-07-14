@@ -14,9 +14,12 @@
     { "tag": "v1", "new_sqlite_classes": ["OFWMcpAgent"] },
     { "tag": "v2", "new_sqlite_classes": ["OFWCacheDO"] }
   ],
-  // The operator must create this KV namespace and replace the placeholder id:
-  //   wrangler kv namespace create OAUTH_KV
-  "kv_namespaces": [{ "binding": "OAUTH_KV", "id": "REPLACE_WITH_OAUTH_KV_NAMESPACE_ID" }],
+  // ofw-connector's own OAuth token store (title: ofw-connector-oauth). Kept
+  // separate from any other connector's OAUTH_KV so their OAuth grants/tokens
+  // never cross-wire. To stand up a fresh deployment in a different account,
+  // create your own (wrangler kv namespace create ofw-connector-oauth) and
+  // replace this id.
+  "kv_namespaces": [{ "binding": "OAUTH_KV", "id": "2b892f9e284845babb365ba65b229544" }],
   // Under nodejs_compat these populate process.env, so the existing write-mode
   // gate and inline-attachment default in src/config.ts work in the Worker.
   "vars": {
