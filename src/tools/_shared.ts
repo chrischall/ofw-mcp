@@ -1,6 +1,6 @@
 import { expandPath as expandPathUtil, rawTextResult, textResult } from '@chrischall/mcp-utils';
 import { z } from 'zod';
-import type { Recipient } from '../cache.js';
+import type { Recipient } from '../cache/store.js';
 import type { OFWClient } from '../client.js';
 import { parseLenient } from '@chrischall/mcp-utils';
 

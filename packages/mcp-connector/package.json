@@ -1,0 +1,31 @@
+{
+  "name": "@chrischall/mcp-connector",
+  "version": "0.1.0",
+  "description": "Reusable Cloudflare remote-connector harness for MCP servers (auth-agnostic).",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prepare": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@cloudflare/workers-oauth-provider": "^0.0.11",
+    "@modelcontextprotocol/sdk": "^1.27.0",
+    "agents": "^0.17.3"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260708.1",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.7"
+  },
+  "license": "MIT"
+}

@@ -1,0 +1,13 @@
+# Local Worker dev overrides for `wrangler dev` (copy to `.dev.vars`).
+# OFW has NO app-level API credentials — per-user OFW logins arrive through the
+# connector's OAuth login form, not from here. Everything below is optional and
+# mirrors the env-var toggles the stdio server already honors (see src/config.ts).
+
+# Write gating: "none" | "drafts" | "all" (default in the Worker: "all", set in wrangler.jsonc vars).
+# OFW_WRITE_MODE=all
+
+# In mode "drafts", also register the reversible calendar write tools.
+# OFW_CALENDAR_WRITES=true
+
+# Return attachments as MCP content blocks by default (Worker default: true).
+# OFW_INLINE_ATTACHMENTS=true

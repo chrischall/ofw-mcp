@@ -2,7 +2,7 @@ import { loadDotenvSafely, parseBoolEnv, redactSecrets } from '@chrischall/mcp-u
 import { TokenManager } from '@chrischall/mcp-utils/session';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
-import { resolveAuth } from './auth.js';
+import { resolveAuth, type ResolvedAuth } from './auth.js';
 import { BASE_URL, OFW_PROTOCOL_HEADERS, OFW_TOKEN_TTL_MS, OFW_TOKEN_EXPIRY_SKEW_MS } from './protocol.js';
 
 // Load .env for local dev; silently skip if dotenv is unavailable (e.g. mcpb
@@ -66,6 +66,18 @@ export class OFWClient {
   // callback — i.e. the original "log in on first request" behavior.
   private tokenManager: TokenManager | undefined;
 
+  // Optional injected auth resolver. When set, the refresh callback uses it
+  // instead of the module-level global `resolveAuth` (env-var → fetchproxy
+  // priority). A hosted per-user deployment injects its own resolver so each
+  // request carries that user's credentials — see the Cloudflare Worker
+  // deployment. Left undefined by the stdio path, which falls back to the
+  // global resolver, keeping that behaviour byte-for-byte identical.
+  private readonly authResolver: (() => Promise<ResolvedAuth>) | undefined;
+
+  constructor(opts?: { resolveAuth?: () => Promise<ResolvedAuth> }) {
+    this.authResolver = opts?.resolveAuth;
+  }
+
   private getTokenManager(): TokenManager {
     if (!this.tokenManager) {
       this.tokenManager = new TokenManager({
@@ -77,7 +89,7 @@ export class OFWClient {
         // path uses (the 401-replay covers a wrong guess). We re-arm the
         // sentinel so the manager can refresh again later.
         refresh: async () => {
-          const { token, expiresAt } = await resolveAuth();
+          const { token, expiresAt } = await (this.authResolver ?? resolveAuth)();
           return {
             accessToken: token,
             refreshToken: OFW_REFRESH_SENTINEL,

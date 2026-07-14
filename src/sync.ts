@@ -1,11 +1,8 @@
 import type { OFWClient } from './client.js';
-import {
-  setMeta,
-  upsertMessage, getMessage, deleteMessage, setSyncState,
-  upsertDraft, getDraft, deleteDraft, listDraftIds,
-  upsertAttachmentForMessage,
-  type MessageRow, type DraftRow, type FolderName,
-} from './cache.js';
+import type {
+  CacheStore,
+  MessageRow, DraftRow, FolderName,
+} from './cache/store.js';
 import { z } from 'zod';
 import { ApiRecipientSchema, hasRealView, mapRecipients } from './tools/_shared.js';
 import { parseLenient } from '@chrischall/mcp-utils';
@@ -35,13 +32,14 @@ export async function fetchAttachmentMeta(
   client: OFWClient,
   fileId: number,
   messageId: number,
+  store: CacheStore,
 ): Promise<void> {
   const meta = parseLenient(
     FileMetaSchema,
     await client.request('GET', `/pub/v1/myfiles/${fileId}`),
     { label: 'ofw-mcp', context: 'GET /pub/v1/myfiles/{fileId}' },
   );
-  upsertAttachmentForMessage({
+  await store.upsertAttachmentForMessage({
     fileId: meta.fileId ?? fileId,
     fileName: meta.fileName ?? `file-${fileId}`,
     label: meta.label ?? meta.fileName ?? `file-${fileId}`,
@@ -56,12 +54,13 @@ export async function fetchAttachmentMetaForMessage(
   client: OFWClient,
   messageId: number,
   fileIds: number[],
+  store: CacheStore,
 ): Promise<void> {
   // Fan out in parallel — each fetch is independent and the file id stays
   // in listData on failure (model can retry via ofw_download_attachment,
   // which surfaces the real error). Promise.allSettled so one bad
   // attachment doesn't break the surrounding sync.
-  await Promise.allSettled(fileIds.map((fid) => fetchAttachmentMeta(client, fid, messageId)));
+  await Promise.allSettled(fileIds.map((fid) => fetchAttachmentMeta(client, fid, messageId, store)));
 }
 
 export interface FolderIds {
@@ -74,7 +73,7 @@ const FoldersSchema = z.looseObject({
   systemFolders: z.array(z.looseObject({ id: z.string(), folderType: z.string() })).optional(),
 });
 
-export async function resolveFolderIds(client: OFWClient): Promise<FolderIds> {
+export async function resolveFolderIds(client: OFWClient, store: CacheStore): Promise<FolderIds> {
   const data = parseLenient(
     FoldersSchema,
     await client.request('GET', '/pub/v1/messageFolders?includeFolderCounts=true'),
@@ -91,7 +90,7 @@ export async function resolveFolderIds(client: OFWClient): Promise<FolderIds> {
     sent: find('SENT_MESSAGES'),
     drafts: find('DRAFTS'),
   };
-  setMeta('drafts_folder_id', ids.drafts);
+  await store.setMeta('drafts_folder_id', ids.drafts);
   return ids;
 }
 
@@ -133,7 +132,8 @@ export async function syncMessageFolder(
   client: OFWClient,
   folder: 'inbox' | 'sent',
   folderId: string,
-  opts: { fetchUnreadBodies: boolean; deep?: boolean }
+  opts: { fetchUnreadBodies: boolean; deep?: boolean },
+  store: CacheStore,
 ): Promise<MessageSyncResult> {
   let page = 1;
   let synced = 0;
@@ -153,7 +153,7 @@ export async function syncMessageFolder(
     let pageHadNewItem = false;
     for (const item of items) {
       if (newestId === null || item.id > newestId) newestId = item.id;
-      const existing = getMessage(item.id);
+      const existing = await store.getMessage(item.id);
       if (existing) {
         // A sent message's read status changes AFTER it's first cached, when
         // the recipient opens it — so we can't just skip existing rows. The
@@ -168,7 +168,7 @@ export async function syncMessageFolder(
             await client.request('GET', `/pub/v3/messages/${item.id}`),
             { label: 'ofw-mcp', context: 'GET /pub/v3/messages/{id} (view-status refresh)' },
           );
-          upsertMessage({ ...existing, recipients: mapRecipients(detail.recipients), listData: item });
+          await store.upsertMessage({ ...existing, recipients: mapRecipients(detail.recipients), listData: item });
           synced++;
         }
         continue;
@@ -214,10 +214,10 @@ export async function syncMessageFolder(
         chainRootId: null,
         listData: item,
       };
-      upsertMessage(row);
+      await store.upsertMessage(row);
       synced++;
       if (detailFileIds.length > 0) {
-        await fetchAttachmentMetaForMessage(client, item.id, detailFileIds);
+        await fetchAttachmentMetaForMessage(client, item.id, detailFileIds, store);
       }
     }
 
@@ -230,7 +230,7 @@ export async function syncMessageFolder(
     page++;
   }
 
-  setSyncState(folder, {
+  await store.setSyncState(folder, {
     lastSyncAt: new Date().toISOString(),
     newestId,
   });
@@ -255,7 +255,7 @@ const DraftDetailSchema = z.looseObject({
 
 export interface DraftSyncResult { synced: number }
 
-export async function syncDrafts(client: OFWClient, draftsFolderId: string): Promise<DraftSyncResult> {
+export async function syncDrafts(client: OFWClient, draftsFolderId: string, store: CacheStore): Promise<DraftSyncResult> {
   // Walk every page. The reconciliation loop at the bottom deletes any
   // cached draft that wasn't seen in the listing, so a partial walk would
   // wrongly evict real drafts beyond the first page.
@@ -282,7 +282,7 @@ export async function syncDrafts(client: OFWClient, draftsFolderId: string): Pro
     // OFW's list endpoint's `date.dateTime` is NOT a reliable modification
     // timestamp for drafts — direct UI edits don't bump it — so we can't
     // use it to skip the detail fetch. Always re-fetch; drafts are few.
-    const existing = getDraft(item.id);
+    const existing = await store.getDraft(item.id);
     const detail = parseLenient(
       DraftDetailSchema,
       await client.request('GET', `/pub/v3/messages/${item.id}`),
@@ -297,12 +297,12 @@ export async function syncDrafts(client: OFWClient, draftsFolderId: string): Pro
       modifiedAt,
       listData: item,
     };
-    upsertDraft(row);
+    await store.upsertDraft(row);
     // If a stale `messages` row exists for this id (cached by a prior
     // ofw_get_message call before the drafts table knew about this id),
     // evict it. The drafts table is the source of truth for drafts; we
     // don't want ofw_get_message returning a stale messages-table copy.
-    if (getMessage(item.id)) deleteMessage(item.id);
+    if (await store.getMessage(item.id)) await store.deleteMessage(item.id);
     if (!existing
         || existing.body !== row.body
         || existing.subject !== row.subject
@@ -311,8 +311,8 @@ export async function syncDrafts(client: OFWClient, draftsFolderId: string): Pro
     }
   }
 
-  for (const id of listDraftIds()) {
-    if (!seenIds.has(id)) deleteDraft(id);
+  for (const id of await store.listDraftIds()) {
+    if (!seenIds.has(id)) await store.deleteDraft(id);
   }
 
   return { synced };
@@ -330,9 +330,9 @@ export interface SyncAllResult {
   note?: string;
 }
 
-export async function syncAll(client: OFWClient, opts: SyncAllOptions): Promise<SyncAllResult> {
+export async function syncAll(client: OFWClient, opts: SyncAllOptions, store: CacheStore): Promise<SyncAllResult> {
   const folders = opts.folders ?? ['inbox', 'sent', 'drafts'];
-  const ids = await resolveFolderIds(client);
+  const ids = await resolveFolderIds(client, store);
   const synced: Partial<Record<FolderName, number>> = {};
   let unreadInbox: UnreadHint[] = [];
 
@@ -341,17 +341,17 @@ export async function syncAll(client: OFWClient, opts: SyncAllOptions): Promise<
       const r = await syncMessageFolder(client, 'inbox', ids.inbox, {
         fetchUnreadBodies: opts.fetchUnreadBodies ?? false,
         deep: opts.deep ?? false,
-      });
+      }, store);
       synced.inbox = r.synced;
       unreadInbox = r.unread;
     } else if (folder === 'sent') {
       const r = await syncMessageFolder(client, 'sent', ids.sent, {
         fetchUnreadBodies: false,
         deep: opts.deep ?? false,
-      });
+      }, store);
       synced.sent = r.synced;
     } else if (folder === 'drafts') {
-      const r = await syncDrafts(client, ids.drafts);
+      const r = await syncDrafts(client, ids.drafts, store);
       synced.drafts = r.synced;
     }
   }

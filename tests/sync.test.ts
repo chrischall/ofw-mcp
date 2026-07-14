@@ -1,35 +1,34 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { OFWClient } from '../src/client.js';
-import {
-  closeCache, getMeta, getMessage, listMessages, getSyncState, upsertMessage,
-  getDraft, listDraftIds, upsertDraft,
-  listAttachmentsForMessage,
-} from '../src/cache.js';
+import { OFWCache } from '../src/cache/node.js';
+import type {
+  CacheStore, MessageRow, DraftRow, SyncState, ListMessagesOptions, AttachmentRow,
+} from '../src/cache/store.js';
 import { resolveFolderIds, syncMessageFolder, syncDrafts, syncAll } from '../src/sync.js';
 
-let tmp: string;
-let originalCacheDir: string | undefined;
-let originalUsername: string | undefined;
+// The sync functions now take an injected async CacheStore. Tests back it with
+// an in-memory `:memory:` OFWCache passed as `store`, and seed/assert through
+// the synchronous core (`cache.core`) so the test bodies stay synchronous.
+let cache: OFWCache;
+const store = (): CacheStore => cache;
+
+const getMeta = (key: string): string | null => cache.core.getMeta(key);
+const getMessage = (id: number): MessageRow | null => cache.core.getMessage(id);
+const listMessages = (opts: ListMessagesOptions): MessageRow[] => cache.core.listMessages(opts);
+const getSyncState = (folder: 'inbox' | 'sent' | 'drafts'): SyncState | null => cache.core.getSyncState(folder);
+const upsertMessage = (row: MessageRow): void => cache.core.upsertMessage(row);
+const getDraft = (id: number): DraftRow | null => cache.core.getDraft(id);
+const listDraftIds = (): number[] => cache.core.listDraftIds();
+const upsertDraft = (row: DraftRow): void => cache.core.upsertDraft(row);
+const listAttachmentsForMessage = (messageId: number): AttachmentRow[] => cache.core.listAttachmentsForMessage(messageId);
 
 beforeEach(() => {
-  tmp = mkdtempSync(join(tmpdir(), 'ofw-sync-'));
-  originalCacheDir = process.env.OFW_CACHE_DIR;
-  originalUsername = process.env.OFW_USERNAME;
-  process.env.OFW_CACHE_DIR = tmp;
-  process.env.OFW_USERNAME = 'test@example.com';
+  cache = OFWCache.open(':memory:');
 });
 
 afterEach(() => {
-  closeCache();
+  cache.close();
   vi.restoreAllMocks();
-  if (originalCacheDir === undefined) delete process.env.OFW_CACHE_DIR;
-  else process.env.OFW_CACHE_DIR = originalCacheDir;
-  if (originalUsername === undefined) delete process.env.OFW_USERNAME;
-  else process.env.OFW_USERNAME = originalUsername;
-  rmSync(tmp, { recursive: true, force: true });
 });
 
 describe('resolveFolderIds', () => {
@@ -45,7 +44,7 @@ describe('resolveFolderIds', () => {
       userFolders: [],
     });
 
-    const ids = await resolveFolderIds(client);
+    const ids = await resolveFolderIds(client, store());
 
     expect(ids).toEqual({ inbox: '111', sent: '222', drafts: '333' });
     expect(spy).toHaveBeenCalledWith('GET', '/pub/v1/messageFolders?includeFolderCounts=true');
@@ -62,7 +61,7 @@ describe('resolveFolderIds', () => {
       ],
     });
 
-    await resolveFolderIds(client);
+    await resolveFolderIds(client, store());
     expect(getMeta('drafts_folder_id')).toBe('333');
   });
 
@@ -72,7 +71,7 @@ describe('resolveFolderIds', () => {
       systemFolders: [{ id: '111', folderType: 'INBOX', name: 'Inbox' }],
     });
 
-    await expect(resolveFolderIds(client)).rejects.toThrow(/SENT_MESSAGES|DRAFTS/);
+    await expect(resolveFolderIds(client, store())).rejects.toThrow(/SENT_MESSAGES|DRAFTS/);
   });
 });
 
@@ -98,7 +97,7 @@ describe('syncMessageFolder', () => {
       .mockResolvedValueOnce({ body: 'body-2' })
       .mockResolvedValueOnce(listResponse([])); // page 2 empty
 
-    const result = await syncMessageFolder(client, 'sent', '222', { fetchUnreadBodies: false });
+    const result = await syncMessageFolder(client, 'sent', '222', { fetchUnreadBodies: false }, store());
 
     expect(result.synced).toBe(2);
     expect(getMessage(1)?.body).toBe('body-1');
@@ -118,7 +117,7 @@ describe('syncMessageFolder', () => {
       .mockResolvedValueOnce({ body: 'body-1' })
       .mockResolvedValueOnce(listResponse([])); // page 2 empty
 
-    const result = await syncMessageFolder(client, 'inbox', '111', { fetchUnreadBodies: false });
+    const result = await syncMessageFolder(client, 'inbox', '111', { fetchUnreadBodies: false }, store());
 
     expect(result.synced).toBe(2);
     expect(result.unread).toEqual([
@@ -139,7 +138,7 @@ describe('syncMessageFolder', () => {
       .mockResolvedValueOnce({ body: 'body-2' })
       .mockResolvedValueOnce(listResponse([]));
 
-    const result = await syncMessageFolder(client, 'inbox', '111', { fetchUnreadBodies: true });
+    const result = await syncMessageFolder(client, 'inbox', '111', { fetchUnreadBodies: true }, store());
 
     expect(result.unread).toEqual([]);
     expect(getMessage(1)?.body).toBe('body-1');
@@ -167,7 +166,7 @@ describe('syncMessageFolder', () => {
       // page 2: only the other cached item — zero new → stop
       .mockResolvedValueOnce(listResponse([{ id: 4, unread: false }]));
 
-    const result = await syncMessageFolder(client, 'inbox', '111', { fetchUnreadBodies: false });
+    const result = await syncMessageFolder(client, 'inbox', '111', { fetchUnreadBodies: false }, store());
 
     expect(result.synced).toBe(1);
     expect(getMessage(6)?.body).toBe('body-6');
@@ -199,7 +198,7 @@ describe('syncMessageFolder', () => {
       // page 3: empty
       .mockResolvedValueOnce(listResponse([]));
 
-    const result = await syncMessageFolder(client, 'inbox', '111', { fetchUnreadBodies: false });
+    const result = await syncMessageFolder(client, 'inbox', '111', { fetchUnreadBodies: false }, store());
 
     expect(result.synced).toBe(2);
     expect(getMessage(100)?.body).toBe('body-100');
@@ -220,7 +219,7 @@ describe('syncMessageFolder', () => {
       .mockResolvedValueOnce({ body: 'body-2' })
       .mockResolvedValueOnce(listResponse([])); // empty
 
-    const result = await syncMessageFolder(client, 'inbox', '111', { fetchUnreadBodies: false, deep: true });
+    const result = await syncMessageFolder(client, 'inbox', '111', { fetchUnreadBodies: false, deep: true }, store());
 
     expect(result.synced).toBe(1);
     expect(getMessage(2)?.body).toBe('body-2');
@@ -239,7 +238,7 @@ describe('syncMessageFolder', () => {
       .mockResolvedValueOnce({ body: 'body-1' })
       .mockResolvedValueOnce(listResponse([])); // empty page 3
 
-    const result = await syncMessageFolder(client, 'sent', '222', { fetchUnreadBodies: false });
+    const result = await syncMessageFolder(client, 'sent', '222', { fetchUnreadBodies: false }, store());
 
     expect(result.synced).toBe(3);
     expect(listMessages({ folder: 'sent', page: 1, size: 50 }).map((m) => m.id)).toEqual([3, 2, 1]);
@@ -266,7 +265,7 @@ describe('syncMessageFolder', () => {
       // page 2: empty
       .mockResolvedValueOnce({ data: [] });
 
-    const result = await syncMessageFolder(client, 'inbox', '111', { fetchUnreadBodies: false });
+    const result = await syncMessageFolder(client, 'inbox', '111', { fetchUnreadBodies: false }, store());
     expect(result.synced).toBe(1);
 
     const atts = listAttachmentsForMessage(100);
@@ -293,7 +292,7 @@ describe('syncMessageFolder', () => {
       .mockResolvedValueOnce({ body: 'body-99' })
       .mockResolvedValueOnce(listResponse([]));
 
-    const result = await syncMessageFolder(client, 'sent', '222', { fetchUnreadBodies: false });
+    const result = await syncMessageFolder(client, 'sent', '222', { fetchUnreadBodies: false }, store());
     expect(result.synced).toBe(1);
     expect(getMessage(99)?.sentAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
   });
@@ -306,7 +305,7 @@ describe('syncMessageFolder', () => {
       .mockResolvedValueOnce({ body: 'body-4' })
       .mockResolvedValueOnce(listResponse([]));
 
-    await syncMessageFolder(client, 'sent', '222', { fetchUnreadBodies: false });
+    await syncMessageFolder(client, 'sent', '222', { fetchUnreadBodies: false }, store());
     const state = getSyncState('sent');
     expect(state?.newestId).toBe(5);
     expect(state?.lastSyncAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
@@ -333,7 +332,7 @@ describe('syncDrafts', () => {
       .mockResolvedValueOnce({ body: 'draft-1', subject: 'Draft 1', recipientIds: [] })
       .mockResolvedValueOnce({ body: 'draft-2', subject: 'Draft 2', recipientIds: [] });
 
-    const result = await syncDrafts(client, '333');
+    const result = await syncDrafts(client, '333', store());
 
     expect(result.synced).toBe(2);
     expect(getDraft(1)?.body).toBe('draft-1');
@@ -352,7 +351,7 @@ describe('syncDrafts', () => {
       .mockResolvedValueOnce(draftListResponse([{ id: 1 }]))
       .mockResolvedValueOnce({ body: 'draft-1', subject: 'Draft 1', recipientIds: [] });
 
-    await syncDrafts(client, '333');
+    await syncDrafts(client, '333', store());
 
     expect(getDraft(99)).toBeNull();
     expect(listDraftIds()).toEqual([1]);
@@ -377,7 +376,7 @@ describe('syncDrafts', () => {
       return { body: 'b', subject: 's', recipientIds: [] };
     });
 
-    await syncDrafts(client, '333');
+    await syncDrafts(client, '333', store());
 
     expect(getDraft(51)).not.toBeNull();
     expect(listDraftIds()).toHaveLength(51);
@@ -397,7 +396,7 @@ describe('syncDrafts', () => {
       .mockResolvedValueOnce(draftListResponse([{ id: 1, subject: 'New', modifiedAt: '2026-05-04T00:00:00Z' }]))
       .mockResolvedValueOnce({ body: 'new-body', subject: 'New', recipientIds: [] });
 
-    await syncDrafts(client, '333');
+    await syncDrafts(client, '333', store());
 
     const got = getDraft(1);
     expect(got?.subject).toBe('New');
@@ -422,7 +421,7 @@ describe('syncDrafts', () => {
       })
       .mockResolvedValueOnce({ body: 'body', subject: 'Draft no replyToId', recipientIds: [] });
 
-    const result = await syncDrafts(client, '333');
+    const result = await syncDrafts(client, '333', store());
     expect(result.synced).toBe(1);
     expect(getDraft(1)?.replyToId).toBeNull();
   });
@@ -435,7 +434,7 @@ describe('syncDrafts', () => {
       })
       .mockResolvedValueOnce({ body: 'b', subject: 'no date', recipientIds: [] });
 
-    const result = await syncDrafts(client, '333');
+    const result = await syncDrafts(client, '333', store());
     expect(result.synced).toBe(1);
     expect(getDraft(1)?.modifiedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
   });
@@ -452,7 +451,7 @@ describe('syncDrafts', () => {
       .mockResolvedValueOnce(draftListResponse([{ id: 1, subject: 'Same', modifiedAt: '2026-05-04T00:00:00Z' }]))
       .mockResolvedValueOnce({ body: 'fresh-body', subject: 'Same', recipientIds: [] });
 
-    const result = await syncDrafts(client, '333');
+    const result = await syncDrafts(client, '333', store());
 
     expect(spy).toHaveBeenCalledTimes(2);
     expect(spy.mock.calls[1]).toEqual(['GET', '/pub/v3/messages/1']);
@@ -473,7 +472,7 @@ describe('syncDrafts', () => {
       .mockResolvedValueOnce(draftListResponse([{ id: 1, subject: 'Same', modifiedAt: '2026-05-04T00:00:00Z' }]))
       .mockResolvedValueOnce({ body: 'same-body', subject: 'Same', recipientIds: [] });
 
-    const result = await syncDrafts(client, '333');
+    const result = await syncDrafts(client, '333', store());
     expect(result.synced).toBe(0);
   });
 
@@ -494,7 +493,7 @@ describe('syncDrafts', () => {
       .mockResolvedValueOnce(draftListResponse([{ id: 1, subject: 'Fresh', modifiedAt: '2026-05-04T00:00:00Z' }]))
       .mockResolvedValueOnce({ body: 'fresh-body', subject: 'Fresh', recipientIds: [] });
 
-    await syncDrafts(client, '333');
+    await syncDrafts(client, '333', store());
 
     expect(getMessage(1)).toBeNull();        // evicted
     expect(getDraft(1)?.body).toBe('fresh-body');
@@ -529,7 +528,7 @@ describe('syncAll', () => {
       .mockResolvedValueOnce(draftListResponse([{ id: 30 }]))
       .mockResolvedValueOnce({ body: 'draft-30', subject: 'Draft 30', recipientIds: [] });
 
-    const result = await syncAll(client, {});
+    const result = await syncAll(client, {}, store());
 
     expect(result.synced).toEqual({ inbox: 1, sent: 1, drafts: 1 });
     expect(result.unreadInbox).toEqual([]);
@@ -544,7 +543,7 @@ describe('syncAll', () => {
       .mockResolvedValueOnce(listResponse([]))
       .mockResolvedValueOnce(draftListResponse([]));
 
-    const result = await syncAll(client, {});
+    const result = await syncAll(client, {}, store());
 
     expect(result.unreadInbox).toEqual([
       { id: 10, subject: 'Subject 10', from: 'Alice', sentAt: '2026-05-04T12:00:00Z' },
@@ -557,7 +556,7 @@ describe('syncAll', () => {
     const spy = vi.spyOn(client, 'request').mockResolvedValueOnce(foldersResponse());
     // The tool layer constrains folders via a zod enum; at this layer an
     // unknown folder matches none of the branches and is skipped.
-    const result = await syncAll(client, { folders: ['bogus' as never] });
+    const result = await syncAll(client, { folders: ['bogus' as never] }, store());
     expect(result.synced).toEqual({});
     expect(spy).toHaveBeenCalledTimes(1); // only resolveFolderIds
   });
@@ -576,7 +575,7 @@ describe('syncAll', () => {
       .mockResolvedValueOnce(listResponse([]))
       .mockResolvedValueOnce(draftListResponse([])); // drafts empty
 
-    const result = await syncAll(client, { deep: true }); // sync.ts:290 opts.deep present
+    const result = await syncAll(client, { deep: true }, store()); // sync.ts:290 opts.deep present
 
     expect(result.synced).toEqual({ inbox: 1, sent: 1, drafts: 0 });
   });
@@ -587,7 +586,7 @@ describe('syncAll', () => {
       .mockResolvedValueOnce(foldersResponse())
       .mockResolvedValueOnce(draftListResponse([]));
 
-    const result = await syncAll(client, { folders: ['drafts'] });
+    const result = await syncAll(client, { folders: ['drafts'] }, store());
 
     expect(result.synced).toEqual({ drafts: 0 });
     const inboxCalls = spy.mock.calls.filter((c) => (c[1] as string).includes('folders=111'));
@@ -609,7 +608,7 @@ describe('sync — missing-optional-field fallbacks', () => {
       .mockResolvedValueOnce({})                // /myfiles/777: bare meta → all ?? fallbacks
       .mockResolvedValueOnce({ data: [] });     // page 2 empty → break
 
-    const result = await syncMessageFolder(client, 'inbox', '111', { fetchUnreadBodies: false });
+    const result = await syncMessageFolder(client, 'inbox', '111', { fetchUnreadBodies: false }, store());
     expect(result.synced).toBe(2);
     expect(getMessage(10)?.subject).toBe('(no subject)');
     expect(getMessage(10)?.fromUser).toBe('');
@@ -622,7 +621,7 @@ describe('sync — missing-optional-field fallbacks', () => {
   it('resolveFolderIds throws when the response has no systemFolders array', async () => {
     const client = new OFWClient();
     vi.spyOn(client, 'request').mockResolvedValue({} as never); // no systemFolders → `?? []`
-    await expect(resolveFolderIds(client)).rejects.toThrow();
+    await expect(resolveFolderIds(client, store())).rejects.toThrow();
   });
 
   it('syncDrafts fills defaults for a bare draft (no date/subject/body)', async () => {
@@ -630,7 +629,7 @@ describe('sync — missing-optional-field fallbacks', () => {
     vi.spyOn(client, 'request')
       .mockResolvedValueOnce({ data: [{ id: 50, recipients: [] }] }) // no date/subject
       .mockResolvedValueOnce({}); // detail: no subject/body
-    const result = await syncDrafts(client, '333');
+    const result = await syncDrafts(client, '333', store());
     expect(result.synced).toBe(1);
     expect(getDraft(50)?.subject).toBe('(no subject)');
     expect(getDraft(50)?.body).toBe('');
@@ -641,12 +640,12 @@ describe('sync — empty/missing data arrays', () => {
   it('syncMessageFolder treats a missing data array as an empty page', async () => {
     const client = new OFWClient();
     vi.spyOn(client, 'request').mockResolvedValueOnce({} as never); // no `data` → `?? []` → break
-    expect((await syncMessageFolder(client, 'inbox', '111', { fetchUnreadBodies: false })).synced).toBe(0);
+    expect((await syncMessageFolder(client, 'inbox', '111', { fetchUnreadBodies: false }, store())).synced).toBe(0);
   });
   it('syncDrafts treats a missing data array as no drafts', async () => {
     const client = new OFWClient();
     vi.spyOn(client, 'request').mockResolvedValueOnce({} as never);
-    expect((await syncDrafts(client, '333')).synced).toBe(0);
+    expect((await syncDrafts(client, '333', store())).synced).toBe(0);
   });
 });
 
@@ -663,7 +662,7 @@ describe('sync — response validation (issue #83)', () => {
       .mockResolvedValueOnce({ body: 'B' })     // detail
       .mockResolvedValueOnce({ data: [] });     // page 2 → break
 
-    const result = await syncMessageFolder(client, 'inbox', '111', { fetchUnreadBodies: false });
+    const result = await syncMessageFolder(client, 'inbox', '111', { fetchUnreadBodies: false }, store());
     expect(result.synced).toBe(1);              // sync still lands the message
     expect(getMessage(90)?.body).toBe('B');
     const warning = err.mock.calls.map((c) => c[0]).find((m) => typeof m === 'string' && m.includes('proceeding with the raw response'));
@@ -689,7 +688,7 @@ describe('syncMessageFolder — view-status refresh (read receipts)', () => {
         recipients: [{ user: { id: 1, name: 'Bob' }, viewed: { dateTime: '2026-06-16T15:49:20' } }],
       });
 
-    const result = await syncMessageFolder(client, 'sent', '222', { fetchUnreadBodies: false });
+    const result = await syncMessageFolder(client, 'sent', '222', { fetchUnreadBodies: false }, store());
 
     expect(getMessage(5)?.recipients[0].viewedAt).toBe('2026-06-16T15:49:20');
     expect(result.synced).toBe(1);
@@ -713,7 +712,7 @@ describe('syncMessageFolder — self-heals a stale epoch-placeholder row', () =>
         recipients: [{ user: { id: 1, name: 'Bob' }, viewed: { dateTime: '2026-06-16T15:49:20' } }],
       });
 
-    await syncMessageFolder(client, 'sent', '222', { fetchUnreadBodies: false });
+    await syncMessageFolder(client, 'sent', '222', { fetchUnreadBodies: false }, store());
 
     expect(getMessage(9)?.recipients[0].viewedAt).toBe('2026-06-16T15:49:20');
   });
