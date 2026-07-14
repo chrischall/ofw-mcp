@@ -63,8 +63,14 @@ export class OFWCacheDO extends DurableObject {
   async upsertMessage(row: MessageRow): Promise<void> {
     this.core.upsertMessage(row);
   }
+  async upsertMessages(rows: MessageRow[]): Promise<void> {
+    this.core.upsertMessages(rows);
+  }
   async getMessage(id: number): Promise<MessageRow | null> {
     return this.core.getMessage(id);
+  }
+  async getMessages(ids: number[]): Promise<MessageRow[]> {
+    return this.core.getMessages(ids);
   }
   async deleteMessage(id: number): Promise<void> {
     this.core.deleteMessage(id);
@@ -78,8 +84,14 @@ export class OFWCacheDO extends DurableObject {
   async upsertDraft(row: DraftRow): Promise<void> {
     this.core.upsertDraft(row);
   }
+  async upsertDrafts(rows: DraftRow[]): Promise<void> {
+    this.core.upsertDrafts(rows);
+  }
   async getDraft(id: number): Promise<DraftRow | null> {
     return this.core.getDraft(id);
+  }
+  async getDrafts(ids: number[]): Promise<DraftRow[]> {
+    return this.core.getDrafts(ids);
   }
   async listDrafts(opts: { page: number; size: number }): Promise<DraftRow[]> {
     return this.core.listDrafts(opts);
@@ -125,8 +137,14 @@ class DurableCacheStore implements CacheStore {
   upsertMessage(row: MessageRow): Promise<void> {
     return this.stub.upsertMessage(row);
   }
+  upsertMessages(rows: MessageRow[]): Promise<void> {
+    return this.stub.upsertMessages(rows);
+  }
   getMessage(id: number): Promise<MessageRow | null> {
     return this.stub.getMessage(id);
+  }
+  getMessages(ids: number[]): Promise<MessageRow[]> {
+    return this.stub.getMessages(ids);
   }
   deleteMessage(id: number): Promise<void> {
     return this.stub.deleteMessage(id);
@@ -140,8 +158,14 @@ class DurableCacheStore implements CacheStore {
   upsertDraft(row: DraftRow): Promise<void> {
     return this.stub.upsertDraft(row);
   }
+  upsertDrafts(rows: DraftRow[]): Promise<void> {
+    return this.stub.upsertDrafts(rows);
+  }
   getDraft(id: number): Promise<DraftRow | null> {
     return this.stub.getDraft(id);
+  }
+  getDrafts(ids: number[]): Promise<DraftRow[]> {
+    return this.stub.getDrafts(ids);
   }
   listDrafts(opts: { page: number; size: number }): Promise<DraftRow[]> {
     return this.stub.listDrafts(opts);

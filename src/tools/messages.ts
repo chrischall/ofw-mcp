@@ -4,7 +4,7 @@ import type { OFWClient } from '../client.js';
 import { syncAll, fetchAttachmentMeta, fetchAttachmentMetaForMessage } from '../sync.js';
 import type { CacheStore, MessageRow, DraftRow } from '../cache/store.js';
 import type { AttachmentIO } from './attachments.js';
-import { getAttachmentsDir, getDefaultInlineAttachments, getWriteMode } from '../config.js';
+import { getAttachmentsDir, getDefaultInlineAttachments, getSyncMaxRequests, getWriteMode } from '../config.js';
 import { basename, join } from 'node:path';
 import { ApiRecipientSchema, expandPath, hasRealView, jsonResponse, mapRecipients, postMessageAndRefetch, textResponse, verifyWriteLanded } from './_shared.js';
 import { parseLenient } from '@chrischall/mcp-utils';
@@ -675,18 +675,20 @@ export function registerMessageTools(
   });
 
   server.registerTool('ofw_sync_messages', {
-    description: 'Sync messages from OurFamilyWizard into the local cache. Returns counts per folder and a list of unread inbox messages whose bodies were NOT fetched (to avoid mark-as-read on OFW). Call ofw_get_message(id) on those to read them. Pass deep:true to walk all OFW pages instead of stopping at the first all-cached page (use to backfill suspected gaps).',
+    description: 'Sync messages from OurFamilyWizard into the local cache. Returns counts per folder and a list of unread inbox messages whose bodies were NOT fetched (to avoid mark-as-read on OFW). Call ofw_get_message(id) on those to read them. Pass deep:true to walk all OFW pages instead of stopping at the first all-cached page (use to backfill suspected gaps). Sync is BOUNDED and RESUMABLE: on hosted deployments a per-call OFW-request budget (env OFW_SYNC_MAX_REQUESTS, or the maxRequests argument) caps how far one call walks; when the budget is hit the response reports done:false with a note — call again with the SAME arguments to continue the deep backfill where it left off. Local installs are unbounded by default (done is always true).',
     annotations: { readOnlyHint: false },
     inputSchema: {
       folders: z.array(z.enum(['inbox', 'sent', 'drafts'])).describe('Folders to sync (default: all three)').optional(),
       fetchUnreadBodies: z.boolean().describe('If true, also fetch bodies for unread inbox messages (will mark them as read on OFW). Default false.').optional(),
       deep: z.boolean().describe('If true, walk every OFW page until empty regardless of cache state. Use to backfill gaps. Default false.').optional(),
+      maxRequests: z.number().int().min(1).describe('Maximum OFW requests this single call may make before pausing. When hit, the response reports done:false — call again with the same arguments to continue. Omit to use the server default (OFW_SYNC_MAX_REQUESTS, or unbounded on local installs).').optional(),
     },
   }, async (args) => {
     const result = await syncAll(client, {
       folders: args.folders,
       fetchUnreadBodies: args.fetchUnreadBodies,
       deep: args.deep,
+      maxRequests: args.maxRequests ?? getSyncMaxRequests(),
     }, cacheProvider());
     return jsonResponse(result);
   });

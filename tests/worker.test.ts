@@ -62,6 +62,15 @@ describe('OFW Cloudflare connector — OAuth surface', () => {
     expect(res.status).toBe(401);
   });
 
+  it('exposes the wrangler.jsonc OFW_SYNC_MAX_REQUESTS var to the Worker runtime', () => {
+    // Proves the bounded/resumable-sync default from wrangler.jsonc's `vars`
+    // block reaches the Worker (nodejs_compat mirrors it into process.env, which
+    // getSyncMaxRequests() reads). `env` from cloudflare:test is the deterministic
+    // view of those vars in the Workers pool.
+    const wranglerVars = env as unknown as { OFW_SYNC_MAX_REQUESTS?: string };
+    expect(wranglerVars.OFW_SYNC_MAX_REQUESTS).toBe('40');
+  });
+
   it('GET /authorize renders the OurFamilyWizard login page with both field labels', async () => {
     // No `client_id` query param: the login page renders without needing a
     // registered OAuth client, which is all we verify here.

@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { getAttachmentsDir, getCacheDbPath, getCalendarWritesAllowed, getDefaultInlineAttachments, getCacheDir, getWriteMode } from '../src/config.js';
+import { getAttachmentsDir, getCacheDbPath, getCalendarWritesAllowed, getDefaultInlineAttachments, getCacheDir, getSyncMaxRequests, getWriteMode } from '../src/config.js';
 
 describe('getCacheDbPath', () => {
   let tmp: string;
@@ -138,6 +138,36 @@ describe('getCacheDir', () => {
       if (orig === undefined) delete process.env.OFW_CACHE_DIR;
       else process.env.OFW_CACHE_DIR = orig;
     }
+  });
+});
+
+describe('getSyncMaxRequests', () => {
+  let original: string | undefined;
+  beforeEach(() => {
+    original = process.env.OFW_SYNC_MAX_REQUESTS;
+    delete process.env.OFW_SYNC_MAX_REQUESTS;
+  });
+  afterEach(() => {
+    if (original === undefined) delete process.env.OFW_SYNC_MAX_REQUESTS;
+    else process.env.OFW_SYNC_MAX_REQUESTS = original;
+  });
+
+  it('is POSITIVE_INFINITY (unbounded) when unset or blank', () => {
+    expect(getSyncMaxRequests()).toBe(Number.POSITIVE_INFINITY);
+    process.env.OFW_SYNC_MAX_REQUESTS = '   ';
+    expect(getSyncMaxRequests()).toBe(Number.POSITIVE_INFINITY);
+  });
+
+  it('parses a positive integer (trimmed)', () => {
+    process.env.OFW_SYNC_MAX_REQUESTS = '25';
+    expect(getSyncMaxRequests()).toBe(25);
+    process.env.OFW_SYNC_MAX_REQUESTS = ' 200 ';
+    expect(getSyncMaxRequests()).toBe(200);
+  });
+
+  it.each(['0', '-5', '12.5', 'abc', 'NaN'])('falls back to unbounded for invalid value %j', (val) => {
+    process.env.OFW_SYNC_MAX_REQUESTS = val;
+    expect(getSyncMaxRequests()).toBe(Number.POSITIVE_INFINITY);
   });
 });
 

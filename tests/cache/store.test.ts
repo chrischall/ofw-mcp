@@ -71,6 +71,37 @@ describe('OFWCache (:memory:) messages', () => {
     expect(await store.countMessages({})).toBe(2);
   });
 
+  it('getMessages batch-reads only present ids (empty array short-circuits, no query)', async () => {
+    // Empty ids returns [] without touching the DB.
+    expect(await store.getMessages([])).toEqual([]);
+
+    await store.upsertMessage(sampleRow({ id: 1 }));
+    await store.upsertMessage(sampleRow({ id: 2 }));
+    // Partial hit: id 3 is absent — only present rows come back.
+    const got = await store.getMessages([1, 3, 2]);
+    expect(got.map((m) => m.id).sort()).toEqual([1, 2]);
+    // Full round-trip fidelity for one row.
+    const one = (await store.getMessages([1]))[0];
+    expect(one).toEqual(sampleRow({ id: 1 }));
+  });
+
+  it('upsertMessages batch-writes in one transaction (empty array is a no-op)', async () => {
+    await store.upsertMessages([]); // no-op, must not throw
+    expect(await store.countMessages({})).toBe(0);
+
+    await store.upsertMessages([
+      sampleRow({ id: 10, subject: 'A' }),
+      sampleRow({ id: 11, subject: 'B' }),
+    ]);
+    expect((await store.getMessage(10))?.subject).toBe('A');
+    expect((await store.getMessage(11))?.subject).toBe('B');
+
+    // Re-upsert overwrites in place (same ON CONFLICT path as the single-row write).
+    await store.upsertMessages([sampleRow({ id: 10, subject: 'A (edited)' })]);
+    expect((await store.getMessage(10))?.subject).toBe('A (edited)');
+    expect(await store.countMessages({})).toBe(2);
+  });
+
   it('defaults undefined recipients/listData and nullish body/replyToId when OFW omits them', async () => {
     // Exercises the `?? []` / `?? null` / nullish(undefined) fallbacks in
     // upsertMessage for a sparse row (missing optional/nullable fields).
@@ -116,6 +147,32 @@ describe('OFWCache (:memory:) drafts', () => {
     expect(got?.listData).toBeNull();
   });
 
+  it('getDrafts batch-reads only present ids (empty array short-circuits, no query)', async () => {
+    expect(await store.getDrafts([])).toEqual([]);
+
+    await store.upsertDraft(sampleDraft({ id: 1 }));
+    await store.upsertDraft(sampleDraft({ id: 2 }));
+    const got = await store.getDrafts([1, 3, 2]);
+    expect(got.map((d) => d.id).sort()).toEqual([1, 2]);
+    expect((await store.getDrafts([1]))[0]).toEqual(sampleDraft({ id: 1 }));
+  });
+
+  it('upsertDrafts batch-writes in one transaction (empty array is a no-op)', async () => {
+    await store.upsertDrafts([]); // no-op, must not throw
+    expect(await store.listDraftIds()).toEqual([]);
+
+    await store.upsertDrafts([
+      sampleDraft({ id: 10, subject: 'A' }),
+      sampleDraft({ id: 11, subject: 'B' }),
+    ]);
+    expect((await store.getDraft(10))?.subject).toBe('A');
+    expect((await store.getDraft(11))?.subject).toBe('B');
+
+    await store.upsertDrafts([sampleDraft({ id: 10, subject: 'A (edited)' })]);
+    expect((await store.getDraft(10))?.subject).toBe('A (edited)');
+    expect((await store.listDraftIds()).sort()).toEqual([10, 11]);
+  });
+
   it('listDrafts sorts by modifiedAt desc; listDraftIds returns all ids; deleteDraft removes', async () => {
     await store.upsertDraft(sampleDraft({ id: 1, modifiedAt: '2026-05-01T00:00:00Z' }));
     await store.upsertDraft(sampleDraft({ id: 2, modifiedAt: '2026-05-03T00:00:00Z' }));
@@ -127,12 +184,20 @@ describe('OFWCache (:memory:) drafts', () => {
 });
 
 describe('OFWCache (:memory:) sync_state and meta', () => {
-  it('getSyncState returns null then round-trips setSyncState (incl. null newestId)', async () => {
+  it('getSyncState returns null then round-trips setSyncState (incl. null newestId + resumePage)', async () => {
     expect(await store.getSyncState('inbox')).toBeNull();
-    await store.setSyncState('inbox', { lastSyncAt: '2026-05-04T00:00:00Z', newestId: 42 });
-    expect(await store.getSyncState('inbox')).toEqual({ lastSyncAt: '2026-05-04T00:00:00Z', newestId: 42 });
-    await store.setSyncState('inbox', { lastSyncAt: '2026-05-05T00:00:00Z', newestId: null });
-    expect(await store.getSyncState('inbox')).toEqual({ lastSyncAt: '2026-05-05T00:00:00Z', newestId: null });
+    await store.setSyncState('inbox', { lastSyncAt: '2026-05-04T00:00:00Z', newestId: 42, resumePage: null });
+    expect(await store.getSyncState('inbox')).toEqual({ lastSyncAt: '2026-05-04T00:00:00Z', newestId: 42, resumePage: null });
+    await store.setSyncState('inbox', { lastSyncAt: '2026-05-05T00:00:00Z', newestId: null, resumePage: null });
+    expect(await store.getSyncState('inbox')).toEqual({ lastSyncAt: '2026-05-05T00:00:00Z', newestId: null, resumePage: null });
+  });
+
+  it('persists a non-null resumePage cursor (deep-backfill resume) and clears it back to null', async () => {
+    await store.setSyncState('sent', { lastSyncAt: '2026-05-04T00:00:00Z', newestId: 500, resumePage: 7 });
+    expect(await store.getSyncState('sent')).toEqual({ lastSyncAt: '2026-05-04T00:00:00Z', newestId: 500, resumePage: 7 });
+    // A subsequent completed walk writes resumePage: null.
+    await store.setSyncState('sent', { lastSyncAt: '2026-05-06T00:00:00Z', newestId: 500, resumePage: null });
+    expect((await store.getSyncState('sent'))?.resumePage).toBeNull();
   });
 
   it('getMeta returns null then round-trips setMeta', async () => {

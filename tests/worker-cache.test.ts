@@ -86,11 +86,12 @@ describe('OFWCacheDO (Durable Object SQLite backend)', () => {
     expect(await store.countMessages({ folder: 'sent' })).toBe(1);
 
     // sync_state: set → get
-    const state: SyncState = { lastSyncAt: '2026-07-14T09:00:00.000Z', newestId: 22 };
+    const state: SyncState = { lastSyncAt: '2026-07-14T09:00:00.000Z', newestId: 22, resumePage: 3 };
     await store.setSyncState('inbox', state);
     const readState = await store.getSyncState('inbox');
     expect(readState?.lastSyncAt).toBe('2026-07-14T09:00:00.000Z');
     expect(readState?.newestId).toBe(22);
+    expect(readState?.resumePage).toBe(3); // resume cursor round-trips through the DO SQLite
     expect(await store.getSyncState('sent')).toBeNull();
 
     // drafts: upsert → get → list → delete
@@ -106,6 +107,27 @@ describe('OFWCacheDO (Durable Object SQLite backend)', () => {
     // meta: set → get
     await store.setMeta('drafts_folder_id', '4242');
     expect(await store.getMeta('drafts_folder_id')).toBe('4242');
+  });
+
+  it('round-trips batch message + draft upserts and reads through the DO', async () => {
+    const store = makeDurableCacheStore(CACHE, 'operator_batch');
+
+    // Empty batches are no-ops across the RPC boundary.
+    await store.upsertMessages([]);
+    await store.upsertDrafts([]);
+    expect(await store.getMessages([])).toEqual([]);
+    expect(await store.getDrafts([])).toEqual([]);
+
+    // Batch write one RPC per collection, then batch read (partial hit).
+    await store.upsertMessages([msg(6001), msg(6002, { subject: 'Batched sent', folder: 'sent' })]);
+    const gotMsgs = await store.getMessages([6001, 9999, 6002]);
+    expect(gotMsgs.map((m) => m.id).sort()).toEqual([6001, 6002]);
+    expect(gotMsgs.find((m) => m.id === 6002)?.subject).toBe('Batched sent');
+
+    await store.upsertDrafts([draft(6100), draft(6101, { subject: 'Batched draft' })]);
+    const gotDrafts = await store.getDrafts([6100, 9999, 6101]);
+    expect(gotDrafts.map((d) => d.id).sort()).toEqual([6100, 6101]);
+    expect(gotDrafts.find((d) => d.id === 6101)?.subject).toBe('Batched draft');
   });
 
   it('keeps each operator’s cache isolated in its own DO', async () => {

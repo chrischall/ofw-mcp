@@ -63,6 +63,54 @@ export async function fetchAttachmentMetaForMessage(
   await Promise.allSettled(fileIds.map((fid) => fetchAttachmentMeta(client, fid, messageId, store)));
 }
 
+/**
+ * A per-invocation OFW-request budget. `take()` consumes one unit and returns
+ * `false` once the budget is exhausted, at which point the caller must stop
+ * making requests and record a resume position.
+ */
+export interface Budget {
+  take(): boolean;
+}
+
+/**
+ * Build a {@link Budget} that allows `max` requests. `Number.POSITIVE_INFINITY`
+ * (the local-stdio default) never exhausts — `take()` always returns true — so
+ * bounded logic collapses to the original unbounded walk.
+ */
+export function makeBudget(max: number): Budget {
+  let remaining = max;
+  return {
+    take(): boolean {
+      if (remaining <= 0) return false;
+      remaining -= 1;
+      return true;
+    },
+  };
+}
+
+// Budget-gated attachment-meta backfill. Spends one unit per file id it can
+// afford (in order), skipping the rest, then fetches the affordable ones with
+// the existing best-effort parallel helper. Attachment fetches are best-effort:
+// a skipped file id stays in the message's listData and can be backfilled later
+// by ofw_get_message. Under an infinite budget this fetches every file id — the
+// unbounded behaviour.
+async function fetchAttachmentMetaBudgeted(
+  client: OFWClient,
+  messageId: number,
+  fileIds: number[],
+  store: CacheStore,
+  budget: Budget,
+): Promise<void> {
+  const affordable: number[] = [];
+  for (const fid of fileIds) {
+    if (!budget.take()) break;
+    affordable.push(fid);
+  }
+  if (affordable.length > 0) {
+    await fetchAttachmentMetaForMessage(client, messageId, affordable, store);
+  }
+}
+
 export interface FolderIds {
   inbox: string;
   sent: string;
@@ -126,21 +174,44 @@ export interface UnreadHint {
 export interface MessageSyncResult {
   synced: number;
   unread: UnreadHint[];
+  /** True when the folder walk completed within budget; false when it paused. */
+  done: boolean;
 }
 
 export async function syncMessageFolder(
   client: OFWClient,
   folder: 'inbox' | 'sent',
   folderId: string,
-  opts: { fetchUnreadBodies: boolean; deep?: boolean },
+  opts: { fetchUnreadBodies: boolean; deep?: boolean; budget?: Budget },
   store: CacheStore,
 ): Promise<MessageSyncResult> {
+  // No budget → unbounded (local stdio): every take() succeeds, so the walk is
+  // byte-for-byte the original unbounded behaviour.
+  const budget = opts.budget ?? makeBudget(Number.POSITIVE_INFINITY);
+
+  // Resume a bounded deep backfill from where the last call paused. Only deep
+  // walks resume (a normal incremental sync always restarts at page 1, its
+  // stop heuristic finds cached history quickly). Seeding newestId from the
+  // saved state keeps the folder's true newest id — page 1 (where it lives) was
+  // walked on the first call of this backfill, not this resume call.
+  const saved = await store.getSyncState(folder);
   let page = 1;
-  let synced = 0;
   let newestId: number | null = null;
+  if (opts.deep && saved?.resumePage != null) {
+    page = saved.resumePage;
+    newestId = saved.newestId;
+  }
+
+  let synced = 0;
   const unread: UnreadHint[] = [];
+  let done = true;
 
   while (true) {
+    // One unit per list-page fetch. Out of budget → pause and resume at `page`.
+    if (!budget.take()) {
+      done = false;
+      break;
+    }
     const path = `/pub/v3/messages?folders=${encodeURIComponent(folderId)}&page=${page}&size=50&sort=date&sortDirection=desc`;
     const list = parseLenient(
       ListResponseSchema,
@@ -150,10 +221,18 @@ export async function syncMessageFolder(
     const items = list.data ?? [];
     if (items.length === 0) break;
 
+    // One batch read of this page's ids (S1) instead of a per-item getMessage.
+    const existingById = new Map(
+      (await store.getMessages(items.map((it) => it.id))).map((row) => [row.id, row]),
+    );
+    // Rows created/updated this page, flushed in ONE batch upsert (S1).
+    const toUpsert: MessageRow[] = [];
     let pageHadNewItem = false;
+    let pageBudgetHit = false;
+
     for (const item of items) {
       if (newestId === null || item.id > newestId) newestId = item.id;
-      const existing = await store.getMessage(item.id);
+      const existing = existingById.get(item.id);
       if (existing) {
         // A sent message's read status changes AFTER it's first cached, when
         // the recipient opens it — so we can't just skip existing rows. The
@@ -163,12 +242,13 @@ export async function syncMessageFolder(
         // and we don't yet hold a real viewed time, re-fetch detail to capture
         // it (no body re-fetch — only the recipient view fields can change).
         if (folder === 'sent' && item.showNeverViewed === false && !hasRealView(existing.recipients)) {
+          if (!budget.take()) { pageBudgetHit = true; break; }
           const detail = parseLenient(
             DetailResponseSchema,
             await client.request('GET', `/pub/v3/messages/${item.id}`),
             { label: 'ofw-mcp', context: 'GET /pub/v3/messages/{id} (view-status refresh)' },
           );
-          await store.upsertMessage({ ...existing, recipients: mapRecipients(detail.recipients), listData: item });
+          toUpsert.push({ ...existing, recipients: mapRecipients(detail.recipients), listData: item });
           synced++;
         }
         continue;
@@ -182,6 +262,7 @@ export async function syncMessageFolder(
       let fetchedBodyAt: string | null = null;
       let detailFileIds: number[] = [];
       if (shouldFetchBody) {
+        if (!budget.take()) { pageBudgetHit = true; break; }
         const detail = parseLenient(
           DetailResponseSchema,
           await client.request('GET', `/pub/v3/messages/${item.id}`),
@@ -214,11 +295,21 @@ export async function syncMessageFolder(
         chainRootId: null,
         listData: item,
       };
-      await store.upsertMessage(row);
+      toUpsert.push(row);
       synced++;
       if (detailFileIds.length > 0) {
-        await fetchAttachmentMetaForMessage(client, item.id, detailFileIds, store);
+        await fetchAttachmentMetaBudgeted(client, item.id, detailFileIds, store, budget);
       }
+    }
+
+    // Flush the page's rows in one transaction/RPC. Empty array is a no-op.
+    await store.upsertMessages(toUpsert);
+
+    if (pageBudgetHit) {
+      // Paused mid-page. Resume at THIS page: the partial rows are cached, so
+      // getMessages skips them next time and upserts are idempotent.
+      done = false;
+      break;
     }
 
     // Stop heuristic: a page with no new items means we've reached cached
@@ -233,9 +324,11 @@ export async function syncMessageFolder(
   await store.setSyncState(folder, {
     lastSyncAt: new Date().toISOString(),
     newestId,
+    // Clear the cursor on natural completion; record where to resume on a pause.
+    resumePage: done ? null : page,
   });
 
-  return { synced, unread };
+  return { synced, unread, done };
 }
 
 const DraftListItemSchema = z.looseObject({
@@ -253,15 +346,32 @@ const DraftDetailSchema = z.looseObject({
   subject: z.string().optional(),
 });
 
-export interface DraftSyncResult { synced: number }
+export interface DraftSyncResult {
+  synced: number;
+  /** True when the full drafts walk + reconciliation ran; false when deferred. */
+  done: boolean;
+}
 
-export async function syncDrafts(client: OFWClient, draftsFolderId: string, store: CacheStore): Promise<DraftSyncResult> {
-  // Walk every page. The reconciliation loop at the bottom deletes any
-  // cached draft that wasn't seen in the listing, so a partial walk would
-  // wrongly evict real drafts beyond the first page.
+export async function syncDrafts(
+  client: OFWClient,
+  draftsFolderId: string,
+  store: CacheStore,
+  budget?: Budget,
+): Promise<DraftSyncResult> {
+  // No budget → unbounded (local stdio): identical to the original walk.
+  const b = budget ?? makeBudget(Number.POSITIVE_INFINITY);
+
+  // The reconciliation step below DELETES any cached draft not seen in the
+  // listing, so a partial walk must apply NOTHING. We therefore buffer the
+  // entire walk (all list pages + every detail) BEFORE touching the cache: if
+  // the budget can't fund the whole walk we discard the buffer and defer the
+  // drafts folder to a later call (done:false). The OFW requests already spent
+  // still count against the budget; drafts are few, so a discarded partial is
+  // cheap and — crucially — never evicts a real draft.
   const items: DraftListItem[] = [];
   let page = 1;
   while (true) {
+    if (!b.take()) return { synced: 0, done: false };
     const path = `/pub/v3/messages?folders=${encodeURIComponent(draftsFolderId)}&page=${page}&size=50&sort=date&sortDirection=desc`;
     const list = parseLenient(
       DraftListResponseSchema,
@@ -273,36 +383,45 @@ export async function syncDrafts(client: OFWClient, draftsFolderId: string, stor
     if (pageItems.length < 50) break;
     page++;
   }
-  const seenIds = new Set<number>();
-  let synced = 0;
 
+  // Fetch every draft's detail up front, still buffered. OFW's list
+  // `date.dateTime` is NOT a reliable modification timestamp for drafts —
+  // direct UI edits don't bump it — so we can't skip the detail fetch.
+  const rows: DraftRow[] = [];
   for (const item of items) {
-    seenIds.add(item.id);
-    const modifiedAt = item.date?.dateTime ?? new Date().toISOString();
-    // OFW's list endpoint's `date.dateTime` is NOT a reliable modification
-    // timestamp for drafts — direct UI edits don't bump it — so we can't
-    // use it to skip the detail fetch. Always re-fetch; drafts are few.
-    const existing = await store.getDraft(item.id);
+    if (!b.take()) return { synced: 0, done: false };
     const detail = parseLenient(
       DraftDetailSchema,
       await client.request('GET', `/pub/v3/messages/${item.id}`),
       { label: 'ofw-mcp', context: 'GET /pub/v3/messages/{id} (drafts sync)' },
     );
-    const row: DraftRow = {
+    rows.push({
       id: item.id,
       subject: detail.subject ?? item.subject ?? '(no subject)',
       body: detail.body ?? '',
       recipients: mapRecipients(item.recipients),
       replyToId: item.replyToId ?? null,
-      modifiedAt,
+      modifiedAt: item.date?.dateTime ?? new Date().toISOString(),
       listData: item,
-    };
-    await store.upsertDraft(row);
-    // If a stale `messages` row exists for this id (cached by a prior
-    // ofw_get_message call before the drafts table knew about this id),
-    // evict it. The drafts table is the source of truth for drafts; we
-    // don't want ofw_get_message returning a stale messages-table copy.
-    if (await store.getMessage(item.id)) await store.deleteMessage(item.id);
+    });
+  }
+
+  // Budget funded the whole walk — apply atomically. Batch reads (S1) snapshot
+  // pre-upsert state for the synced-count comparison and stale-row eviction.
+  const ids = items.map((it) => it.id);
+  const existingById = new Map((await store.getDrafts(ids)).map((d) => [d.id, d]));
+  await store.upsertDrafts(rows);
+
+  // If a stale `messages` row exists for a draft id (cached by a prior
+  // ofw_get_message call before the drafts table knew about this id), evict it.
+  // The drafts table is the source of truth for drafts.
+  for (const stale of await store.getMessages(ids)) {
+    await store.deleteMessage(stale.id);
+  }
+
+  let synced = 0;
+  for (const row of rows) {
+    const existing = existingById.get(row.id);
     if (!existing
         || existing.body !== row.body
         || existing.subject !== row.subject
@@ -311,54 +430,82 @@ export async function syncDrafts(client: OFWClient, draftsFolderId: string, stor
     }
   }
 
+  const seenIds = new Set(ids);
   for (const id of await store.listDraftIds()) {
     if (!seenIds.has(id)) await store.deleteDraft(id);
   }
 
-  return { synced };
+  return { synced, done: true };
 }
 
 export interface SyncAllOptions {
   folders?: FolderName[];
   fetchUnreadBodies?: boolean;
   deep?: boolean;
+  /**
+   * Max OFW requests this whole invocation may make (resolveFolderIds + list
+   * pages + detail + attachment-meta fetches share the budget). Omit / Infinity
+   * → unbounded (local stdio). A bounded call pauses when spent and reports
+   * `done: false` so the caller resumes the deep backfill next time.
+   */
+  maxRequests?: number;
 }
 
 export interface SyncAllResult {
   synced: Partial<Record<FolderName, number>>;
   unreadInbox: UnreadHint[];
+  /** True only when every requested folder completed within the budget. */
+  done: boolean;
   note?: string;
 }
 
 export async function syncAll(client: OFWClient, opts: SyncAllOptions, store: CacheStore): Promise<SyncAllResult> {
   const folders = opts.folders ?? ['inbox', 'sent', 'drafts'];
+  // ONE budget shared across resolveFolderIds and every requested folder, in
+  // order — so the whole invocation stays under the hosting subrequest cap.
+  const budget = makeBudget(opts.maxRequests ?? Number.POSITIVE_INFINITY);
+  // resolveFolderIds always makes exactly one request; the tool guarantees
+  // maxRequests >= 1, so this unit is always available (result intentionally
+  // ignored — we account for it without a branch that can't be reached).
+  budget.take();
   const ids = await resolveFolderIds(client, store);
   const synced: Partial<Record<FolderName, number>> = {};
   let unreadInbox: UnreadHint[] = [];
+  let done = true;
 
   for (const folder of folders) {
     if (folder === 'inbox') {
       const r = await syncMessageFolder(client, 'inbox', ids.inbox, {
         fetchUnreadBodies: opts.fetchUnreadBodies ?? false,
         deep: opts.deep ?? false,
+        budget,
       }, store);
       synced.inbox = r.synced;
       unreadInbox = r.unread;
+      if (!r.done) done = false;
     } else if (folder === 'sent') {
       const r = await syncMessageFolder(client, 'sent', ids.sent, {
         fetchUnreadBodies: false,
         deep: opts.deep ?? false,
+        budget,
       }, store);
       synced.sent = r.synced;
+      if (!r.done) done = false;
     } else if (folder === 'drafts') {
-      const r = await syncDrafts(client, ids.drafts, store);
+      const r = await syncDrafts(client, ids.drafts, store, budget);
       synced.drafts = r.synced;
+      if (!r.done) done = false;
     }
   }
 
-  const note = unreadInbox.length > 0
-    ? `${unreadInbox.length} unread inbox messages cached without bodies. Call ofw_get_message(id) to read them — this will mark them as read on OFW.`
-    : undefined;
+  const notes: string[] = [];
+  if (unreadInbox.length > 0) {
+    notes.push(`${unreadInbox.length} unread inbox messages cached without bodies. Call ofw_get_message(id) to read them — this will mark them as read on OFW.`);
+  }
+  if (!done) {
+    notes.push('Paused after the request budget to stay within the hosting limit; more pages remain — call ofw_sync_messages again with the same arguments to continue the backfill.');
+  }
+  const note = notes.length > 0 ? notes.join('\n\n') : undefined;
 
-  return { synced, unreadInbox, ...(note ? { note } : {}) };
+  return { synced, unreadInbox, done, ...(note ? { note } : {}) };
 }

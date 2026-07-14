@@ -42,6 +42,12 @@ export type FolderName = 'inbox' | 'sent' | 'drafts';
 export interface SyncState {
   lastSyncAt: string;
   newestId: number | null;
+  /**
+   * Deep-backfill resume cursor: the OFW list page a bounded `deep` sync should
+   * resume from on its next invocation, or `null` when the walk completed (or
+   * was never bounded). A missing/NULL `resume_page` column reads back as null.
+   */
+  resumePage: number | null;
 }
 
 export interface AttachmentRow {
@@ -97,12 +103,20 @@ export interface SqlDriver {
  */
 export interface CacheStore {
   upsertMessage(row: MessageRow): Promise<void>;
+  /** Batch upsert in ONE transaction/RPC. Empty array is a no-op. */
+  upsertMessages(rows: MessageRow[]): Promise<void>;
   getMessage(id: number): Promise<MessageRow | null>;
+  /** Batch read: returns the present rows only (absent ids omitted), in one query/RPC. Empty ids → []. */
+  getMessages(ids: number[]): Promise<MessageRow[]>;
   deleteMessage(id: number): Promise<void>;
   listMessages(opts: ListMessagesOptions): Promise<MessageRow[]>;
   countMessages(opts: MessageFilter): Promise<number>;
   upsertDraft(row: DraftRow): Promise<void>;
+  /** Batch upsert in ONE transaction/RPC. Empty array is a no-op. */
+  upsertDrafts(rows: DraftRow[]): Promise<void>;
   getDraft(id: number): Promise<DraftRow | null>;
+  /** Batch read: returns the present drafts only (absent ids omitted), in one query/RPC. Empty ids → []. */
+  getDrafts(ids: number[]): Promise<DraftRow[]>;
   listDrafts(opts: { page: number; size: number }): Promise<DraftRow[]>;
   deleteDraft(id: number): Promise<void>;
   listDraftIds(): Promise<number[]>;
@@ -263,6 +277,18 @@ export const SCHEMA_STATEMENTS = [
    )`,
 ];
 
+/**
+ * Idempotent post-schema migrations, applied after {@link SCHEMA_STATEMENTS} on
+ * every open. SQLite has no `ADD COLUMN IF NOT EXISTS`, so each statement runs
+ * inside a try/catch — re-running against an already-migrated DB throws
+ * "duplicate column name", which is swallowed. Driver-agnostic: both
+ * `node:sqlite` and the Durable Object's SQLite raise synchronously.
+ */
+export const MIGRATIONS = [
+  // Resumable deep-sync cursor. Absent/NULL → SyncState.resumePage null.
+  'ALTER TABLE sync_state ADD COLUMN resume_page INTEGER',
+];
+
 /** The schema version stamped into the `meta` table on open. */
 export const SCHEMA_VERSION = '2';
 
@@ -302,6 +328,15 @@ function buildMessageFilter(opts: MessageFilter): { where: string; params: SqlPa
 export class OFWCacheCore {
   constructor(private readonly db: SqlDriver) {
     for (const stmt of SCHEMA_STATEMENTS) this.db.execScript(stmt);
+    for (const stmt of MIGRATIONS) {
+      try {
+        this.db.execScript(stmt);
+      } catch {
+        // Idempotent: the column already exists on a previously-migrated DB.
+        // SQLite lacks ADD COLUMN IF NOT EXISTS, so a re-run throws "duplicate
+        // column name" — swallow it and move on.
+      }
+    }
     this.db.run(
       'INSERT INTO meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',
       ['schema_version', SCHEMA_VERSION],
@@ -343,9 +378,36 @@ export class OFWCacheCore {
     );
   }
 
+  /**
+   * Batch upsert every row in a single transaction — one round-trip's worth of
+   * work (crucial on the Durable Object backend, where each RPC is a subrequest).
+   * Empty array is a no-op (no transaction opened).
+   */
+  upsertMessages(rows: MessageRow[]): void {
+    if (rows.length === 0) return;
+    this.db.transaction(() => {
+      for (const row of rows) this.upsertMessage(row);
+    });
+  }
+
   getMessage(id: number): MessageRow | null {
     const r = this.db.get('SELECT * FROM messages WHERE id = ?', [id]) as MessageDbRow | undefined;
     return r ? rowFromDb(r) : null;
+  }
+
+  /**
+   * Batch read: one `SELECT ... WHERE id IN (...)` returning the present rows
+   * (absent ids are simply omitted — order is not guaranteed). Empty ids returns
+   * `[]` without querying.
+   */
+  getMessages(ids: number[]): MessageRow[] {
+    if (ids.length === 0) return [];
+    const placeholders = ids.map(() => '?').join(', ');
+    const rows = this.db.all(
+      `SELECT * FROM messages WHERE id IN (${placeholders})`,
+      ids,
+    ) as unknown as MessageDbRow[];
+    return rows.map(rowFromDb);
   }
 
   /**
@@ -400,9 +462,32 @@ export class OFWCacheCore {
     );
   }
 
+  /** Batch upsert every draft in a single transaction. Empty array is a no-op. */
+  upsertDrafts(rows: DraftRow[]): void {
+    if (rows.length === 0) return;
+    this.db.transaction(() => {
+      for (const row of rows) this.upsertDraft(row);
+    });
+  }
+
   getDraft(id: number): DraftRow | null {
     const r = this.db.get('SELECT * FROM drafts WHERE id = ?', [id]) as DraftDbRow | undefined;
     return r ? draftFromDb(r) : null;
+  }
+
+  /**
+   * Batch read: one `SELECT ... WHERE id IN (...)` returning the present drafts
+   * (absent ids omitted — order not guaranteed). Empty ids returns `[]` without
+   * querying.
+   */
+  getDrafts(ids: number[]): DraftRow[] {
+    if (ids.length === 0) return [];
+    const placeholders = ids.map(() => '?').join(', ');
+    const rows = this.db.all(
+      `SELECT * FROM drafts WHERE id IN (${placeholders})`,
+      ids,
+    ) as unknown as DraftDbRow[];
+    return rows.map(draftFromDb);
   }
 
   listDrafts(opts: { page: number; size: number }): DraftRow[] {
@@ -424,20 +509,23 @@ export class OFWCacheCore {
   }
 
   getSyncState(folder: FolderName): SyncState | null {
-    const r = this.db.get('SELECT last_sync_at, newest_id FROM sync_state WHERE folder = ?', [folder]) as
-      | { last_sync_at: string; newest_id: number | null }
+    const r = this.db.get('SELECT last_sync_at, newest_id, resume_page FROM sync_state WHERE folder = ?', [folder]) as
+      | { last_sync_at: string; newest_id: number | null; resume_page: number | null }
       | undefined;
     if (!r) return null;
-    return { lastSyncAt: r.last_sync_at, newestId: r.newest_id };
+    // A DB migrated before resume_page existed can still return the row
+    // without the column; normalize a missing/NULL value to null.
+    return { lastSyncAt: r.last_sync_at, newestId: r.newest_id, resumePage: r.resume_page ?? null };
   }
 
   setSyncState(folder: FolderName, state: SyncState): void {
     this.db.run(
-      `INSERT INTO sync_state (folder, last_sync_at, newest_id) VALUES (?, ?, ?)
+      `INSERT INTO sync_state (folder, last_sync_at, newest_id, resume_page) VALUES (?, ?, ?, ?)
        ON CONFLICT(folder) DO UPDATE SET
          last_sync_at = excluded.last_sync_at,
-         newest_id = excluded.newest_id`,
-      [folder, state.lastSyncAt, nullish(state.newestId)],
+         newest_id = excluded.newest_id,
+         resume_page = excluded.resume_page`,
+      [folder, state.lastSyncAt, nullish(state.newestId), nullish(state.resumePage)],
     );
   }
 
@@ -545,8 +633,14 @@ export class LocalCacheStore implements CacheStore {
   async upsertMessage(row: MessageRow): Promise<void> {
     this.core.upsertMessage(row);
   }
+  async upsertMessages(rows: MessageRow[]): Promise<void> {
+    this.core.upsertMessages(rows);
+  }
   async getMessage(id: number): Promise<MessageRow | null> {
     return this.core.getMessage(id);
+  }
+  async getMessages(ids: number[]): Promise<MessageRow[]> {
+    return this.core.getMessages(ids);
   }
   async deleteMessage(id: number): Promise<void> {
     this.core.deleteMessage(id);
@@ -560,8 +654,14 @@ export class LocalCacheStore implements CacheStore {
   async upsertDraft(row: DraftRow): Promise<void> {
     this.core.upsertDraft(row);
   }
+  async upsertDrafts(rows: DraftRow[]): Promise<void> {
+    this.core.upsertDrafts(rows);
+  }
   async getDraft(id: number): Promise<DraftRow | null> {
     return this.core.getDraft(id);
+  }
+  async getDrafts(ids: number[]): Promise<DraftRow[]> {
+    return this.core.getDrafts(ids);
   }
   async listDrafts(opts: { page: number; size: number }): Promise<DraftRow[]> {
     return this.core.listDrafts(opts);

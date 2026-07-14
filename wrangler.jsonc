@@ -24,7 +24,16 @@
   // gate and inline-attachment default in src/config.ts work in the Worker.
   "vars": {
     "OFW_WRITE_MODE": "all",
-    "OFW_INLINE_ATTACHMENTS": "true"
+    "OFW_INLINE_ATTACHMENTS": "true",
+    // Bound ofw_sync_messages so one call stays under the Worker subrequest cap
+    // (each OFW API fetch and each Durable-Object cache RPC counts). A deep
+    // backfill pauses at this many OFW requests and resumes on the next call.
+    // 40 is conservative — it stays under the Free plan's 50-subrequest cap. On
+    // the Workers Paid plan (1000-subrequest cap) raise it (e.g. ~900) for fewer
+    // resume round-trips on a large backfill. Unsetting / removing this var makes
+    // sync unbounded (walks fully in one call) — only safe for the local stdio
+    // server, never the Worker.
+    "OFW_SYNC_MAX_REQUESTS": "40"
   },
   // Production custom domain (matches untappd-mcp's connector.untappd.nullnet.app).
   // The zone must be in the deploying account's Cloudflare; wrangler provisions

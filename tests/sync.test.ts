@@ -4,7 +4,7 @@ import { OFWCache } from '../src/cache/node.js';
 import type {
   CacheStore, MessageRow, DraftRow, SyncState, ListMessagesOptions, AttachmentRow,
 } from '../src/cache/store.js';
-import { resolveFolderIds, syncMessageFolder, syncDrafts, syncAll } from '../src/sync.js';
+import { resolveFolderIds, syncMessageFolder, syncDrafts, syncAll, makeBudget } from '../src/sync.js';
 
 // The sync functions now take an injected async CacheStore. Tests back it with
 // an in-memory `:memory:` OFWCache passed as `store`, and seed/assert through
@@ -715,5 +715,319 @@ describe('syncMessageFolder — self-heals a stale epoch-placeholder row', () =>
     await syncMessageFolder(client, 'sent', '222', { fetchUnreadBodies: false }, store());
 
     expect(getMessage(9)?.recipients[0].viewedAt).toBe('2026-06-16T15:49:20');
+  });
+});
+
+describe('makeBudget', () => {
+  it('an infinite budget never exhausts; a finite one exhausts after N takes', () => {
+    const inf = makeBudget(Number.POSITIVE_INFINITY);
+    for (let i = 0; i < 1000; i++) expect(inf.take()).toBe(true);
+
+    const two = makeBudget(2);
+    expect(two.take()).toBe(true);
+    expect(two.take()).toBe(true);
+    expect(two.take()).toBe(false);
+    expect(two.take()).toBe(false);
+  });
+});
+
+describe('syncMessageFolder — bounded + resumable (budget)', () => {
+  it('an explicit infinite budget is byte-for-byte the unbounded walk (done:true, resumePage null)', async () => {
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce(listResponse([{ id: 1 }, { id: 2 }]))
+      .mockResolvedValueOnce({ body: 'body-1' })
+      .mockResolvedValueOnce({ body: 'body-2' })
+      .mockResolvedValueOnce(listResponse([]));
+
+    const result = await syncMessageFolder(
+      client, 'sent', '222',
+      { fetchUnreadBodies: false, budget: makeBudget(Number.POSITIVE_INFINITY) },
+      store(),
+    );
+
+    expect(result.synced).toBe(2);
+    expect(result.done).toBe(true);
+    expect(getMessage(1)?.body).toBe('body-1');
+    expect(getSyncState('sent')?.resumePage).toBeNull();
+  });
+
+  it('pauses at the top of a page when the budget is spent, saving resumePage; a later call resumes and completes', async () => {
+    // First (bounded) call: budget funds list page 1 + both details, then runs
+    // out before fetching page 2.
+    const c1 = new OFWClient();
+    vi.spyOn(c1, 'request')
+      .mockResolvedValueOnce(listResponse([{ id: 1 }, { id: 2 }])) // page 1
+      .mockResolvedValueOnce({ body: 'body-1' })
+      .mockResolvedValueOnce({ body: 'body-2' });
+
+    const r1 = await syncMessageFolder(
+      c1, 'sent', '222',
+      { fetchUnreadBodies: false, deep: true, budget: makeBudget(3) },
+      store(),
+    );
+
+    expect(r1.done).toBe(false);
+    expect(r1.synced).toBe(2);
+    expect(getMessage(1)?.body).toBe('body-1');
+    expect(getMessage(2)?.body).toBe('body-2');
+    const paused = getSyncState('sent');
+    expect(paused?.resumePage).toBe(2);
+    expect(paused?.newestId).toBe(2);
+
+    // Resume call (unbounded, deep): starts at the saved page 2.
+    const c2 = new OFWClient();
+    const spy2 = vi.spyOn(c2, 'request')
+      .mockResolvedValueOnce(listResponse([{ id: 3 }]))   // page 2
+      .mockResolvedValueOnce({ body: 'body-3' })
+      .mockResolvedValueOnce(listResponse([]));           // page 3 empty
+
+    const r2 = await syncMessageFolder(
+      c2, 'sent', '222',
+      { fetchUnreadBodies: false, deep: true, budget: makeBudget(Number.POSITIVE_INFINITY) },
+      store(),
+    );
+
+    expect(r2.done).toBe(true);
+    expect(r2.synced).toBe(1);
+    expect(getMessage(3)?.body).toBe('body-3');
+    expect(getSyncState('sent')?.resumePage).toBeNull();
+    // The resume walk fetched page 2 first (not page 1).
+    const firstList = spy2.mock.calls.find((c) => /\/pub\/v3\/messages\?/.test(c[1] as string));
+    expect(firstList?.[1]).toMatch(/page=2/);
+  });
+
+  it('pauses MID-page and resumes the same page, skipping the rows it already cached', async () => {
+    // Budget funds list page 1 + one detail, then runs out on the second item.
+    const c1 = new OFWClient();
+    vi.spyOn(c1, 'request')
+      .mockResolvedValueOnce(listResponse([{ id: 1 }, { id: 2 }])) // page 1
+      .mockResolvedValueOnce({ body: 'body-1' });
+
+    const r1 = await syncMessageFolder(
+      c1, 'sent', '222',
+      { fetchUnreadBodies: false, deep: true, budget: makeBudget(2) },
+      store(),
+    );
+
+    expect(r1.done).toBe(false);
+    expect(r1.synced).toBe(1);
+    expect(getMessage(1)?.body).toBe('body-1');
+    expect(getMessage(2)).toBeNull();
+    expect(getSyncState('sent')?.resumePage).toBe(1); // resume the SAME page
+
+    // Resume (unbounded): re-fetches page 1; id 1 is cached so getMessages skips
+    // it (no detail re-fetch), only id 2 gets a detail fetch.
+    const c2 = new OFWClient();
+    const spy2 = vi.spyOn(c2, 'request')
+      .mockResolvedValueOnce(listResponse([{ id: 1 }, { id: 2 }])) // page 1 again
+      .mockResolvedValueOnce({ body: 'body-2' })
+      .mockResolvedValueOnce(listResponse([]));                    // page 2 empty
+
+    const r2 = await syncMessageFolder(
+      c2, 'sent', '222',
+      { fetchUnreadBodies: false, deep: true, budget: makeBudget(Number.POSITIVE_INFINITY) },
+      store(),
+    );
+
+    expect(r2.done).toBe(true);
+    expect(getMessage(2)?.body).toBe('body-2');
+    const detailCalls = spy2.mock.calls.filter((c) => /\/pub\/v3\/messages\/[0-9]+$/.test(c[1] as string));
+    expect(detailCalls.map((c) => c[1])).toEqual(['/pub/v3/messages/2']); // id 1 NOT re-fetched
+  });
+
+  it('pauses when the budget is spent before a sent view-status refresh (no eviction, no wrong data)', async () => {
+    // Cached sent message with no real view time — the list now says read, so a
+    // refresh detail fetch is due, but the budget is exhausted first.
+    upsertMessage({
+      id: 5, folder: 'sent', subject: 'Subject 5', fromUser: 'Me',
+      sentAt: '2026-05-04T12:00:00Z',
+      recipients: [{ userId: 1, name: 'Bob', viewedAt: null }],
+      body: 'body-5', fetchedBodyAt: '2026-05-04T12:01:00Z',
+      replyToId: null, chainRootId: null, listData: { showNeverViewed: true },
+    });
+
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request')
+      .mockResolvedValueOnce(listResponse([{ id: 5, unread: false }])); // only the list page is affordable
+
+    const result = await syncMessageFolder(
+      client, 'sent', '222',
+      { fetchUnreadBodies: false, budget: makeBudget(1) },
+      store(),
+    );
+
+    expect(result.done).toBe(false);
+    expect(result.synced).toBe(0);
+    // The cached row is untouched (still viewedAt null) — no refresh happened.
+    expect(getMessage(5)?.recipients[0].viewedAt).toBeNull();
+    const detailCalls = spy.mock.calls.filter((c) => /\/pub\/v3\/messages\/[0-9]+$/.test(c[1] as string));
+    expect(detailCalls).toHaveLength(0);
+    expect(getSyncState('sent')?.resumePage).toBe(1);
+  });
+
+  it('fetches only the attachments the budget can afford, skipping the rest (file ids stay in listData)', async () => {
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce({ data: [{
+        id: 100, subject: 'two files', from: { name: 'Alice' },
+        date: { dateTime: '2026-05-13T12:00:00Z' }, showNeverViewed: false, recipients: [],
+      }] })
+      .mockResolvedValueOnce({ body: 'see attached', files: [55, 66] })
+      .mockResolvedValueOnce({ fileId: 55, fileName: 'a.pdf', label: 'a', fileType: 'application/pdf', fileSize: 1 });
+
+    // budget = 3: list page (1) + detail (1) + exactly ONE attachment (1); the
+    // second file id can't be afforded, and page 2 is never fetched.
+    const result = await syncMessageFolder(
+      client, 'inbox', '111',
+      { fetchUnreadBodies: false, deep: true, budget: makeBudget(3) },
+      store(),
+    );
+
+    expect(result.done).toBe(false);
+    const atts = listAttachmentsForMessage(100);
+    expect(atts.map((a) => a.fileId)).toEqual([55]); // 66 skipped
+  });
+
+  it('skips attachment fetches entirely when the budget is spent by the body detail (zero affordable)', async () => {
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce({ data: [{
+        id: 100, subject: 'a file', from: { name: 'Alice' },
+        date: { dateTime: '2026-05-13T12:00:00Z' }, showNeverViewed: false, recipients: [],
+      }] })
+      .mockResolvedValueOnce({ body: 'see attached', files: [55] });
+
+    // budget = 2: list page (1) + detail (1); nothing left for attachment meta.
+    const result = await syncMessageFolder(
+      client, 'inbox', '111',
+      { fetchUnreadBodies: false, deep: true, budget: makeBudget(2) },
+      store(),
+    );
+
+    expect(result.done).toBe(false);
+    expect(getMessage(100)?.body).toBe('see attached');
+    expect(listAttachmentsForMessage(100)).toHaveLength(0); // file id stays in listData
+  });
+});
+
+describe('syncDrafts — bounded (atomic defer)', () => {
+  it('unbounded walk reports done:true', async () => {
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce(draftListResponse([{ id: 1 }]))
+      .mockResolvedValueOnce({ body: 'draft-1', subject: 'Draft 1', recipientIds: [] });
+
+    const result = await syncDrafts(client, '333', store());
+    expect(result.done).toBe(true);
+    expect(result.synced).toBe(1);
+  });
+
+  it('defers the whole folder (no requests, no eviction) when the budget cannot fund the first page', async () => {
+    upsertDraft({
+      id: 99, subject: 'Keep me', body: 'body',
+      recipients: [], replyToId: null, modifiedAt: '2026-05-01T00:00:00Z', listData: {},
+    });
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request');
+
+    const result = await syncDrafts(client, '333', store(), makeBudget(0));
+
+    expect(result.done).toBe(false);
+    expect(result.synced).toBe(0);
+    expect(spy).not.toHaveBeenCalled();
+    expect(getDraft(99)).not.toBeNull(); // the reconciliation step never ran
+  });
+
+  it('defers without evicting when the budget runs out mid-detail-walk', async () => {
+    upsertDraft({
+      id: 99, subject: 'Keep me', body: 'body',
+      recipients: [], replyToId: null, modifiedAt: '2026-05-01T00:00:00Z', listData: {},
+    });
+    const client = new OFWClient();
+    // budget = 1 funds the single list page but not the detail fetch.
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce(draftListResponse([{ id: 1 }]));
+
+    const result = await syncDrafts(client, '333', store(), makeBudget(1));
+
+    expect(result.done).toBe(false);
+    expect(getDraft(1)).toBeNull();        // nothing was applied
+    expect(getDraft(99)).not.toBeNull();   // and nothing was evicted
+  });
+});
+
+describe('syncAll — bounded (shared budget across folders)', () => {
+  it('reports done:false with a continuation note when a folder pauses, then resumes to done:true', async () => {
+    const c1 = new OFWClient();
+    vi.spyOn(c1, 'request')
+      .mockResolvedValueOnce(foldersResponse())                         // resolveFolderIds (1)
+      .mockResolvedValueOnce(listResponse([{ id: 10 }, { id: 11 }]));   // inbox page 1 (1) → budget spent
+
+    // maxRequests = 2: resolve + one list page, then the first inbox detail is
+    // denied → inbox pauses mid-page.
+    const r1 = await syncAll(c1, { folders: ['inbox'], deep: true, maxRequests: 2 }, store());
+
+    expect(r1.done).toBe(false);
+    expect(r1.synced).toEqual({ inbox: 0 });
+    expect(r1.note).toMatch(/call ofw_sync_messages again/i);
+    expect(getSyncState('inbox')?.resumePage).toBe(1);
+
+    // Resume unbounded — completes.
+    const c2 = new OFWClient();
+    vi.spyOn(c2, 'request')
+      .mockResolvedValueOnce(foldersResponse())
+      .mockResolvedValueOnce(listResponse([{ id: 10 }, { id: 11 }]))
+      .mockResolvedValueOnce({ body: 'b10' })
+      .mockResolvedValueOnce({ body: 'b11' })
+      .mockResolvedValueOnce(listResponse([]));
+
+    const r2 = await syncAll(c2, { folders: ['inbox'], deep: true }, store());
+
+    expect(r2.done).toBe(true);
+    expect(r2.synced).toEqual({ inbox: 2 });
+    expect(r2.note).toBeUndefined();
+    expect(getSyncState('inbox')?.resumePage).toBeNull();
+  });
+
+  it('marks done:false when the sent folder pauses under a shared budget', async () => {
+    const client = new OFWClient();
+    // maxRequests = 1: resolveFolderIds spends it, leaving nothing for sent's
+    // first list page → sent pauses before any request.
+    const spy = vi.spyOn(client, 'request').mockResolvedValueOnce(foldersResponse());
+
+    const result = await syncAll(client, { folders: ['sent'], maxRequests: 1 }, store());
+
+    expect(result.done).toBe(false);
+    expect(result.synced).toEqual({ sent: 0 });
+    expect(spy).toHaveBeenCalledTimes(1); // only resolveFolderIds
+  });
+
+  it('marks done:false when the drafts folder is deferred under a shared budget', async () => {
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request').mockResolvedValueOnce(foldersResponse());
+
+    const result = await syncAll(client, { folders: ['drafts'], maxRequests: 1 }, store());
+
+    expect(result.done).toBe(false);
+    expect(result.synced).toEqual({ drafts: 0 });
+    expect(spy).toHaveBeenCalledTimes(1);
+  });
+
+  it('an unbounded syncAll reports done:true and no pause note', async () => {
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce(foldersResponse())
+      .mockResolvedValueOnce(listResponse([{ id: 10, unread: false }]))
+      .mockResolvedValueOnce({ body: 'inbox-10' })
+      .mockResolvedValueOnce(listResponse([]))
+      .mockResolvedValueOnce(listResponse([{ id: 20 }]))
+      .mockResolvedValueOnce({ body: 'sent-20' })
+      .mockResolvedValueOnce(listResponse([]))
+      .mockResolvedValueOnce(draftListResponse([]));
+
+    const result = await syncAll(client, {}, store());
+    expect(result.done).toBe(true);
+    expect(result.note).toBeUndefined();
   });
 });

@@ -198,6 +198,25 @@ unavailable — `ofw_upload_attachment` from a local file path and
 disk-write/read of downloads both return an actionable error directing you to
 the stdio/desktop server for path-based attachment work.
 
+## Sync & the subrequest limit
+
+Cloudflare Workers cap the number of **subrequests** a single request may make —
+**50 on the Free plan, 1000 on the Workers Paid plan**. On this connector every
+OFW API call *and* every `OFWCacheDO` cache RPC counts against that cap, so a
+naive deep sync of a large mailbox would blow through it mid-request.
+
+`ofw_sync_messages` is therefore **bounded and resumable** on the hosted
+connector: `wrangler.jsonc` sets `OFW_SYNC_MAX_REQUESTS` (default `"40"`, safely
+under the Free-plan cap), and each call makes at most that many OFW requests
+before pausing and saving its place. A large backfill (`deep: true`) is done by
+**calling `ofw_sync_messages` repeatedly** — each call resumes where the last one
+left off until the walk completes. Tune the var to your plan: raise it (e.g.
+`"900"`) on the Workers Paid plan for fewer resume round-trips, or override it as
+a secret (`npx wrangler secret put OFW_SYNC_MAX_REQUESTS`). Leaving it unset makes
+sync unbounded, which is only safe for the local stdio server — keep it set on the
+Worker. Under `nodejs_compat` it populates `process.env`, so `getSyncMaxRequests()`
+in `src/config.ts` picks it up exactly as on the stdio server.
+
 ## Rotation / teardown
 
 There are no operator secrets to rotate for OFW auth (users manage their own

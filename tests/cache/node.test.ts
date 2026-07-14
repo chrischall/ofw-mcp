@@ -80,6 +80,35 @@ describe('OFWCache.open (disk-backed)', () => {
   });
 });
 
+// The resume_page migration is an idempotent `ALTER TABLE ADD COLUMN` run on
+// every open. On a fresh DB it adds the column; reopening the SAME on-disk DB
+// re-runs it against an already-migrated schema, where SQLite throws "duplicate
+// column name" — the constructor's try/catch must swallow that so a second open
+// succeeds and the persisted resume cursor survives.
+describe('OFWCacheCore resume_page migration (idempotent re-open)', () => {
+  let dir: string;
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('survives a reopen and preserves the resume cursor', () => {
+    dir = mkdtempSync(join(tmpdir(), 'ofw-cache-migrate-'));
+    const dbPath = join(dir, 'cache.db');
+
+    const first = OFWCache.open(dbPath);
+    first.core.setSyncState('sent', { lastSyncAt: '2026-07-14T00:00:00Z', newestId: 42, resumePage: 5 });
+    first.close();
+
+    // Reopen: the migration runs again against the existing column → catch path.
+    const second = OFWCache.open(dbPath);
+    expect(second.core.getSyncState('sent')).toEqual({
+      lastSyncAt: '2026-07-14T00:00:00Z', newestId: 42, resumePage: 5,
+    });
+    second.close();
+  });
+});
+
 describe('OFWCacheCore requireString guard', () => {
   let disk: OFWCache;
   afterEach(() => disk.close());

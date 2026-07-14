@@ -117,6 +117,33 @@ describe('ofw_sync_messages', () => {
     expect(parsed.synced).toEqual({ inbox: 1, sent: 0, drafts: 0 });
     expect(parsed.unreadInbox).toHaveLength(1);
     expect(parsed.note).toMatch(/unread inbox/);
+    // Unbounded by default (no OFW_SYNC_MAX_REQUESTS / maxRequests) → complete.
+    expect(parsed.done).toBe(true);
+  });
+
+  it('honours a maxRequests budget: pauses with done:false and a continuation note', async () => {
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce({
+        systemFolders: [
+          { id: '111', folderType: 'INBOX' },
+          { id: '222', folderType: 'SENT_MESSAGES' },
+          { id: '333', folderType: 'DRAFTS' },
+        ],
+      })
+      // inbox page 1 with two new items — the detail fetch is denied by the
+      // budget (maxRequests=2: resolveFolderIds + one list page).
+      .mockResolvedValueOnce({ data: [
+        { id: 1, subject: 'A', from: { name: 'Alice' }, date: { dateTime: '2026-05-04T12:00:00Z' }, showNeverViewed: false, recipients: [] },
+        { id: 2, subject: 'B', from: { name: 'Alice' }, date: { dateTime: '2026-05-04T12:00:00Z' }, showNeverViewed: false, recipients: [] },
+      ] });
+
+    setup(client);
+    const result = await handlers.get('ofw_sync_messages')!({ folders: ['inbox'], deep: true, maxRequests: 2 });
+    const parsed = JSON.parse(result.content[0].text);
+
+    expect(parsed.done).toBe(false);
+    expect(parsed.note).toMatch(/call ofw_sync_messages again/i);
   });
 });
 
