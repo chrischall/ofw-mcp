@@ -1,5 +1,20 @@
 # Changelog
 
+## [2.6.0](https://github.com/chrischall/ofw-mcp/compare/v2.5.0...v2.6.0) (2026-07-14)
+
+
+### Features
+
+* bound and resume ofw_sync_messages for the Workers subrequest limit ([#137](https://github.com/chrischall/ofw-mcp/issues/137)) ([b650a38](https://github.com/chrischall/ofw-mcp/commit/b650a3808e0406add6b72ad2c9d297c8a65f44ac))
+* host ofw-mcp as a Cloudflare Worker remote connector for claude.ai ([#130](https://github.com/chrischall/ofw-mcp/issues/130)) ([3c79036](https://github.com/chrischall/ofw-mcp/commit/3c79036f4f56f64569043538a05f96fc4d79cbe8))
+* serve connector at connector.ofw.nullnet.app custom domain ([#133](https://github.com/chrischall/ofw-mcp/issues/133)) ([52481b3](https://github.com/chrischall/ofw-mcp/commit/52481b33898ce8fe08b08ab07bc313c2bddbb188))
+
+
+### Bug Fixes
+
+* guard client.ts .env load so the Worker starts ([#135](https://github.com/chrischall/ofw-mcp/issues/135)) ([0736940](https://github.com/chrischall/ofw-mcp/commit/0736940d9facf626b3e92b5f2ad6bd98bf391ead))
+* show a clean message when OFW rejects login credentials ([#136](https://github.com/chrischall/ofw-mcp/issues/136)) ([0f523a4](https://github.com/chrischall/ofw-mcp/commit/0f523a4204c1807621f047b59c8d26ad3142cb51))
+
 ## [2.5.0](https://github.com/chrischall/ofw-mcp/compare/v2.4.4...v2.5.0) (2026-07-13)
 
 
