@@ -7,4 +7,3 @@ coverage/
 .claude/worktrees/
 .dev.vars
 .wrangler/
-packages/mcp-connector/dist/

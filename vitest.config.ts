@@ -14,9 +14,6 @@ export default defineConfig({
       provider: 'v8',
       include: ['src/**/*.ts'],
       exclude: [
-        // Vendored connector harness — has its own test suite; its `src/`
-        // leaks into the `src/**` include glob, so exclude it from ofw's gate.
-        'packages/**',
         'src/index.ts', // stdio entry point — not unit-testable
         // Worker-only entry points import cloudflare:workers / agents and
         // cannot run under the node pool — they are covered by the Workers
