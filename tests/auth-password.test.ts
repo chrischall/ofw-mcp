@@ -96,6 +96,23 @@ describe('loginWithPassword', () => {
     await expect(loginWithPassword('u', 'bad')).rejects.toThrow(/OFW login failed: 401/);
   });
 
+  it('throws a clean credentials message (not the HTML dump) when OFW re-serves its login page', async () => {
+    const loginHtml = '<!DOCTYPE html><html lang="en"><head><title>OurFamilyWizard</title></head><body>...</body></html>';
+    mockFetch([
+      { status: 303, headers: { 'set-cookie': 'SESSION=x' } },
+      { status: 200, body: loginHtml, headers: { 'content-type': 'text/html' } },
+    ]);
+    expect.assertions(2);
+    try {
+      await loginWithPassword('u', 'wrong');
+    } catch (e) {
+      const msg = (e as Error).message;
+      expect(msg).toMatch(/email or password was not accepted/);
+      // The raw HTML page must NOT leak into the error surfaced to the user.
+      expect(msg).not.toContain('<!DOCTYPE');
+    }
+  });
+
   it('throws with truncated body preview when login returns non-JSON', async () => {
     const html = '<html><body>maintenance</body></html>'.repeat(20);
     mockFetch([
