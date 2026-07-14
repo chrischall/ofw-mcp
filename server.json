@@ -43,11 +43,5 @@
         }
       ]
     }
-  ],
-  "remotes": [
-    {
-      "type": "streamable-http",
-      "url": "https://ofw-mcp.example.workers.dev/mcp"
-    }
   ]
 }

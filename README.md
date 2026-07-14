@@ -132,7 +132,7 @@ Instead of running `ofw-mcp` locally, you can add it to [claude.ai](https://clau
 - **Attachments are inline-only.** The Worker has no local filesystem, so `ofw_download_attachment` always returns bytes as MCP content blocks (`OFW_INLINE_ATTACHMENTS=true`) rather than writing to disk.
 - **Write mode defaults to `all`.** The hosted connector registers every tool by default, configurable per deployment via `OFW_WRITE_MODE` / `OFW_CALENDAR_WRITES` in `wrangler.jsonc` — see [Write protection](#write-protection-ofw_write_mode).
 
-Standing this up requires a Cloudflare account and is a manual, one-time process for whoever hosts it (there is no CI/CD path for it) — see [`docs/DEPLOY-CONNECTOR.md`](docs/DEPLOY-CONNECTOR.md) for the full runbook. The placeholder URL in [`server.json`](server.json)'s `remotes` entry (`https://ofw-mcp.example.workers.dev/mcp`) is a stand-in the operator replaces with their deployed Worker URL after following that runbook. The local stdio / `.mcpb` install above remains the desktop-only alternative if you'd rather run it against just your own account.
+Standing this up requires a Cloudflare account and is a manual, one-time process for whoever hosts it (there is no CI/CD path for it) — see [`docs/DEPLOY-CONNECTOR.md`](docs/DEPLOY-CONNECTOR.md) for the full runbook. `wrangler.jsonc` serves the Worker at a custom domain (`https://connector.ofw.nullnet.app/mcp`) plus the account's `*.workers.dev` URL; whoever hosts it uses their own domain. The local stdio / `.mcpb` install above remains the desktop-only alternative if you'd rather run it against just your own account.
 
 ## Available tools
 
