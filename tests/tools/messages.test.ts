@@ -31,6 +31,7 @@ const attachmentIO = new NodeAttachmentIO();
 const upsertMessage = (row: MessageRow): void => cache.core.upsertMessage(row);
 const upsertDraft = (row: DraftRow): void => cache.core.upsertDraft(row);
 const getMessage = (id: number): MessageRow | null => cache.core.getMessage(id);
+const setMeta = (key: string, value: string): void => cache.core.setMeta(key, value);
 const getDraft = (id: number): DraftRow | null => cache.core.getDraft(id);
 const upsertAttachmentForMessage = (input: UpsertAttachmentInput): void => cache.core.upsertAttachmentForMessage(input);
 const listAttachmentsForMessage = (messageId: number): AttachmentRow[] => cache.core.listAttachmentsForMessage(messageId);
@@ -310,6 +311,51 @@ describe('ofw_get_message (cache-first)', () => {
     const result = await handlers.get('ofw_get_message')!({ messageId: '99' });
     const parsed = JSON.parse(result.content[0].text);
     expect(parsed.body).toBe('fresh-body');
+  });
+
+  it('labels a live-fetched message "sent" when the detail folder id matches the persisted sent folder id', async () => {
+    // Regression: previously a cache-miss live fetch hard-defaulted to 'inbox',
+    // so a sent message came back mislabeled 'inbox' (and was then cached that
+    // way, hiding it from ofw_get_unread_sent / a sent-scoped list).
+    setMeta('sent_folder_id', '222');
+    const client = new OFWClient();
+    vi.spyOn(client, 'request').mockResolvedValueOnce({
+      id: 490670431, subject: 'Re: Upcoming travel', body: 'flights booked',
+      date: { dateTime: '2026-02-25T23:19:22Z' }, from: { name: 'Chris Hall' },
+      recipients: [], folder: { id: 222, name: 'Sent' },
+    });
+    setup(client);
+
+    const result = await handlers.get('ofw_get_message')!({ messageId: '490670431' });
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.folder).toBe('sent');
+    expect(getMessage(490670431)?.folder).toBe('sent'); // cached with the right folder
+  });
+
+  it('labels a live-fetched message "inbox" when the detail folder id is not the sent folder', async () => {
+    setMeta('sent_folder_id', '222');
+    const client = new OFWClient();
+    vi.spyOn(client, 'request').mockResolvedValueOnce({
+      id: 700, subject: 'From co-parent', body: 'hi', date: { dateTime: '2026-02-25T00:00:00Z' },
+      from: { name: 'Alison Hall' }, recipients: [], folder: { id: 111, name: 'Inbox' },
+    });
+    setup(client);
+
+    const result = await handlers.get('ofw_get_message')!({ messageId: '700' });
+    expect(JSON.parse(result.content[0].text).folder).toBe('inbox');
+  });
+
+  it('falls back to "inbox" when the detail omits a folder even though the sent id is known', async () => {
+    setMeta('sent_folder_id', '222');
+    const client = new OFWClient();
+    vi.spyOn(client, 'request').mockResolvedValueOnce({
+      id: 701, subject: 'No folder field', body: 'hi', date: { dateTime: '2026-02-25T00:00:00Z' },
+      from: { name: 'Someone' }, recipients: [],
+    });
+    setup(client);
+
+    const result = await handlers.get('ofw_get_message')!({ messageId: '701' });
+    expect(JSON.parse(result.content[0].text).folder).toBe('inbox');
   });
 
   it('routes draft ids to the drafts cache (folder="drafts") even when the messages cache has a stale row for the same id', async () => {

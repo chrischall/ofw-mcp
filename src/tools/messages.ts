@@ -42,6 +42,10 @@ const MessageDetailSchema = z.looseObject({
   from: z.looseObject({ name: z.string().optional() }).optional(),
   files: z.array(z.number()).optional(),
   recipients: z.array(ApiRecipientSchema).optional(),
+  // The detail payload carries its own owning folder ({id, name}). We read the
+  // id to label a live-fetched message sent-vs-inbox instead of blindly
+  // defaulting to inbox — see the folder derivation in ofw_get_message.
+  folder: z.looseObject({ id: z.number() }).optional(),
 });
 
 // Attachment-backfill detail fetch reads only `files`.
@@ -234,7 +238,20 @@ export function registerMessageTools(
       { label: 'ofw-mcp', context: 'GET /pub/v3/messages/{id} (ofw_get_message)' },
     );
 
-    const folder: 'inbox' | 'sent' = cached?.folder ?? 'inbox';
+    // Derive the folder for a live-fetched message. A cached row (reached here
+    // only when its body was NULL) already knows its folder, so keep it.
+    // Otherwise use the detail's own folder id, matched against the sent folder
+    // id persisted by the last resolveFolderIds — a sent message must not be
+    // mislabeled 'inbox' (which would also hide it from ofw_get_unread_sent and
+    // a sent-scoped ofw_list_messages). When that mapping isn't known yet (no
+    // sync has run in this cache), fall back to 'inbox' as before.
+    let folder: 'inbox' | 'sent' = cached?.folder ?? 'inbox';
+    if (!cached) {
+      const sentFolderId = await cache.getMeta('sent_folder_id');
+      if (sentFolderId !== null && detail.folder?.id != null && String(detail.folder.id) === sentFolderId) {
+        folder = 'sent';
+      }
+    }
     const row: MessageRow = {
       id: detail.id,
       folder,

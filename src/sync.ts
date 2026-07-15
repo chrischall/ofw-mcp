@@ -139,6 +139,10 @@ export async function resolveFolderIds(client: OFWClient, store: CacheStore): Pr
     drafts: find('DRAFTS'),
   };
   await store.setMeta('drafts_folder_id', ids.drafts);
+  // Persist the sent folder id too: ofw_get_message's live-fetch path uses it to
+  // label an uncached message sent-vs-inbox from the detail payload's own folder
+  // id, instead of hard-defaulting to inbox.
+  await store.setMeta('sent_folder_id', ids.sent);
   return ids;
 }
 
