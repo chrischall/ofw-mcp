@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.6.1](https://github.com/chrischall/ofw-mcp/compare/v2.6.0...v2.6.1) (2026-07-15)
+
+
+### Bug Fixes
+
+* label a live-fetched sent message as sent, not inbox ([#141](https://github.com/chrischall/ofw-mcp/issues/141)) ([9df8f10](https://github.com/chrischall/ofw-mcp/commit/9df8f10d4cc4a2b7da399c52c7eeb9d2ed1200ee))
+* resume bounded non-deep sync instead of falsely reporting done ([#140](https://github.com/chrischall/ofw-mcp/issues/140)) ([8893649](https://github.com/chrischall/ofw-mcp/commit/889364981cc8b26bc92af6b10f9a293be206b0d6))
+
 ## [2.6.0](https://github.com/chrischall/ofw-mcp/compare/v2.5.0...v2.6.0) (2026-07-14)
 
 
