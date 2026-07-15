@@ -909,6 +909,62 @@ describe('syncMessageFolder — bounded + resumable (budget)', () => {
     expect(getMessage(100)?.body).toBe('see attached');
     expect(listAttachmentsForMessage(100)).toHaveLength(0); // file id stays in listData
   });
+
+  it('a bounded NON-deep sync resumes at the saved page instead of restarting at page 1 and falsely reporting done (regression)', async () => {
+    // Repro of the hosted-connector bug: a bounded, non-deep backfill of a
+    // sparse folder pauses after page 1, then on the NEXT call must resume at
+    // page 2 to reach an older message. The pre-fix code gated resume on
+    // `deep`, so a non-deep call restarted at page 1, saw it fully cached, and
+    // broke with done:true — orphaning the gap message on page 2 forever.
+    const c1 = new OFWClient();
+    vi.spyOn(c1, 'request')
+      .mockResolvedValueOnce(listResponse([{ id: 100, unread: false }])) // page 1
+      .mockResolvedValueOnce({ body: 'body-100' });
+
+    // budget = 2: list page 1 + its one detail, then out — pauses before page 2.
+    // NOTE: no `deep` flag — this is the plain incremental path.
+    const r1 = await syncMessageFolder(
+      c1, 'inbox', '111',
+      { fetchUnreadBodies: false, budget: makeBudget(2) },
+      store(),
+    );
+
+    expect(r1.done).toBe(false);
+    expect(getMessage(100)?.body).toBe('body-100');
+    expect(getMessage(50)).toBeNull();               // the gap is not yet cached
+    expect(getSyncState('inbox')?.resumePage).toBe(2); // saved the resume cursor
+
+    // Resume (unbounded). The mock answers by PAGE NUMBER, so it faithfully
+    // models reality: if the walk wrongly restarts at page 1 it sees only the
+    // already-cached id 100 and stops; only a correct resume at page 2 reaches
+    // id 50 and then the empty page 3 that proves the folder is exhausted.
+    const c2 = new OFWClient();
+    const spy2 = vi.spyOn(c2, 'request').mockImplementation(async (_method, path) => {
+      const p = String(path);
+      if (/\/pub\/v3\/messages\?/.test(p)) {
+        if (/[?&]page=1\b/.test(p)) return listResponse([{ id: 100, unread: false }]);
+        if (/[?&]page=2\b/.test(p)) return listResponse([{ id: 50, unread: false, sentAt: '2026-01-01T00:00:00Z' }]);
+        return listResponse([]); // page 3+ empty
+      }
+      if (/\/pub\/v3\/messages\/50$/.test(p)) return { body: 'body-50' };
+      if (/\/pub\/v3\/messages\/100$/.test(p)) return { body: 'body-100' };
+      return {};
+    });
+
+    const r2 = await syncMessageFolder(
+      c2, 'inbox', '111',
+      { fetchUnreadBodies: false, budget: makeBudget(Number.POSITIVE_INFINITY) },
+      store(),
+    );
+
+    // done:true is now trustworthy — it only fired after the empty page 3.
+    expect(r2.done).toBe(true);
+    expect(getMessage(50)?.body).toBe('body-50'); // the older gap message is backfilled
+    expect(getSyncState('inbox')?.resumePage).toBeNull();
+    // The resume walked page 2 first — it did NOT restart at page 1.
+    const firstList = spy2.mock.calls.find((c) => /\/pub\/v3\/messages\?/.test(c[1] as string));
+    expect(firstList?.[1]).toMatch(/[?&]page=2\b/);
+  });
 });
 
 describe('syncDrafts — bounded (atomic defer)', () => {

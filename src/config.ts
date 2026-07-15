@@ -103,7 +103,7 @@ export function getDefaultInlineAttachments(): boolean {
  * (every OFW API fetch and every Durable-Object cache RPC counts), so a deep
  * backfill must be bounded and resumable there. Set OFW_SYNC_MAX_REQUESTS to a
  * positive integer to cap the number of OFW requests one sync call may make
- * before pausing; the next call resumes the deep walk where it left off.
+ * before pausing; the next call resumes the walk (deep or not) where it left off.
  *
  * Unset / blank / non-positive / non-integer → POSITIVE_INFINITY, i.e. the
  * local stdio server stays unbounded (walks fully in one call) by default.

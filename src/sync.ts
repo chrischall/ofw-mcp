@@ -189,15 +189,22 @@ export async function syncMessageFolder(
   // byte-for-byte the original unbounded behaviour.
   const budget = opts.budget ?? makeBudget(Number.POSITIVE_INFINITY);
 
-  // Resume a bounded deep backfill from where the last call paused. Only deep
-  // walks resume (a normal incremental sync always restarts at page 1, its
-  // stop heuristic finds cached history quickly). Seeding newestId from the
-  // saved state keeps the folder's true newest id — page 1 (where it lives) was
-  // walked on the first call of this backfill, not this resume call.
+  // Resume a bounded backfill from where the last call paused. Resumption is a
+  // function of "did a prior call pause?" (resumePage != null) — NOT of `deep`.
+  // The `deep` flag only chooses the stop heuristic (walk-to-empty vs
+  // stop-at-first-cached-page); it must not also decide whether a paused walk
+  // picks up where it left off. Gating resume on `deep` was a bug: a bounded
+  // NON-deep walk of a sparse folder pauses too (every page still has new
+  // items), and on the next call it restarted at page 1, found that page fully
+  // cached, and the non-deep stop heuristic broke with done:true — orphaning
+  // older messages on pages it never reached and reporting a false completion.
+  // Seeding newestId from the saved state keeps the folder's true newest id —
+  // page 1 (where it lives) was walked on the first call of this backfill, not
+  // this resume call.
   const saved = await store.getSyncState(folder);
   let page = 1;
   let newestId: number | null = null;
-  if (opts.deep && saved?.resumePage != null) {
+  if (saved?.resumePage != null) {
     page = saved.resumePage;
     newestId = saved.newestId;
   }
@@ -446,7 +453,7 @@ export interface SyncAllOptions {
    * Max OFW requests this whole invocation may make (resolveFolderIds + list
    * pages + detail + attachment-meta fetches share the budget). Omit / Infinity
    * → unbounded (local stdio). A bounded call pauses when spent and reports
-   * `done: false` so the caller resumes the deep backfill next time.
+   * `done: false` so the caller resumes the backfill (deep or not) next time.
    */
   maxRequests?: number;
 }
@@ -503,7 +510,7 @@ export async function syncAll(client: OFWClient, opts: SyncAllOptions, store: Ca
     notes.push(`${unreadInbox.length} unread inbox messages cached without bodies. Call ofw_get_message(id) to read them — this will mark them as read on OFW.`);
   }
   if (!done) {
-    notes.push('Paused after the request budget to stay within the hosting limit; more pages remain — call ofw_sync_messages again with the same arguments to continue the backfill.');
+    notes.push('Paused after the request budget to stay within the hosting limit; more pages remain — call ofw_sync_messages again with the same arguments to resume where it left off and continue the backfill.');
   }
   const note = notes.length > 0 ? notes.join('\n\n') : undefined;
 
