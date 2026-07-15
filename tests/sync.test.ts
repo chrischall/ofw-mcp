@@ -63,6 +63,7 @@ describe('resolveFolderIds', () => {
 
     await resolveFolderIds(client, store());
     expect(getMeta('drafts_folder_id')).toBe('333');
+    expect(getMeta('sent_folder_id')).toBe('222');
   });
 
   it('throws if a required system folder is missing', async () => {
