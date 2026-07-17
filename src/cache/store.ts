@@ -43,9 +43,11 @@ export interface SyncState {
   lastSyncAt: string;
   newestId: number | null;
   /**
-   * Deep-backfill resume cursor: the OFW list page a bounded `deep` sync should
-   * resume from on its next invocation, or `null` when the walk completed (or
-   * was never bounded). A missing/NULL `resume_page` column reads back as null.
+   * Backfill resume cursor: the OFW list page the BACKFILL pass should resume
+   * from on the next invocation, or `null` when history is fully walked (or was
+   * never bounded). It never gates the forward pass, which always restarts at
+   * page 1 so new messages are picked up while a backfill is still parked here.
+   * A missing/NULL `resume_page` column reads back as null.
    */
   resumePage: number | null;
 }
