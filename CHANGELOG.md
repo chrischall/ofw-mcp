@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.6.3](https://github.com/chrischall/ofw-mcp/compare/v2.6.2...v2.6.3) (2026-07-17)
+
+
+### Bug Fixes
+
+* restore release publishing — npm has been stuck at 2.5.0 since 2.6.0 ([#146](https://github.com/chrischall/ofw-mcp/issues/146)) ([3385c23](https://github.com/chrischall/ofw-mcp/commit/3385c2330c93bc72c8e452054e1bb9e24b657804))
+
 ## [2.6.2](https://github.com/chrischall/ofw-mcp/compare/v2.6.1...v2.6.2) (2026-07-17)
 
 
