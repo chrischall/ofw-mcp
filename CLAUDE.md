@@ -133,6 +133,10 @@ Sanity-check before committing a description change:
 jq -r '.description | length' server.json
 ```
 
+**The `skill-path` input is mandatory here.** `chrischall/workflows`' `mcp-publish` action auto-discovers the skill to package as the `.skill` artifact (and to push to ClawHub): an explicit `skill-path`, else a root `SKILL.md`, else a *single* `skills/*/SKILL.md`. This repo has TWO (`skills/ofw` + `skills/ofw-fpx`), so auto-discovery hard-fails the publish job with `Multiple skills/*/SKILL.md found — set the skill-path input`. `.github/workflows/release-please.yml` therefore pins `skill-path: skills/ofw/SKILL.md`. If you add or rename a skill directory, that pin is what keeps releases publishing — don't drop it.
+
+This bit once: v2.6.0/2.6.1/2.6.2 were all tagged and had GitHub Releases created, but their publish jobs failed, so **npm sat at 2.5.0 while three releases looked done**. The release-please job and the publish job are separate — a green tag does not mean a green publish. After any release, confirm with `npm view ofw-mcp version`.
+
 ## Versioning
 
 Driven by **release-please** (`googleapis/release-please-action@v4`). Authoritative state lives in `.release-please-manifest.json`; release-please bumps every file registered in `release-please-config.json`'s `extra-files`:
