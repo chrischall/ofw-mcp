@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.6.2](https://github.com/chrischall/ofw-mcp/compare/v2.6.1...v2.6.2) (2026-07-17)
+
+
+### Bug Fixes
+
+* ofw_sync_messages: always sync the newest messages, never starve them behind a backfill ([#144](https://github.com/chrischall/ofw-mcp/issues/144)) ([f2079e1](https://github.com/chrischall/ofw-mcp/commit/f2079e192983cbc5de9e23238e83374df1dc324b))
+
 ## [2.6.1](https://github.com/chrischall/ofw-mcp/compare/v2.6.0...v2.6.1) (2026-07-15)
 
 
