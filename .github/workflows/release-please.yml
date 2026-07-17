@@ -52,5 +52,11 @@ jobs:
         with:
           version: ${{ needs.release-please.outputs.version }}
           tag-name: ${{ needs.release-please.outputs.tag_name }}
+          # This repo ships TWO skills — skills/ofw (the MCP skill) and
+          # skills/ofw-fpx (the fpx-CLI sibling) — so the action's
+          # single-skills/*/SKILL.md auto-discovery can't pick one and hard-
+          # fails the release. skills/ofw is the one that pairs with this npm
+          # package; ofw-fpx documents reaching OFW without the server.
+          skill-path: skills/ofw/SKILL.md
           clawhub-token: ${{ secrets.CLAWHUB_TOKEN }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
