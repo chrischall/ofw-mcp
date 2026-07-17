@@ -16,6 +16,7 @@ const getMeta = (key: string): string | null => cache.core.getMeta(key);
 const getMessage = (id: number): MessageRow | null => cache.core.getMessage(id);
 const listMessages = (opts: ListMessagesOptions): MessageRow[] => cache.core.listMessages(opts);
 const getSyncState = (folder: 'inbox' | 'sent' | 'drafts'): SyncState | null => cache.core.getSyncState(folder);
+const newestOf = (folder: 'inbox' | 'sent' | 'drafts'): number | null => cache.core.getSyncState(folder)?.newestId ?? null;
 const upsertMessage = (row: MessageRow): void => cache.core.upsertMessage(row);
 const getDraft = (id: number): DraftRow | null => cache.core.getDraft(id);
 const listDraftIds = (): number[] => cache.core.listDraftIds();
@@ -87,6 +88,19 @@ function listResponse(items: Array<{ id: number; subject?: string; from?: string
       recipients: [{ user: { id: 1, name: 'Bob' }, viewed: it.unread ? null : { dateTime: '2026-05-04T13:00:00Z' } }],
     })),
   };
+}
+
+// Seed an already-cached, already-viewed sent message — the shape a prior sync
+// would have left behind. `viewedAt` is set so the sent view-status refresh has
+// nothing to do and the row is skipped cleanly on a re-walk.
+function seedCachedSent(id: number, sentAt = '2026-05-04T12:00:00Z'): void {
+  upsertMessage({
+    id, folder: 'sent', subject: `Subject ${id}`, fromUser: 'Me',
+    sentAt,
+    recipients: [{ userId: 1, name: 'Bob', viewedAt: '2026-05-04T13:00:00Z' }],
+    body: `body-${id}`, fetchedBodyAt: '2026-05-04T12:01:00Z',
+    replyToId: null, chainRootId: null, listData: {},
+  });
 }
 
 describe('syncMessageFolder', () => {
@@ -776,12 +790,20 @@ describe('syncMessageFolder — bounded + resumable (budget)', () => {
     expect(paused?.resumePage).toBe(2);
     expect(paused?.newestId).toBe(2);
 
-    // Resume call (unbounded, deep): starts at the saved page 2.
+    // Resume call (unbounded, deep). The forward pass re-checks page 1 (all
+    // cached → one request, stops), THEN the backfill resumes at the saved
+    // page 2. Path-based mock so request ORDER is free to change.
     const c2 = new OFWClient();
-    const spy2 = vi.spyOn(c2, 'request')
-      .mockResolvedValueOnce(listResponse([{ id: 3 }]))   // page 2
-      .mockResolvedValueOnce({ body: 'body-3' })
-      .mockResolvedValueOnce(listResponse([]));           // page 3 empty
+    const spy2 = vi.spyOn(c2, 'request').mockImplementation(async (_method, path) => {
+      const p = String(path);
+      if (/\/pub\/v3\/messages\?/.test(p)) {
+        if (/[?&]page=1\b/.test(p)) return listResponse([{ id: 1 }, { id: 2 }]);
+        if (/[?&]page=2\b/.test(p)) return listResponse([{ id: 3 }]);
+        return listResponse([]); // page 3+ empty
+      }
+      if (/\/pub\/v3\/messages\/3$/.test(p)) return { body: 'body-3' };
+      return {};
+    });
 
     const r2 = await syncMessageFolder(
       c2, 'sent', '222',
@@ -793,9 +815,12 @@ describe('syncMessageFolder — bounded + resumable (budget)', () => {
     expect(r2.synced).toBe(1);
     expect(getMessage(3)?.body).toBe('body-3');
     expect(getSyncState('sent')?.resumePage).toBeNull();
-    // The resume walk fetched page 2 first (not page 1).
-    const firstList = spy2.mock.calls.find((c) => /\/pub\/v3\/messages\?/.test(c[1] as string));
-    expect(firstList?.[1]).toMatch(/page=2/);
+    // Page 1 is re-checked first (the forward pass), then the backfill picks up
+    // the saved page 2 — the resume cursor is honoured, not restarted.
+    const listPages = spy2.mock.calls
+      .filter((c) => /\/pub\/v3\/messages\?/.test(c[1] as string))
+      .map((c) => /[?&]page=([0-9]+)\b/.exec(c[1] as string)?.[1]);
+    expect(listPages).toEqual(['1', '2', '3']);
   });
 
   it('pauses MID-page and resumes the same page, skipping the rows it already cached', async () => {
@@ -962,9 +987,220 @@ describe('syncMessageFolder — bounded + resumable (budget)', () => {
     expect(r2.done).toBe(true);
     expect(getMessage(50)?.body).toBe('body-50'); // the older gap message is backfilled
     expect(getSyncState('inbox')?.resumePage).toBeNull();
-    // The resume walked page 2 first — it did NOT restart at page 1.
-    const firstList = spy2.mock.calls.find((c) => /\/pub\/v3\/messages\?/.test(c[1] as string));
-    expect(firstList?.[1]).toMatch(/[?&]page=2\b/);
+    // The forward pass re-checks page 1 and stops (all cached), then the
+    // backfill honours the saved cursor and reaches page 2. What must never
+    // happen is the walk *ending* at page 1 and reporting done — which is what
+    // the assertion on id 50 above pins down.
+    const listPages = spy2.mock.calls
+      .filter((c) => /\/pub\/v3\/messages\?/.test(c[1] as string))
+      .map((c) => /[?&]page=([0-9]+)\b/.exec(c[1] as string)?.[1]);
+    expect(listPages).toEqual(['1', '2', '3']);
+  });
+
+  it('a normal sync ingests a NEW head message while a backfill is parked deep in old history (regression)', async () => {
+    // The starvation bug: one shared cursor meant every call resumed the parked
+    // backfill and never re-fetched page 1, so a message sent after the backfill
+    // began stayed invisible until the ENTIRE backfill finished — potentially
+    // days. Here the backfill is parked at page 5 with pages 5+ still unwalked,
+    // and a brand-new id 999 has landed at the head of page 1.
+    seedCachedSent(100);
+    seedCachedSent(90);
+    cache.core.setSyncState('sent', {
+      lastSyncAt: '2026-05-04T12:00:00Z', newestId: 100, resumePage: 5,
+    });
+
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request').mockImplementation(async (_method, path) => {
+      const p = String(path);
+      if (/\/pub\/v3\/messages\?/.test(p)) {
+        // Page 1: the new head message, above the already-cached id 100.
+        if (/[?&]page=1\b/.test(p)) {
+          return listResponse([
+            { id: 999, subject: 'Off-week message', sentAt: '2026-05-04T19:30:00Z' },
+            { id: 100 },
+          ]);
+        }
+        // Page 2: cached history — where the forward pass should stop.
+        if (/[?&]page=2\b/.test(p)) return listResponse([{ id: 90 }]);
+        // Page 5: where the backfill is parked, still holding old history.
+        if (/[?&]page=5\b/.test(p)) return listResponse([{ id: 7, sentAt: '2025-01-01T00:00:00Z' }]);
+        return listResponse([]); // page 6+ empty
+      }
+      if (/\/pub\/v3\/messages\/999$/.test(p)) return { body: 'off-week body' };
+      if (/\/pub\/v3\/messages\/7$/.test(p)) return { body: 'body-7' };
+      return {};
+    });
+
+    // ONE normal call — no deep flag, and a budget too small to have finished
+    // the backfill on its own.
+    const result = await syncMessageFolder(
+      client, 'sent', '222',
+      { fetchUnreadBodies: false, budget: makeBudget(10) },
+      store(),
+    );
+
+    // The head message is cached and findable, even though the backfill was mid-flight.
+    expect(getMessage(999)?.body).toBe('off-week body');
+    expect(getMessage(999)?.sentAt).toBe('2026-05-04T19:30:00Z');
+    expect(listMessages({ folder: 'sent', q: 'off-week', page: 1, size: 50 }).map((m) => m.id)).toEqual([999]);
+    expect(result.synced).toBe(2); // the head message AND the backfilled old one
+    expect(newestOf('sent')).toBe(999);
+
+    // ...and the backfill still advanced in the same call, then completed.
+    expect(getMessage(7)?.body).toBe('body-7');
+    expect(result.done).toBe(true);
+    expect(getSyncState('sent')?.resumePage).toBeNull();
+
+    // The forward pass stopped as soon as it hit cached history (page 2) — it
+    // did NOT re-walk pages 3-4, which the parked backfill had already covered.
+    const listPages = spy.mock.calls
+      .filter((c) => /\/pub\/v3\/messages\?/.test(c[1] as string))
+      .map((c) => /[?&]page=([0-9]+)\b/.exec(c[1] as string)?.[1]);
+    expect(listPages).toEqual(['1', '2', '5', '6']);
+  });
+
+  it('keeps the head fresh AND the backfill parked when the budget runs out mid-backfill', async () => {
+    // Same starvation scenario, but the budget only funds the forward pass plus
+    // a slice of the backfill. The new message must still land, and the cursor
+    // must survive so the next call continues from where this one paused.
+    seedCachedSent(100);
+    seedCachedSent(90);
+    cache.core.setSyncState('sent', {
+      lastSyncAt: '2026-05-04T12:00:00Z', newestId: 100, resumePage: 5,
+    });
+
+    const client = new OFWClient();
+    vi.spyOn(client, 'request').mockImplementation(async (_method, path) => {
+      const p = String(path);
+      if (/\/pub\/v3\/messages\?/.test(p)) {
+        if (/[?&]page=1\b/.test(p)) return listResponse([{ id: 999 }, { id: 100 }]);
+        if (/[?&]page=2\b/.test(p)) return listResponse([{ id: 90 }]); // cached history
+        if (/[?&]page=5\b/.test(p)) return listResponse([{ id: 7 }]);
+        return listResponse([]);
+      }
+      return { body: 'a body' };
+    });
+
+    // budget 3: the forward pass spends all of it (page-1 list, id 999's detail,
+    // page-2 list where it stops), leaving nothing for the backfill.
+    const result = await syncMessageFolder(
+      client, 'sent', '222',
+      { fetchUnreadBodies: false, budget: makeBudget(3) },
+      store(),
+    );
+
+    expect(getMessage(999)?.body).toBe('a body'); // head message still landed
+    expect(result.done).toBe(false);
+    expect(getSyncState('sent')?.resumePage).toBe(5); // backfill re-parked, not lost
+  });
+
+  it('parks the backfill at the forward pass\'s own pause point when it is higher up the folder', async () => {
+    // A forward pass can itself run out of budget when a burst of new messages
+    // fills page 1 (every item new → it keeps walking). It then never reached
+    // cached history, so pages from its pause point down are unverified — the
+    // cursor must move UP to cover them, never stay at the deeper saved page.
+    cache.core.setSyncState('sent', {
+      lastSyncAt: '2026-05-04T12:00:00Z', newestId: 50, resumePage: 9,
+    });
+
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce(listResponse([{ id: 999 }])) // page 1, all new
+      .mockResolvedValueOnce({ body: 'body-999' });       // ...budget out after this
+
+    const result = await syncMessageFolder(
+      client, 'sent', '222',
+      { fetchUnreadBodies: false, budget: makeBudget(2) },
+      store(),
+    );
+
+    expect(result.done).toBe(false);
+    expect(getMessage(999)?.body).toBe('body-999');
+    // min(2, 9) — resuming at 9 would skip pages 2-8 the forward pass never saw.
+    expect(getSyncState('sent')?.resumePage).toBe(2);
+    expect(newestOf('sent')).toBe(999);
+  });
+
+  it('caches the REAL view time from detail when first ingesting an already-read sent message (regression)', async () => {
+    // Verified against live payloads: the LIST endpoint returns an epoch
+    // placeholder for viewed.dateTime even when showNeverViewed is false, while
+    // DETAIL carries the real "First Viewed" time. A message sent and then read
+    // before we ever cached it lands via the new-message path, which fetches
+    // detail anyway for the body — so it must take the recipients from there.
+    // Building the row from the list cached viewedAt:null, i.e. "never viewed"
+    // for a message OFW plainly shows as read.
+    const client = new OFWClient();
+    vi.spyOn(client, 'request').mockImplementation(async (_method, path) => {
+      const p = String(path);
+      if (/\/pub\/v3\/messages\?/.test(p)) {
+        if (/[?&]page=1\b/.test(p)) {
+          return {
+            data: [{
+              id: 999, subject: 'Off-week message', from: { name: 'Me' },
+              date: { dateTime: '2026-07-16T19:25:14' },
+              showNeverViewed: false, // read...
+              // ...but the list only has the epoch placeholder for WHEN.
+              recipients: [{ user: { id: 1, name: 'Bob' }, viewed: { dateTime: '1970-01-01T00:00:00' } }],
+            }],
+          };
+        }
+        return listResponse([]);
+      }
+      return {
+        body: 'off-week body',
+        recipients: [{ user: { id: 1, name: 'Bob' }, viewed: { dateTime: '2026-07-16T20:40:18' } }],
+      };
+    });
+
+    const result = await syncMessageFolder(
+      client, 'sent', '222', { fetchUnreadBodies: false }, store(),
+    );
+
+    expect(result.done).toBe(true);
+    expect(getMessage(999)?.recipients).toEqual([
+      { userId: 1, name: 'Bob', viewedAt: '2026-07-16T20:40:18' },
+    ]);
+  });
+
+  it('falls back to the list recipients when detail omits them', async () => {
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce(listResponse([{ id: 1 }]))  // real view time in the list
+      .mockResolvedValueOnce({ body: 'body-1' })         // detail carries no recipients
+      .mockResolvedValueOnce(listResponse([]));
+
+    await syncMessageFolder(client, 'sent', '222', { fetchUnreadBodies: false }, store());
+
+    expect(getMessage(1)?.recipients).toEqual([
+      { userId: 1, name: 'Bob', viewedAt: '2026-05-04T13:00:00Z' },
+    ]);
+  });
+
+  it('a deep sync walks past cached history after the forward pass stops', async () => {
+    // No cursor parked and nothing new at the head, so the forward pass stops on
+    // page 1 — but `deep` must still walk the whole folder to backfill gaps.
+    seedCachedSent(100);
+
+    const client = new OFWClient();
+    vi.spyOn(client, 'request').mockImplementation(async (_method, path) => {
+      const p = String(path);
+      if (/\/pub\/v3\/messages\?/.test(p)) {
+        if (/[?&]page=1\b/.test(p)) return listResponse([{ id: 100 }]);
+        if (/[?&]page=2\b/.test(p)) return listResponse([{ id: 42 }]); // the gap
+        return listResponse([]);
+      }
+      return { body: 'body-42' };
+    });
+
+    const result = await syncMessageFolder(
+      client, 'sent', '222',
+      { fetchUnreadBodies: false, deep: true, budget: makeBudget(Number.POSITIVE_INFINITY) },
+      store(),
+    );
+
+    expect(result.done).toBe(true);
+    expect(getMessage(42)?.body).toBe('body-42');
+    expect(getSyncState('sent')?.resumePage).toBeNull();
   });
 });
 

@@ -182,46 +182,63 @@ export interface MessageSyncResult {
   done: boolean;
 }
 
-export async function syncMessageFolder(
+interface WalkTotals {
+  synced: number;
+  unread: UnreadHint[];
+  /** Highest message id seen on the pages this walk actually fetched. */
+  newestId: number | null;
+}
+
+/**
+ * Outcome of one contiguous page walk. `nextPage` is where a follow-up walk
+ * should pick up; `null` (only possible when `done`) means OFW returned an
+ * empty page, so history is exhausted and there is nothing left below.
+ */
+type WalkResult = WalkTotals & (
+  | { done: false; nextPage: number }
+  | { done: true; nextPage: number | null }
+);
+
+const maxId = (a: number | null, b: number | null): number | null =>
+  a === null ? b : b === null ? a : Math.max(a, b);
+
+/**
+ * Walk one folder's list pages from `startPage` toward older messages, caching
+ * what isn't cached yet. Stops on an empty page, when `stopAtCachedPage` says
+ * we've reached cached history, or when the request budget runs out.
+ */
+async function walkPages(
   client: OFWClient,
   folder: 'inbox' | 'sent',
   folderId: string,
-  opts: { fetchUnreadBodies: boolean; deep?: boolean; budget?: Budget },
+  opts: {
+    startPage: number;
+    /**
+     * True (FORWARD pass) — stop at the first page holding no new messages.
+     * OFW sorts date-desc, so such a page is where cached history begins and
+     * everything below it is already known.
+     *
+     * False (BACKFILL pass) — walk until OFW returns an empty page. A backfill
+     * runs below cached history by construction, so "this page is all cached"
+     * says nothing about whether older messages remain underneath it; stopping
+     * there would orphan them and report a false completion.
+     */
+    stopAtCachedPage: boolean;
+    fetchUnreadBodies: boolean;
+    budget: Budget;
+  },
   store: CacheStore,
-): Promise<MessageSyncResult> {
-  // No budget → unbounded (local stdio): every take() succeeds, so the walk is
-  // byte-for-byte the original unbounded behaviour.
-  const budget = opts.budget ?? makeBudget(Number.POSITIVE_INFINITY);
-
-  // Resume a bounded backfill from where the last call paused. Resumption is a
-  // function of "did a prior call pause?" (resumePage != null) — NOT of `deep`.
-  // The `deep` flag only chooses the stop heuristic (walk-to-empty vs
-  // stop-at-first-cached-page); it must not also decide whether a paused walk
-  // picks up where it left off. Gating resume on `deep` was a bug: a bounded
-  // NON-deep walk of a sparse folder pauses too (every page still has new
-  // items), and on the next call it restarted at page 1, found that page fully
-  // cached, and the non-deep stop heuristic broke with done:true — orphaning
-  // older messages on pages it never reached and reporting a false completion.
-  // Seeding newestId from the saved state keeps the folder's true newest id —
-  // page 1 (where it lives) was walked on the first call of this backfill, not
-  // this resume call.
-  const saved = await store.getSyncState(folder);
-  let page = 1;
+): Promise<WalkResult> {
+  const budget = opts.budget;
+  let page = opts.startPage;
   let newestId: number | null = null;
-  if (saved?.resumePage != null) {
-    page = saved.resumePage;
-    newestId = saved.newestId;
-  }
-
   let synced = 0;
   const unread: UnreadHint[] = [];
-  let done = true;
 
   while (true) {
     // One unit per list-page fetch. Out of budget → pause and resume at `page`.
     if (!budget.take()) {
-      done = false;
-      break;
+      return { synced, unread, newestId, done: false, nextPage: page };
     }
     const path = `/pub/v3/messages?folders=${encodeURIComponent(folderId)}&page=${page}&size=50&sort=date&sortDirection=desc`;
     const list = parseLenient(
@@ -230,7 +247,9 @@ export async function syncMessageFolder(
       { label: 'ofw-mcp', context: `GET /pub/v3/messages?folders={${folder}}` },
     );
     const items = list.data ?? [];
-    if (items.length === 0) break;
+    if (items.length === 0) {
+      return { synced, unread, newestId, done: true, nextPage: null };
+    }
 
     // One batch read of this page's ids (S1) instead of a per-item getMessage.
     const existingById = new Map(
@@ -272,6 +291,13 @@ export async function syncMessageFolder(
       let body: string | null = null;
       let fetchedBodyAt: string | null = null;
       let detailFileIds: number[] = [];
+      // Prefer the DETAIL endpoint's recipients when we fetch it: the list only
+      // ever carries an epoch placeholder for `viewed.dateTime` (even on a read
+      // message), while detail carries the real "First Viewed" time. Building
+      // the row from the list would cache viewedAt:null for a message that was
+      // already read by the time we first saw it — reporting "never viewed" for
+      // a message OFW shows as read, until a later sync's refresh healed it.
+      let detailRecipients: ListItem['recipients'];
       if (shouldFetchBody) {
         if (!budget.take()) { pageBudgetHit = true; break; }
         const detail = parseLenient(
@@ -281,6 +307,7 @@ export async function syncMessageFolder(
         );
         body = detail.body ?? '';
         fetchedBodyAt = new Date().toISOString();
+        detailRecipients = detail.recipients;
         if (Array.isArray(detail.files) && detail.files.length > 0) {
           detailFileIds = detail.files;
         }
@@ -299,7 +326,7 @@ export async function syncMessageFolder(
         subject: item.subject ?? '(no subject)',
         fromUser: item.from?.name ?? '',
         sentAt: item.date?.dateTime ?? new Date().toISOString(),
-        recipients: mapRecipients(item.recipients),
+        recipients: mapRecipients(detailRecipients ?? item.recipients),
         body,
         fetchedBodyAt,
         replyToId: null,
@@ -319,24 +346,98 @@ export async function syncMessageFolder(
     if (pageBudgetHit) {
       // Paused mid-page. Resume at THIS page: the partial rows are cached, so
       // getMessages skips them next time and upserts are idempotent.
-      done = false;
-      break;
+      return { synced, unread, newestId, done: false, nextPage: page };
     }
 
-    // Stop heuristic: a page with no new items means we've reached cached
-    // history (OFW returns date-desc). A page with even ONE new item could
-    // mean there are more new items on the next page that we haven't seen
-    // yet — keep walking. With `deep: true`, walk every page until OFW
-    // returns an empty page (used to backfill suspected gaps).
-    if (!opts.deep && !pageHadNewItem) break;
+    // Reached cached history (see `stopAtCachedPage`). Report THIS page as the
+    // resume point rather than the next one: it costs one redundant (cheap,
+    // all-cached) fetch if a backfill later starts here, and it cannot skip a
+    // message the way an off-by-one `page + 1` could.
+    if (opts.stopAtCachedPage && !pageHadNewItem) {
+      return { synced, unread, newestId, done: true, nextPage: page };
+    }
     page++;
+  }
+}
+
+/**
+ * Sync one message folder. Runs two independent passes so that a long backfill
+ * can never starve new messages:
+ *
+ *  1. FORWARD — always from page 1, every call, regardless of how deep a
+ *     backfill is parked. This is what guarantees a message sent or received
+ *     since the last sync is cached by the next ordinary call. Once caught up
+ *     it costs a single request: page 1 holds nothing new, so it stops there.
+ *  2. BACKFILL — resumes the parked cursor (or, for `deep`, walks past where
+ *     the forward pass stopped) with whatever budget the forward pass left,
+ *     and re-parks the cursor if it pauses again.
+ *
+ * Both passes share one budget, and the forward pass draws first: the newest
+ * messages are the ones a caller is most likely to need, and history that has
+ * waited months can wait one more call.
+ */
+export async function syncMessageFolder(
+  client: OFWClient,
+  folder: 'inbox' | 'sent',
+  folderId: string,
+  opts: { fetchUnreadBodies: boolean; deep?: boolean; budget?: Budget },
+  store: CacheStore,
+): Promise<MessageSyncResult> {
+  // No budget → unbounded (local stdio): every take() succeeds, so an ordinary
+  // sync is byte-for-byte the original unbounded walk (forward pass only).
+  const budget = opts.budget ?? makeBudget(Number.POSITIVE_INFINITY);
+  const saved = await store.getSyncState(folder);
+  const savedResume = saved?.resumePage ?? null;
+
+  const fwd = await walkPages(client, folder, folderId, {
+    startPage: 1,
+    stopAtCachedPage: true,
+    fetchUnreadBodies: opts.fetchUnreadBodies,
+    budget,
+  }, store);
+
+  let synced = fwd.synced;
+  const unread = [...fwd.unread];
+  // Never regress the folder's newest id: a pass that only walked cached pages
+  // still saw page 1, but a paused one may not have.
+  let newestId = maxId(saved?.newestId ?? null, fwd.newestId);
+  let done: boolean;
+  let resumePage: number | null;
+
+  if (!fwd.done) {
+    // The forward pass itself ran out of budget, so it never reached cached
+    // history — everything from `fwd.nextPage` down is unverified. Park the
+    // backfill at whichever cursor is higher up the folder, so no page that
+    // still owes us messages ends up above the resume point.
+    done = false;
+    resumePage = savedResume === null ? fwd.nextPage : Math.min(fwd.nextPage, savedResume);
+  } else if (fwd.nextPage === null) {
+    // The forward pass walked clean off the end of the folder — by definition
+    // there is no older history left to backfill.
+    done = true;
+    resumePage = null;
+  } else if (savedResume === null && !opts.deep) {
+    // Ordinary incremental sync with no backfill parked: caught up.
+    done = true;
+    resumePage = null;
+  } else {
+    const bf = await walkPages(client, folder, folderId, {
+      startPage: savedResume ?? fwd.nextPage,
+      stopAtCachedPage: false,
+      fetchUnreadBodies: opts.fetchUnreadBodies,
+      budget,
+    }, store);
+    synced += bf.synced;
+    unread.push(...bf.unread);
+    newestId = maxId(newestId, bf.newestId);
+    done = bf.done;
+    resumePage = bf.done ? null : bf.nextPage;
   }
 
   await store.setSyncState(folder, {
     lastSyncAt: new Date().toISOString(),
     newestId,
-    // Clear the cursor on natural completion; record where to resume on a pause.
-    resumePage: done ? null : page,
+    resumePage,
   });
 
   return { synced, unread, done };
