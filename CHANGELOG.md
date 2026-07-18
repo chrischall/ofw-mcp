@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.6.4](https://github.com/chrischall/ofw-mcp/compare/v2.6.3...v2.6.4) (2026-07-18)
+
+
+### Bug Fixes
+
+* reconcile cached read flag with recipient viewedAt ([#148](https://github.com/chrischall/ofw-mcp/issues/148)) ([c8c039e](https://github.com/chrischall/ofw-mcp/commit/c8c039eb13697769fe1c62a56f8fa401c8216aa4))
+
 ## [2.6.3](https://github.com/chrischall/ofw-mcp/compare/v2.6.2...v2.6.3) (2026-07-17)
 
 
