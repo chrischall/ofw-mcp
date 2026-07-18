@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { isAbsolute } from 'node:path';
-import { expandPath, hasRealView, jsonResponse, mapRecipients, textResponse, verifyWriteLanded } from '../../src/tools/_shared.js';
+import { deriveRead, expandPath, hasRealView, jsonResponse, mapRecipients, textResponse, verifyWriteLanded, withReadState } from '../../src/tools/_shared.js';
+import { sampleMessageRow } from '../_fixtures.js';
 
 describe('jsonResponse', () => {
   it('wraps a payload as a single text content block with pretty-printed JSON', () => {
@@ -31,7 +32,18 @@ describe('mapRecipients', () => {
     expect(mapRecipients([])).toEqual([]);
   });
 
-  it('maps the standard OFW recipient shape into the cache Recipient shape', () => {
+  it('carries the real recipient id from the live `user.userId` field', () => {
+    // Live OFW payloads key the id as `userId` (e.g. 3039201), not `id` — an
+    // earlier reader looked at `id`, which is absent, so every recipient came
+    // out with `userId: 0` and no "find my own recipient" match could succeed.
+    expect(mapRecipients([
+      { user: { userId: 3039201, name: 'Chris' }, viewed: { dateTime: '2026-07-17T08:37:57' } },
+    ])).toEqual([
+      { userId: 3039201, name: 'Chris', viewedAt: '2026-07-17T08:37:57' },
+    ]);
+  });
+
+  it('falls back to the legacy `user.id` field when `userId` is absent', () => {
     expect(mapRecipients([
       { user: { id: 1, name: 'Alice' }, viewed: { dateTime: '2026-05-01T00:00:00Z' } },
       { user: { id: 2, name: 'Bob' }, viewed: null },
@@ -126,5 +138,126 @@ describe('hasRealView', () => {
   });
   it('is true when any recipient has a real view timestamp', () => {
     expect(hasRealView([{ viewedAt: null }, { viewedAt: '2026-06-16T15:49:20' }])).toBe(true);
+  });
+});
+
+describe('deriveRead', () => {
+  const SELF = 3039201;
+
+  describe('inbox', () => {
+    it('is true when the account holder recipient (matched by id) has a viewedAt', () => {
+      const row = sampleMessageRow({
+        folder: 'inbox', fetchedBodyAt: null, listData: { read: false, showNeverViewed: true },
+        recipients: [{ userId: SELF, name: 'Chris', viewedAt: '2026-07-17T08:37:57' }],
+      });
+      expect(deriveRead(row, SELF)).toBe(true);
+    });
+
+    it('is false when a *different* recipient viewed it but the account holder has not', () => {
+      // Self-id matching means someone else opening it does not mark it read for me.
+      const row = sampleMessageRow({
+        folder: 'inbox', fetchedBodyAt: null, listData: {},
+        recipients: [
+          { userId: SELF, name: 'Chris', viewedAt: null },
+          { userId: 999, name: 'Lawyer', viewedAt: '2026-07-17T08:37:57' },
+        ],
+      });
+      expect(deriveRead(row, SELF)).toBe(false);
+    });
+
+    it('falls back to any recipient viewedAt when self id is unknown', () => {
+      const row = sampleMessageRow({
+        folder: 'inbox', fetchedBodyAt: null, listData: {},
+        recipients: [{ userId: SELF, name: 'Chris', viewedAt: '2026-07-17T08:37:57' }],
+      });
+      expect(deriveRead(row)).toBe(true);
+    });
+
+    it('is true once the body has been fetched (OFW marks inbox read on body fetch)', () => {
+      const row = sampleMessageRow({
+        folder: 'inbox', fetchedBodyAt: '2026-07-17T12:37:57.957Z',
+        listData: { read: false, showNeverViewed: true },
+        recipients: [{ userId: SELF, name: 'Chris', viewedAt: null }],
+      });
+      expect(deriveRead(row, SELF)).toBe(true);
+    });
+
+    it('falls back to the scraped list flags when nothing else says read', () => {
+      const row = sampleMessageRow({
+        folder: 'inbox', fetchedBodyAt: null, listData: { showNeverViewed: false }, recipients: [],
+      });
+      expect(deriveRead(row, SELF)).toBe(true);
+    });
+
+    it('is false for an untouched, never-viewed inbox message', () => {
+      const row = sampleMessageRow({
+        folder: 'inbox', fetchedBodyAt: null, listData: { read: false, showNeverViewed: true },
+        recipients: [{ userId: SELF, name: 'Chris', viewedAt: null }],
+      });
+      expect(deriveRead(row, SELF)).toBe(false);
+    });
+  });
+
+  describe('sent', () => {
+    it('is true when a recipient has viewed the sent message', () => {
+      const row = sampleMessageRow({
+        folder: 'sent', fetchedBodyAt: '2026-06-15T00:01:00Z', listData: {},
+        recipients: [{ userId: 999, name: 'Co-parent', viewedAt: '2026-06-16T15:49:20' }],
+      });
+      expect(deriveRead(row)).toBe(true);
+    });
+
+    it('is false when no recipient has viewed it — ignoring our own body fetch', () => {
+      // fetchedBodyAt is always set for sent messages; it must NOT count as read.
+      const row = sampleMessageRow({
+        folder: 'sent', fetchedBodyAt: '2026-06-15T00:01:00Z', listData: { showNeverViewed: true },
+        recipients: [{ userId: 999, name: 'Co-parent', viewedAt: null }],
+      });
+      expect(deriveRead(row)).toBe(false);
+    });
+
+    it('falls back to the scraped showNeverViewed flag', () => {
+      const row = sampleMessageRow({
+        folder: 'sent', fetchedBodyAt: null, listData: { showNeverViewed: false }, recipients: [],
+      });
+      expect(deriveRead(row)).toBe(true);
+    });
+  });
+
+  it('treats a non-object listData as carrying no read signal', () => {
+    const row = sampleMessageRow({
+      folder: 'inbox', fetchedBodyAt: null, listData: null, recipients: [],
+    });
+    expect(deriveRead(row)).toBe(false);
+  });
+});
+
+describe('withReadState', () => {
+  it('adds a top-level `read` and forces listData flags to agree (read case)', () => {
+    const row = sampleMessageRow({
+      folder: 'inbox', fetchedBodyAt: '2026-07-17T12:37:57.957Z',
+      listData: { read: false, showNeverViewed: true, other: 'kept' },
+      recipients: [{ userId: 3039201, name: 'Chris', viewedAt: '2026-07-17T08:37:57' }],
+    });
+    const out = withReadState(row);
+    expect(out.read).toBe(true);
+    expect(out.listData).toEqual({ read: true, showNeverViewed: false, other: 'kept' });
+  });
+
+  it('reports unread and keeps the flags consistent (unread case)', () => {
+    const row = sampleMessageRow({
+      folder: 'inbox', fetchedBodyAt: null, listData: { other: 'kept' },
+      recipients: [{ userId: 3039201, name: 'Chris', viewedAt: null }],
+    });
+    const out = withReadState(row, 3039201);
+    expect(out.read).toBe(false);
+    expect(out.listData).toEqual({ read: false, showNeverViewed: true, other: 'kept' });
+  });
+
+  it('passes a non-object listData through untouched', () => {
+    const row = sampleMessageRow({ folder: 'inbox', fetchedBodyAt: null, listData: null, recipients: [] });
+    const out = withReadState(row);
+    expect(out.read).toBe(false);
+    expect(out.listData).toBeNull();
   });
 });

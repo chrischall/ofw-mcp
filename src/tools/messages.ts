@@ -6,7 +6,7 @@ import type { CacheStore, MessageRow, DraftRow } from '../cache/store.js';
 import type { AttachmentIO } from './attachments.js';
 import { getAttachmentsDir, getDefaultInlineAttachments, getSyncMaxRequests, getWriteMode } from '../config.js';
 import { basename, join } from 'node:path';
-import { ApiRecipientSchema, expandPath, hasRealView, jsonResponse, mapRecipients, postMessageAndRefetch, textResponse, verifyWriteLanded } from './_shared.js';
+import { ApiRecipientSchema, expandPath, hasRealView, jsonResponse, mapRecipients, postMessageAndRefetch, textResponse, verifyWriteLanded, withReadState } from './_shared.js';
 import { parseLenient } from '@chrischall/mcp-utils';
 
 // Schemas for the load-bearing fields of each /pub/v3 response this file
@@ -126,7 +126,11 @@ export function registerMessageTools(
     const cache = cacheProvider();
     const filter = { folder, since: args.since, until: args.until, q: args.q };
     const total = await cache.countMessages(filter);
-    const messages = await cache.listMessages({ ...filter, page, size });
+    // Reconcile each row's read state at read time: the cached list flags can be
+    // stale (a message read after it was first scraped), so `read` is derived
+    // from the record's own `viewedAt`/`fetchedBodyAt` and `listData` is forced
+    // to agree — see withReadState.
+    const messages = (await cache.listMessages({ ...filter, page, size })).map((m) => withReadState(m));
 
     const payload: Record<string, unknown> = { messages, total, page, size };
     if (total === 0) {
@@ -229,7 +233,7 @@ export function registerMessageTools(
           // Backfill is best-effort. Fall through with whatever we have.
         }
       }
-      return jsonResponse({ ...row, attachments });
+      return jsonResponse({ ...withReadState(row), attachments });
     }
 
     const detail = parseLenient(
@@ -270,7 +274,7 @@ export function registerMessageTools(
       await fetchAttachmentMetaForMessage(client, detail.id, detail.files, cache);
     }
     const attachments = await cache.listAttachmentsForMessage(detail.id);
-    return jsonResponse({ ...row, attachments });
+    return jsonResponse({ ...withReadState(row), attachments });
   });
 
   if (allowSend) server.registerTool('ofw_send_message', {
