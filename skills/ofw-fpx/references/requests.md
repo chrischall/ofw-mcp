@@ -55,7 +55,7 @@ read on OFW):
 
 ```sh
 curl -s "https://ofw.ourfamilywizard.com/pub/v3/messages/${ID}" "${AUTH_HEADERS[@]}" \
-  | jq '{id, subject, body, sentAt: .date.dateTime, from: .from.name, files, recipients: [.recipients[] | {id: .user.id, name: .user.name, viewedAt: .viewed.dateTime}]}'
+  | jq '{id, subject, body, sentAt: .date.dateTime, from: .from.name, files, recipients: [.recipients[] | {id: .user.userId, name: .user.name, viewedAt: .viewed.dateTime}]}'
 ```
 
 ## 3. Send a message / save a draft (write — confirm-by-re-GET)

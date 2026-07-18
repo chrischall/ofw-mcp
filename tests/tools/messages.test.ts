@@ -240,6 +240,89 @@ describe('ofw_list_messages (cache-backed)', () => {
   });
 });
 
+describe('read-state reconciliation (bug: stale read flag vs viewedAt)', () => {
+  // The reported record: an inbox message read via a body fetch, whose recipient
+  // viewedAt is populated but whose once-scraped listData.read stayed false.
+  const staleReadRow = (): MessageRow => ({
+    id: 534973630, folder: 'inbox', subject: 'Re: Off-week message: 7/3 - 7/17',
+    fromUser: 'Co-parent', sentAt: '2026-07-17T08:00:00',
+    recipients: [{ userId: 3039201, name: 'Chris', viewedAt: '2026-07-17T08:37:57' }],
+    body: 'body', fetchedBodyAt: '2026-07-17T12:37:57.957Z',
+    replyToId: null, chainRootId: null,
+    listData: { id: 534973630, read: false, showNeverViewed: true },
+  });
+
+  it('ofw_list_messages reports read:true once the message has been read on OFW', async () => {
+    upsertMessage(staleReadRow());
+    const client = new OFWClient();
+    setup(client);
+    const parsed = JSON.parse((await handlers.get('ofw_list_messages')!({ folderId: 'inbox' })).content[0].text);
+    const msg = parsed.messages[0];
+    expect(msg.read).toBe(true);
+    // and the raw listData flags no longer contradict the recipient viewedAt
+    expect(msg.listData.read).toBe(true);
+    expect(msg.listData.showNeverViewed).toBe(false);
+    expect(msg.recipients[0].viewedAt).toBe('2026-07-17T08:37:57');
+    // the real account-holder id survived normalization (was 0 before the fix)
+    expect(msg.recipients[0].userId).toBe(3039201);
+  });
+
+  it('ofw_get_message reports read:true for the same record', async () => {
+    upsertMessage(staleReadRow());
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request');
+    setup(client);
+    const parsed = JSON.parse((await handlers.get('ofw_get_message')!({ messageId: '534973630' })).content[0].text);
+    expect(parsed.read).toBe(true);
+    expect(parsed.listData.showNeverViewed).toBe(false);
+    expect(spy).not.toHaveBeenCalled(); // inbox with a real view time isn't re-fetched
+  });
+
+  it('reports read:false for a genuinely unread inbox message', async () => {
+    upsertMessage({
+      id: 42, folder: 'inbox', subject: 'Unread', fromUser: 'Co-parent',
+      sentAt: '2026-07-17T08:00:00',
+      recipients: [{ userId: 3039201, name: 'Chris', viewedAt: null }],
+      body: null, fetchedBodyAt: null, replyToId: null, chainRootId: null,
+      listData: { id: 42, read: false, showNeverViewed: true },
+    });
+    const client = new OFWClient();
+    setup(client);
+    const parsed = JSON.parse((await handlers.get('ofw_list_messages')!({ folderId: 'inbox' })).content[0].text);
+    expect(parsed.messages[0].read).toBe(false);
+    expect(parsed.messages[0].listData.showNeverViewed).toBe(true);
+  });
+
+  it('a resync of the stale list flags never flips a read message back to unread', async () => {
+    // The cache holds a read message (viewedAt + fetchedBodyAt). A fresh sync
+    // re-scrapes the list, which still carries the stale read:false / never-
+    // viewed flags. Since read is derived from the persisted viewedAt /
+    // fetchedBodyAt, the message stays read.
+    upsertMessage(staleReadRow());
+    const client = new OFWClient();
+    vi.spyOn(client, 'request').mockImplementation(async (method: string, path: string) => {
+      if (path.includes('/pub/v1/messageFolders')) {
+        return { systemFolders: [
+          { id: '1', folderType: 'INBOX' }, { id: '2', folderType: 'SENT_MESSAGES' }, { id: '3', folderType: 'DRAFTS' },
+        ] };
+      }
+      if (path.includes('folders=1')) {
+        // OFW re-serves the message with its (still stale) list flags.
+        return { data: [{
+          id: 534973630, subject: 'Re: Off-week message: 7/3 - 7/17',
+          from: { name: 'Co-parent' }, date: { dateTime: '2026-07-17T08:00:00' },
+          read: false, showNeverViewed: true, recipients: [],
+        }] };
+      }
+      return { data: [] };
+    });
+    setup(client);
+    await handlers.get('ofw_sync_messages')!({});
+    const parsed = JSON.parse((await handlers.get('ofw_list_messages')!({ folderId: 'inbox' })).content[0].text);
+    expect(parsed.messages[0].read).toBe(true);
+  });
+});
+
 describe('ofw_list_drafts (cache-backed)', () => {
   it('returns cached drafts', async () => {
     upsertDraft({

@@ -1,6 +1,6 @@
 import { expandPath as expandPathUtil, rawTextResult, textResult } from '@chrischall/mcp-utils';
 import { z } from 'zod';
-import type { Recipient } from '../cache/store.js';
+import type { MessageRow, Recipient } from '../cache/store.js';
 import type { OFWClient } from '../client.js';
 import { parseLenient } from '@chrischall/mcp-utils';
 
@@ -15,7 +15,17 @@ export const textResponse = rawTextResult;
 // responses. Used wherever we validate the response of a `/pub/v3/messages*`
 // call. Loose: unknown keys pass through (and survive into cached listData).
 export const ApiRecipientSchema = z.looseObject({
-  user: z.looseObject({ id: z.number().optional(), name: z.string().optional() }).optional(),
+  // Live OFW payloads key the recipient's id as `userId` (verified against a
+  // real /pub/v3/messages record: `recipients[].user.userId === 3039201`). An
+  // earlier guess read `id`, which is absent — so every normalized recipient
+  // came out with `userId: 0`, breaking any "find my own recipient" match. Both
+  // are accepted (userId first, id fallback) so a backend that ever returns `id`
+  // still resolves.
+  user: z.looseObject({
+    userId: z.number().optional(),
+    id: z.number().optional(),
+    name: z.string().optional(),
+  }).optional(),
   viewed: z.looseObject({ dateTime: z.string() }).nullable().optional(),
 });
 export type ApiRecipient = z.infer<typeof ApiRecipientSchema>;
@@ -35,7 +45,7 @@ export function mapRecipients(items: ApiRecipient[] | undefined | null): Recipie
   return (items ?? []).map((r) => {
     const dt = r.viewed?.dateTime;
     const viewedAt = typeof dt === 'string' && !dt.startsWith('1970-01-01') ? dt : null;
-    return { userId: r.user?.id ?? 0, name: r.user?.name ?? '', viewedAt };
+    return { userId: r.user?.userId ?? r.user?.id ?? 0, name: r.user?.name ?? '', viewedAt };
   });
 }
 
@@ -47,6 +57,71 @@ export function mapRecipients(items: ApiRecipient[] | undefined | null): Recipie
 // re-fetch detail and self-heal the stale row to the real timestamp.
 export function hasRealView(recipients: { viewedAt: string | null }[]): boolean {
   return recipients.some((r) => r.viewedAt !== null && !r.viewedAt.startsWith('1970-01-01'));
+}
+
+// Just the read-relevant slice of a MessageRow — so deriveRead/withReadState can
+// be unit-tested and called without constructing a whole row.
+type ReadStateInput = Pick<MessageRow, 'folder' | 'recipients' | 'fetchedBodyAt' | 'listData'>;
+
+// True when the once-scraped list flags themselves say the message is read.
+// `showNeverViewed === false` is OFW's reliable "has been viewed" signal (per
+// CLAUDE.md); `read === true` is the inbox list's own flag. Both are only ever
+// captured at first sight, so they can go stale — they raise `read` but never
+// lower it (see deriveRead).
+function scrapeSaysRead(listData: unknown): boolean {
+  if (typeof listData !== 'object' || listData === null) return false;
+  const ld = listData as { read?: unknown; showNeverViewed?: unknown };
+  return ld.read === true || ld.showNeverViewed === false;
+}
+
+/**
+ * Derive a message's authoritative read state from the cached record itself,
+ * rather than trusting the `read`/`showNeverViewed` flags scraped once from the
+ * list endpoint. Those flags are frozen at first sight and drift the moment a
+ * message is read after caching — most often when a body fetch
+ * (`ofw_get_message`) marks an inbox message read on OFW as a side effect,
+ * populating `fetchedBodyAt` and the recipient's `viewedAt` but leaving the
+ * stale `read: false` behind.
+ *
+ * The derivation is monotonic — every input can only turn read ON — so a later
+ * resync (which re-scrapes the list flags) can never flip a read message back
+ * to unread:
+ *
+ *  - INBOX: the account holder is the recipient. When we know our own id
+ *    (`selfUserId`), that recipient's `viewedAt` is authoritative; otherwise any
+ *    recipient's `viewedAt` stands in (1:1 co-parent messaging). Fetching the
+ *    body marks the message read on OFW, so a non-null `fetchedBodyAt` is also
+ *    read=true. The stale scrape flag is only a last-resort fallback.
+ *  - SENT: "read" means a *recipient* has opened it — tracked via their
+ *    `viewedAt` (the detail endpoint's real timestamp) — never our own body
+ *    fetch, which is always set for sent messages.
+ */
+export function deriveRead(row: ReadStateInput, selfUserId?: number): boolean {
+  if (row.folder === 'inbox') {
+    const viewed = selfUserId !== undefined
+      ? row.recipients.some((r) => r.userId === selfUserId && r.viewedAt !== null)
+      : row.recipients.some((r) => r.viewedAt !== null);
+    return viewed || row.fetchedBodyAt !== null || scrapeSaysRead(row.listData);
+  }
+  return row.recipients.some((r) => r.viewedAt !== null) || scrapeSaysRead(row.listData);
+}
+
+/**
+ * Return the row augmented with an authoritative top-level `read` boolean and a
+ * `listData` whose `read`/`showNeverViewed` flags are forced to agree with it —
+ * so a single response can never contradict itself (the reported bug: a record
+ * carrying `listData.read: false` alongside a populated recipient `viewedAt`).
+ * A non-object `listData` (null / legacy string) is passed through untouched.
+ */
+export function withReadState<T extends MessageRow>(
+  row: T,
+  selfUserId?: number,
+): T & { read: boolean } {
+  const read = deriveRead(row, selfUserId);
+  const listData = (typeof row.listData === 'object' && row.listData !== null)
+    ? { ...(row.listData as Record<string, unknown>), read, showNeverViewed: !read }
+    : row.listData;
+  return { ...row, read, listData };
 }
 
 // Expand a user-provided path: ~ → home, relative → absolute. Re-exports
