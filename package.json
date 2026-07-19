@@ -1,6 +1,6 @@
 {
   "name": "ofw-mcp",
-  "version": "2.6.6",
+  "version": "2.6.7",
   "license": "MIT",
   "mcpName": "io.github.chrischall/ofw-mcp",
   "description": "OurFamilyWizard MCP server for Claude — developed and maintained by AI (Claude Code)",

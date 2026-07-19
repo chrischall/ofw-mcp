@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.6.7](https://github.com/chrischall/ofw-mcp/compare/v2.6.6...v2.6.7) (2026-07-19)
+
+
+### Bug Fixes
+
+* refuse to overwrite a draft that changed on OFW since it was cached ([#158](https://github.com/chrischall/ofw-mcp/issues/158)) ([1f8f5b1](https://github.com/chrischall/ofw-mcp/commit/1f8f5b17dd899b98083f978a692859fb105ec084))
+
+
+### Refactor
+
+* **messages:** drop the dead selfUserId read-state branch ([#161](https://github.com/chrischall/ofw-mcp/issues/161)) ([7da6e18](https://github.com/chrischall/ofw-mcp/commit/7da6e1866988b0ca44d37213245eaeadb639f66a)), closes [#149](https://github.com/chrischall/ofw-mcp/issues/149)
+
 ## [2.6.6](https://github.com/chrischall/ofw-mcp/compare/v2.6.5...v2.6.6) (2026-07-19)
 
 
