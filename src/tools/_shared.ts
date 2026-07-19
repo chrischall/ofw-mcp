@@ -95,23 +95,35 @@ function scrapeSaysRead(listData: unknown): boolean {
  * resync (which re-scrapes the list flags) can never flip a read message back
  * to unread:
  *
- *  - INBOX: the account holder is the recipient. When we know our own id
- *    (`selfUserId`), that recipient's `viewedAt` is authoritative; otherwise any
- *    recipient's `viewedAt` stands in (1:1 co-parent messaging). Fetching the
- *    body marks the message read on OFW, so a non-null `fetchedBodyAt` is also
- *    read=true. The stale scrape flag is only a last-resort fallback.
+ *  - INBOX: the account holder is the recipient, so ANY recipient's `viewedAt`
+ *    counts. OFW co-parent threads are 1:1 — the sole inbox recipient is us —
+ *    so this is exact, not an approximation. Fetching the body marks the message
+ *    read on OFW, so a non-null `fetchedBodyAt` is also read=true. The stale
+ *    scrape flag is only a last-resort fallback.
  *  - SENT: "read" means a *recipient* has opened it — tracked via their
  *    `viewedAt` (the detail endpoint's real timestamp) — never our own body
  *    fetch, which is always set for sent messages.
+ *
+ * This deliberately does NOT discriminate by the account holder's own userId.
+ * An earlier `selfUserId` parameter did, but nothing ever passed it, so the
+ * branch was dead in production. Reviving it is not as simple as threading the
+ * argument through, for two reasons:
+ *   1. No non-mutating endpoint exposes our numeric id. /pub/v2/profiles returns
+ *      name/address/contact and no id at all; /pub/v1/users/useraccountstatus
+ *      updates last-seen status as a side effect, and view timestamps are
+ *      evidentiary in custody matters — not something to touch for a read flag.
+ *   2. Rows cached before the `user.userId` parse fix (see ApiRecipientSchema)
+ *      normalized every recipient to `userId: 0`, so an id match would silently
+ *      fail on historical data until a full re-sync.
+ * If OFW ever adds third-party recipients (lawyer, parenting coordinator), both
+ * problems need solving together — a bare parameter would regress to dead code.
  */
-export function deriveRead(row: ReadStateInput, selfUserId?: number): boolean {
+export function deriveRead(row: ReadStateInput): boolean {
+  const viewedByAnyone = row.recipients.some((r) => r.viewedAt !== null);
   if (row.folder === 'inbox') {
-    const viewed = selfUserId !== undefined
-      ? row.recipients.some((r) => r.userId === selfUserId && r.viewedAt !== null)
-      : row.recipients.some((r) => r.viewedAt !== null);
-    return viewed || row.fetchedBodyAt !== null || scrapeSaysRead(row.listData);
+    return viewedByAnyone || row.fetchedBodyAt !== null || scrapeSaysRead(row.listData);
   }
-  return row.recipients.some((r) => r.viewedAt !== null) || scrapeSaysRead(row.listData);
+  return viewedByAnyone || scrapeSaysRead(row.listData);
 }
 
 /**
@@ -121,11 +133,8 @@ export function deriveRead(row: ReadStateInput, selfUserId?: number): boolean {
  * carrying `listData.read: false` alongside a populated recipient `viewedAt`).
  * A non-object `listData` (null / legacy string) is passed through untouched.
  */
-export function withReadState<T extends MessageRow>(
-  row: T,
-  selfUserId?: number,
-): T & { read: boolean } {
-  const read = deriveRead(row, selfUserId);
+export function withReadState<T extends MessageRow>(row: T): T & { read: boolean } {
+  const read = deriveRead(row);
   const listData = (typeof row.listData === 'object' && row.listData !== null)
     ? { ...(row.listData as Record<string, unknown>), read, showNeverViewed: !read }
     : row.listData;

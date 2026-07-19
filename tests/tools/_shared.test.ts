@@ -145,30 +145,29 @@ describe('deriveRead', () => {
   const SELF = 3039201;
 
   describe('inbox', () => {
-    it('is true when the account holder recipient (matched by id) has a viewedAt', () => {
+    it('is true when a recipient has a viewedAt', () => {
       const row = sampleMessageRow({
         folder: 'inbox', fetchedBodyAt: null, listData: { read: false, showNeverViewed: true },
         recipients: [{ userId: SELF, name: 'Chris', viewedAt: '2026-07-17T08:37:57' }],
       });
-      expect(deriveRead(row, SELF)).toBe(true);
+      expect(deriveRead(row)).toBe(true);
     });
 
-    it('is false when a *different* recipient viewed it but the account holder has not', () => {
-      // Self-id matching means someone else opening it does not mark it read for me.
+    it('counts ANY recipient view, including one that is not the account holder', () => {
+      // Documented limitation, not an oversight. OFW co-parent threads are 1:1,
+      // so the sole inbox recipient IS the account holder and any-recipient is
+      // exactly right. Discriminating by id would need the account holder's
+      // userId, which no non-mutating endpoint exposes: /pub/v2/profiles carries
+      // no numeric id at all, and /pub/v1/users/useraccountstatus updates
+      // last-seen status as a side effect (read receipts are evidentiary on OFW).
+      // If OFW ever adds third-party recipients, revisit — see the removed
+      // selfUserId branch in git history.
       const row = sampleMessageRow({
         folder: 'inbox', fetchedBodyAt: null, listData: {},
         recipients: [
           { userId: SELF, name: 'Chris', viewedAt: null },
           { userId: 999, name: 'Lawyer', viewedAt: '2026-07-17T08:37:57' },
         ],
-      });
-      expect(deriveRead(row, SELF)).toBe(false);
-    });
-
-    it('falls back to any recipient viewedAt when self id is unknown', () => {
-      const row = sampleMessageRow({
-        folder: 'inbox', fetchedBodyAt: null, listData: {},
-        recipients: [{ userId: SELF, name: 'Chris', viewedAt: '2026-07-17T08:37:57' }],
       });
       expect(deriveRead(row)).toBe(true);
     });
@@ -179,14 +178,14 @@ describe('deriveRead', () => {
         listData: { read: false, showNeverViewed: true },
         recipients: [{ userId: SELF, name: 'Chris', viewedAt: null }],
       });
-      expect(deriveRead(row, SELF)).toBe(true);
+      expect(deriveRead(row)).toBe(true);
     });
 
     it('falls back to the scraped list flags when nothing else says read', () => {
       const row = sampleMessageRow({
         folder: 'inbox', fetchedBodyAt: null, listData: { showNeverViewed: false }, recipients: [],
       });
-      expect(deriveRead(row, SELF)).toBe(true);
+      expect(deriveRead(row)).toBe(true);
     });
 
     it('is false for an untouched, never-viewed inbox message', () => {
@@ -194,7 +193,17 @@ describe('deriveRead', () => {
         folder: 'inbox', fetchedBodyAt: null, listData: { read: false, showNeverViewed: true },
         recipients: [{ userId: SELF, name: 'Chris', viewedAt: null }],
       });
-      expect(deriveRead(row, SELF)).toBe(false);
+      expect(deriveRead(row)).toBe(false);
+    });
+
+    it('ignores a stale userId: 0 left by the pre-fix recipient parser', () => {
+      // Rows cached before the `user.userId` parse fix normalized every
+      // recipient to userId 0. Read state must not depend on that field.
+      const row = sampleMessageRow({
+        folder: 'inbox', fetchedBodyAt: null, listData: {},
+        recipients: [{ userId: 0, name: 'Chris', viewedAt: '2026-07-17T08:37:57' }],
+      });
+      expect(deriveRead(row)).toBe(true);
     });
   });
 
@@ -249,7 +258,7 @@ describe('withReadState', () => {
       folder: 'inbox', fetchedBodyAt: null, listData: { other: 'kept' },
       recipients: [{ userId: 3039201, name: 'Chris', viewedAt: null }],
     });
-    const out = withReadState(row, 3039201);
+    const out = withReadState(row);
     expect(out.read).toBe(false);
     expect(out.listData).toEqual({ read: false, showNeverViewed: true, other: 'kept' });
   });
