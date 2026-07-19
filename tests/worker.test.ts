@@ -74,7 +74,15 @@ describe('OFW Cloudflare connector — OAuth surface', () => {
   it('GET /authorize renders the OurFamilyWizard login page with both field labels', async () => {
     // No `client_id` query param: the login page renders without needing a
     // registered OAuth client, which is all we verify here.
-    const res = await SELF.fetch('https://example.com/authorize?response_type=code&state=abc');
+    // `redirect_uri` IS required though — workers-oauth-provider 0.8.x calls
+    // validateRedirectUriScheme() unconditionally in parseAuthRequest(), and it
+    // throws "Invalid redirect URI" for any value without a scheme, including
+    // the empty string an absent param becomes. Don't drop it.
+    const res = await SELF.fetch(
+      'https://example.com/authorize?response_type=code&state=abc' +
+        '&redirect_uri=' +
+        encodeURIComponent('https://example.com/callback'),
+    );
     expect(res.status).toBe(200);
     expect(res.headers.get('content-type')).toContain('text/html');
     const html = await res.text();

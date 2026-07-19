@@ -42,9 +42,9 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "@chrischall/mcp-connector": "^0.1.0",
+    "@chrischall/mcp-connector": "^1.0.0",
     "@cloudflare/vitest-pool-workers": "^0.18.4",
-    "@cloudflare/workers-oauth-provider": "^0.0.11",
+    "@cloudflare/workers-oauth-provider": "^0.8.1",
     "@cloudflare/workers-types": "^5.20260708.1",
     "@types/node": "^26.0.0",
     "@vitest/coverage-v8": "^4.1.7",
