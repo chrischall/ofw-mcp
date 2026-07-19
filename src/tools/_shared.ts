@@ -11,6 +11,14 @@ export const jsonResponse = textResult;
 // Raw-string tool result. Wrapper over @chrischall/mcp-utils' `rawTextResult`.
 export const textResponse = rawTextResult;
 
+// A STRUCTURED failure: the machine-readable payload of `jsonResponse` plus
+// `isError`, so a refusal can carry recovery data (e.g. the server draft body
+// we declined to overwrite) without being mistaken for a successful write.
+// mcp-utils' `errorResult` only carries a string.
+export function jsonErrorResponse(data: unknown): ReturnType<typeof textResult> {
+  return { ...textResult(data), isError: true };
+}
+
 // OFW API shape for `recipients[]` on message/draft list and detail
 // responses. Used wherever we validate the response of a `/pub/v3/messages*`
 // call. Loose: unknown keys pass through (and survive into cached listData).

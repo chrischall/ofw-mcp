@@ -4,7 +4,9 @@ import { OFWCache } from '../src/cache/node.js';
 import type {
   CacheStore, MessageRow, DraftRow, SyncState, ListMessagesOptions, AttachmentRow,
 } from '../src/cache/store.js';
-import { resolveFolderIds, syncMessageFolder, syncDrafts, syncAll, makeBudget } from '../src/sync.js';
+import {
+  resolveFolderIds, syncMessageFolder, syncDrafts, syncAll, makeBudget, getDraftsCacheStatus,
+} from '../src/sync.js';
 
 // The sync functions now take an injected async CacheStore. Tests back it with
 // an in-memory `:memory:` OFWCache passed as `store`, and seed/assert through
@@ -531,6 +533,9 @@ describe('syncAll', () => {
     vi.spyOn(client, 'request')
       // resolveFolderIds
       .mockResolvedValueOnce(foldersResponse())
+      // drafts run FIRST (they gate the destructive draft tools): 1 item + body
+      .mockResolvedValueOnce(draftListResponse([{ id: 30 }]))
+      .mockResolvedValueOnce({ body: 'draft-30', subject: 'Draft 30', recipientIds: [] })
       // inbox: page 1 with 1 read item, body, then empty
       .mockResolvedValueOnce(listResponse([{ id: 10, unread: false }]))
       .mockResolvedValueOnce({ body: 'inbox-10' })
@@ -538,10 +543,7 @@ describe('syncAll', () => {
       // sent: page 1 with 1 item, body, then empty
       .mockResolvedValueOnce(listResponse([{ id: 20 }]))
       .mockResolvedValueOnce({ body: 'sent-20' })
-      .mockResolvedValueOnce(listResponse([]))
-      // drafts: page 1 with 1 item + body
-      .mockResolvedValueOnce(draftListResponse([{ id: 30 }]))
-      .mockResolvedValueOnce({ body: 'draft-30', subject: 'Draft 30', recipientIds: [] });
+      .mockResolvedValueOnce(listResponse([]));
 
     const result = await syncAll(client, {}, store());
 
@@ -553,10 +555,10 @@ describe('syncAll', () => {
     const client = new OFWClient();
     vi.spyOn(client, 'request')
       .mockResolvedValueOnce(foldersResponse())
+      .mockResolvedValueOnce(draftListResponse([]))
       .mockResolvedValueOnce(listResponse([{ id: 10, unread: true }]))
       .mockResolvedValueOnce(listResponse([]))
-      .mockResolvedValueOnce(listResponse([]))
-      .mockResolvedValueOnce(draftListResponse([]));
+      .mockResolvedValueOnce(listResponse([]));
 
     const result = await syncAll(client, {}, store());
 
@@ -580,6 +582,7 @@ describe('syncAll', () => {
     const client = new OFWClient();
     vi.spyOn(client, 'request')
       .mockResolvedValueOnce(foldersResponse())
+      .mockResolvedValueOnce(draftListResponse([])) // drafts run first, empty
       // inbox: one read item, body, then empty (deep walks to the empty page)
       .mockResolvedValueOnce(listResponse([{ id: 10, unread: false }]))
       .mockResolvedValueOnce({ body: 'inbox-10' })
@@ -587,8 +590,7 @@ describe('syncAll', () => {
       // sent: one item, body, then empty
       .mockResolvedValueOnce(listResponse([{ id: 20 }]))
       .mockResolvedValueOnce({ body: 'sent-20' })
-      .mockResolvedValueOnce(listResponse([]))
-      .mockResolvedValueOnce(draftListResponse([])); // drafts empty
+      .mockResolvedValueOnce(listResponse([]));
 
     const result = await syncAll(client, { deep: true }, store()); // sync.ts:290 opts.deep present
 
@@ -1296,15 +1298,42 @@ describe('syncAll — bounded (shared budget across folders)', () => {
     expect(spy).toHaveBeenCalledTimes(1); // only resolveFolderIds
   });
 
-  it('marks done:false when the drafts folder is deferred under a shared budget', async () => {
+  it('reports NO drafts count when the drafts folder is deferred under a shared budget', async () => {
     const client = new OFWClient();
     const spy = vi.spyOn(client, 'request').mockResolvedValueOnce(foldersResponse());
 
     const result = await syncAll(client, { folders: ['drafts'], maxRequests: 1 }, store());
 
     expect(result.done).toBe(false);
-    expect(result.synced).toEqual({ drafts: 0 });
+    // NOT `{ drafts: 0 }` — a deferred walk compared nothing against OFW, and
+    // reporting 0 reads as "verified, no changes". That lie is what let a
+    // server-side draft edit be silently overwritten.
+    expect(result.synced).toEqual({});
+    expect(result.note).toMatch(/drafts folder was NOT checked/);
     expect(spy).toHaveBeenCalledTimes(1);
+  });
+
+  it('marks the drafts cache unverified when the walk is deferred', async () => {
+    const client = new OFWClient();
+    vi.spyOn(client, 'request').mockResolvedValueOnce(foldersResponse());
+    const s = store();
+
+    await syncAll(client, { folders: ['drafts'], maxRequests: 1 }, s);
+
+    expect(await getDraftsCacheStatus(s)).toBe('unverified');
+  });
+
+  it('marks the drafts cache fresh only after a complete walk', async () => {
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce(foldersResponse())
+      .mockResolvedValueOnce(draftListResponse([]));
+    const s = store();
+
+    const result = await syncAll(client, { folders: ['drafts'] }, s);
+
+    expect(result.synced).toEqual({ drafts: 0 }); // truthful: actually diffed
+    expect(await getDraftsCacheStatus(s)).toBe('fresh');
   });
 
   it('an unbounded syncAll reports done:true and no pause note', async () => {

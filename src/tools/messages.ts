@@ -1,12 +1,16 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import type { OFWClient } from '../client.js';
-import { syncAll, fetchAttachmentMeta, fetchAttachmentMetaForMessage } from '../sync.js';
+import { syncAll, fetchAttachmentMeta, fetchAttachmentMetaForMessage, getDraftsCacheStatus } from '../sync.js';
+import {
+  DraftFreshnessError, checkDraftFreshness, draftRevision, fetchServerDraft, staleDraftPayload,
+} from './draft-freshness.js';
+import type { DraftContent } from './draft-freshness.js';
 import type { CacheStore, MessageRow, DraftRow } from '../cache/store.js';
 import type { AttachmentIO } from './attachments.js';
 import { getAttachmentsDir, getDefaultInlineAttachments, getSyncMaxRequests, getWriteMode } from '../config.js';
 import { basename, join } from 'node:path';
-import { ApiRecipientSchema, expandPath, hasRealView, jsonResponse, mapRecipients, postMessageAndRefetch, textResponse, verifyWriteLanded, withReadState } from './_shared.js';
+import { ApiRecipientSchema, expandPath, hasRealView, jsonErrorResponse, jsonResponse, mapRecipients, postMessageAndRefetch, textResponse, verifyWriteLanded, withReadState } from './_shared.js';
 import { parseLenient } from '@chrischall/mcp-utils';
 
 // Schemas for the load-bearing fields of each /pub/v3 response this file
@@ -176,6 +180,10 @@ export function registerMessageTools(
         chainRootId: null,
         listData: draftRow.listData,
         attachments: [],
+        // Concurrency token — pass as expectedRevision to ofw_save_draft /
+        // ofw_delete_draft to assert you are editing THIS version.
+        revision: draftRevision(draftRow),
+        cacheStatus: await getDraftsCacheStatus(cache),
       });
     }
 
@@ -417,6 +425,93 @@ export function registerMessageTools(
     return textResponse(notes ? `${notes}\n\n${text}` : text);
   });
 
+  // ── Destructive-draft-op guard ──────────────────────────────────────────
+  //
+  // Every path that DESTROYS an existing draft (ofw_save_draft's replace path,
+  // ofw_delete_draft) runs through this first. It re-reads the draft from OFW
+  // and refuses unless we can show the caller is current with it.
+  //
+  // Background: drafts edited in the OFW web app do not bump any timestamp the
+  // API exposes, so a cached draft can silently be months behind the server.
+  // ofw_save_draft replaces via create-then-delete, so acting on a stale base
+  // does not merge — it DESTROYS the server's version. Hence: refuse by
+  // default, and never treat "no token supplied" as consent to overwrite.
+  type DraftGuardOutcome =
+    | { ok: true; note: string | null }
+    | { ok: false; response: ReturnType<typeof jsonErrorResponse> };
+
+  async function guardDestructiveDraftOp(input: {
+    cache: CacheStore;
+    draftId: number;
+    expectedRevision?: string;
+    force: boolean;
+    action: string;
+  }): Promise<DraftGuardOutcome> {
+    const { cache, draftId, expectedRevision, force, action } = input;
+
+    const cachedRow = await cache.getDraft(draftId);
+    const cached: DraftContent | null = cachedRow === null ? null : {
+      subject: cachedRow.subject,
+      body: cachedRow.body,
+      recipients: cachedRow.recipients,
+      replyToId: cachedRow.replyToId,
+    };
+
+    let server: DraftContent | null;
+    try {
+      server = await fetchServerDraft(client, draftId);
+    } catch (e) {
+      // fetchServerDraft funnels every non-404 failure into DraftFreshnessError,
+      // so anything landing here means the check could not RUN. That is not
+      // permission to proceed: a transient 5xx must not degrade into a blind
+      // overwrite.
+      const reason = (e as DraftFreshnessError).message;
+      if (force) {
+        return { ok: true, note: `WARNING: force:true — proceeded with ${action} on draft ${draftId} even though its current state could not be read from OurFamilyWizard (${reason}). Any newer server-side version was destroyed and is NOT recoverable from this response.` };
+      }
+      return {
+        ok: false,
+        response: jsonErrorResponse({
+          error: 'FRESHNESS_CHECK_FAILED',
+          draftId,
+          reason,
+          recovery: 'Nothing was changed. This is usually transient — retry. If it persists, verify the draft on ourfamilywizard.com. Pass force:true only if you accept overwriting a version you have not seen.',
+        }),
+      };
+    }
+
+    const verdict = checkDraftFreshness({ server, cached, expectedRevision });
+    if (verdict.verdict === 'FRESH') return { ok: true, note: null };
+
+    if (force) {
+      // Loud, and the overwritten content rides along in the response so it is
+      // recoverable from the tool result itself.
+      console.error(`[ofw-mcp] WARNING: force:true overrode a ${verdict.verdict} verdict on draft ${draftId} (${action}). ${verdict.reason}`);
+      const echoed = server === null
+        ? 'The draft no longer existed on OurFamilyWizard.'
+        : `The server version that was overwritten is preserved below under "overwrittenServerDraft".`;
+      return {
+        ok: true,
+        note: `WARNING: force:true overrode a ${verdict.verdict} freshness verdict on draft ${draftId}. ${verdict.reason} ${echoed}\n\n${JSON.stringify(
+          { overwrittenServerDraft: server === null ? null : { ...server, revision: draftRevision(server) } },
+          null,
+          2,
+        )}`,
+      };
+    }
+
+    return {
+      ok: false,
+      response: jsonErrorResponse(staleDraftPayload({
+        error: verdict.verdict === 'MISSING' ? 'MISSING_DRAFT' : 'STALE_DRAFT',
+        draftId,
+        verdict,
+        server,
+        cached,
+      })),
+    };
+  }
+
   server.registerTool('ofw_list_drafts', {
     description: 'List draft messages from the local OurFamilyWizard cache. Call ofw_sync_messages first if the cache is empty.',
     annotations: { readOnlyHint: true },
@@ -427,15 +522,25 @@ export function registerMessageTools(
   }, async (args) => {
     const page = args.page ?? 1;
     const size = args.size ?? 50;
-    const drafts = await cacheProvider().listDrafts({ page, size });
-    const payload = drafts.length === 0
-      ? { drafts: [], note: 'Cache empty. Call ofw_sync_messages to populate.' }
-      : { drafts };
+    const cache = cacheProvider();
+    const cacheStatus = await getDraftsCacheStatus(cache);
+    const rows = await cache.listDrafts({ page, size });
+    // Every draft carries the concurrency token to echo back on a write, plus
+    // whether the last sync actually compared this cache against OFW.
+    const drafts = rows.map((d) => ({ ...d, revision: draftRevision(d), cacheStatus }));
+
+    if (drafts.length === 0) {
+      return jsonResponse({ drafts: [], note: 'Cache empty. Call ofw_sync_messages to populate.' });
+    }
+    const payload: Record<string, unknown> = { drafts };
+    if (cacheStatus !== 'fresh') {
+      payload.note = 'cacheStatus "unverified": the last ofw_sync_messages did not finish checking the drafts folder against OurFamilyWizard, so these bodies may be behind the server (drafts edited in the OFW web app do not bump any timestamp). Run ofw_sync_messages again before relying on them. Writes are guarded regardless — ofw_save_draft and ofw_delete_draft re-check the server and refuse a stale overwrite.';
+    }
     return jsonResponse(payload);
   });
 
   if (allowDrafts) server.registerTool('ofw_save_draft', {
-    description: 'Save a message as a draft in OurFamilyWizard. Recipients are optional. Pass messageId to replace an existing draft — note that under the hood this creates a NEW draft and deletes the old one (OFW\'s update-in-place endpoint silently no-ops while echoing the posted body, so we don\'t use it); the response.id will be the NEW id, not the messageId you passed, and the change is documented in a transparency NOTE in the response. If replyToId is provided, the cache may rewrite it to the latest reply in the thread (note included in response). Attach files by passing their fileIds (from ofw_upload_attachment) in myFileIDs. After saving, the tool re-fetches the draft from OFW to populate the local cache from authoritative server state.',
+    description: 'Save a message as a draft in OurFamilyWizard. Recipients are optional. Pass messageId to replace an existing draft — note that under the hood this creates a NEW draft and deletes the old one (OFW\'s update-in-place endpoint silently no-ops while echoing the posted body, so we don\'t use it); the response.id will be the NEW id, not the messageId you passed, and the change is documented in a transparency NOTE in the response. If replyToId is provided, the cache may rewrite it to the latest reply in the thread (note included in response). Attach files by passing their fileIds (from ofw_upload_attachment) in myFileIDs. After saving, the tool re-fetches the draft from OFW to populate the local cache from authoritative server state. SAFETY: because replacing DESTROYS the old draft rather than merging, passing messageId first re-reads that draft from OFW and REFUSES the write if it changed since you read it (drafts edited in the OFW web app do not bump any timestamp, so the local cache can be silently behind). The refusal returns the current server body under serverBody — merge your edit into it and retry with expectedRevision.',
     annotations: { readOnlyHint: false },
     inputSchema: {
       subject: z.string().describe('Message subject'),
@@ -444,9 +549,26 @@ export function registerMessageTools(
       messageId: z.number().describe('ID of an existing draft to replace (the new draft will have a new id; the old is deleted)').optional(),
       replyToId: z.number().describe('ID of the message this draft replies to').optional(),
       myFileIDs: z.array(z.number()).describe('Attachment file ids (from ofw_upload_attachment)').optional(),
+      expectedRevision: z.string().describe('With messageId: the `revision` you got from ofw_list_drafts/ofw_get_message for that draft. Asserts you are replacing THAT version. If the draft changed on OFW since, the write is refused and the current server body is returned. Omit and the tool compares the server against the local cache instead — omitting never means "overwrite anyway".').optional(),
+      force: z.boolean().describe('Default false. Overwrite even when the draft changed on OurFamilyWizard since you read it. The discarded server version is echoed back in the response. Only use after showing the user the conflict.').optional(),
     },
   }, async (args) => {
     const cache = cacheProvider();
+
+    // Guard BEFORE the POST: refusing after creating a replacement would leave
+    // a stray draft behind for a write we then decline to finish.
+    let forceNote: string | null = null;
+    if (args.messageId !== undefined) {
+      const guard = await guardDestructiveDraftOp({
+        cache,
+        draftId: args.messageId,
+        expectedRevision: args.expectedRevision,
+        force: args.force ?? false,
+        action: 'replace',
+      });
+      if (!guard.ok) return guard.response;
+      forceNote = guard.note;
+    }
     const requestedReplyTo = args.replyToId ?? null;
     let resolvedReplyTo = requestedReplyTo;
     let rewriteNote: string | null = null;
@@ -482,6 +604,7 @@ export function registerMessageTools(
     let persisted: DraftRow | null = null;
     let replaceNote: string | null = null;
     let verifyNote: string | null = null;
+    let newRevision: string | null = null;
 
     if (newId !== null) {
       verifyNote = verifyWriteLanded('draft', { subject: args.subject, body: args.body }, detail);
@@ -495,6 +618,7 @@ export function registerMessageTools(
         listData: detail,
       };
       await cache.upsertDraft(persisted);
+      newRevision = draftRevision(persisted);
 
       // Replace-path: caller passed messageId, so they want the old draft
       // gone. Delete it after the new one is safely created+cached.
@@ -504,27 +628,45 @@ export function registerMessageTools(
           await cache.deleteDraft(args.messageId);
           replaceNote = `NOTE: ofw_save_draft replaced draft ${args.messageId} via create-then-delete. The new draft id is ${newId}; the old draft has been deleted. (OFW's update-in-place endpoint silently no-ops on subsequent updates, so we never use it. If you cached the old id anywhere, replace it with the new one.)`;
         } catch (e) {
-          replaceNote = `WARNING: New draft ${newId} created successfully, but failed to delete the old draft (${args.messageId}): ${(e as Error).message}. You may want to clean it up manually with ofw_delete_draft.`;
+          // Partial-failure safety: the new draft is already created and
+          // cached, so BOTH drafts now exist. That is the correct end state —
+          // deleting first and failing to create would have lost the content.
+          replaceNote = `WARNING: New draft ${newId} was created successfully, but the old draft ${args.messageId} could NOT be deleted: ${(e as Error).message}. BOTH drafts now exist on OurFamilyWizard and nothing was lost. Verify ${newId} reads correctly, then remove ${args.messageId} with ofw_delete_draft.`;
         }
       }
     }
 
-    const responseObj = persisted ?? raw;
+    const responseObj = persisted !== null
+      ? { ...persisted, revision: newRevision, cacheStatus: 'fresh' }
+      : raw;
     const text = responseObj ? JSON.stringify(responseObj, null, 2) : 'Draft saved.';
-    const notes = [rewriteNote, verifyNote, replaceNote].filter((n): n is string => n !== null).join('\n\n');
+    const notes = [forceNote, rewriteNote, verifyNote, replaceNote].filter((n): n is string => n !== null).join('\n\n');
     return textResponse(notes ? `${notes}\n\n${text}` : text);
   });
 
   if (allowDrafts) server.registerTool('ofw_delete_draft', {
-    description: 'Delete a draft message from OurFamilyWizard. Also removes the draft from the local cache.',
+    description: 'Delete a draft message from OurFamilyWizard. Also removes the draft from the local cache. Before deleting, the draft is re-read from OFW and the delete is REFUSED if it changed since you last read it (the current server body is returned so nothing is lost) — pass expectedRevision to assert which version you mean, or force:true to delete regardless.',
     annotations: { destructiveHint: true },
     inputSchema: {
       messageId: z.number().describe('Draft message ID to delete'),
+      expectedRevision: z.string().describe('The `revision` you got from ofw_list_drafts/ofw_get_message. Asserts you are deleting THAT version; if the draft changed on OFW since, the delete is refused and the current server body returned.').optional(),
+      force: z.boolean().describe('Default false. Delete even if the draft changed on OurFamilyWizard since you read it. The discarded server version is echoed back in the response.').optional(),
     },
   }, async (args) => {
+    const cache = cacheProvider();
+    const guard = await guardDestructiveDraftOp({
+      cache,
+      draftId: args.messageId,
+      expectedRevision: args.expectedRevision,
+      force: args.force ?? false,
+      action: 'delete',
+    });
+    if (!guard.ok) return guard.response;
+
     const data = await deleteOFWMessages(client, [args.messageId]);
-    await cacheProvider().deleteDraft(args.messageId);
-    return data ? jsonResponse(data) : textResponse('Draft deleted.');
+    await cache.deleteDraft(args.messageId);
+    const text = data ? JSON.stringify(data, null, 2) : 'Draft deleted.';
+    return textResponse(guard.note ? `${guard.note}\n\n${text}` : text);
   });
 
   server.registerTool('ofw_get_unread_sent', {
