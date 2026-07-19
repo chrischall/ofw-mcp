@@ -1,5 +1,18 @@
 # Changelog
 
+## [2.6.5](https://github.com/chrischall/ofw-mcp/compare/v2.6.4...v2.6.5) (2026-07-19)
+
+
+### Bug Fixes
+
+* **ci:** run the Workers test pool in CI ([#155](https://github.com/chrischall/ofw-mcp/issues/155)) ([8caa631](https://github.com/chrischall/ofw-mcp/commit/8caa6314bfd0b2e58cbaceef137a640196fef527))
+
+
+### Documentation
+
+* replace duplicated fleet policy with a pointer ([#151](https://github.com/chrischall/ofw-mcp/issues/151)) ([b4c0e5e](https://github.com/chrischall/ofw-mcp/commit/b4c0e5e9f74183ee4579b5ed97018cc480fd91f5))
+* restore the branch-protection ruleset specifics ([#154](https://github.com/chrischall/ofw-mcp/issues/154)) ([d40024c](https://github.com/chrischall/ofw-mcp/commit/d40024cb65391be6f1602941ab4116592f7cd3e5))
+
 ## [2.6.4](https://github.com/chrischall/ofw-mcp/compare/v2.6.3...v2.6.4) (2026-07-18)
 
 
