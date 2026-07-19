@@ -168,7 +168,7 @@ To skip a release temporarily, close release-please's PR — it'll re-open with 
 
 Recovery from a flaky publish step: re-run the failed `release-please.yml` workflow run from the GitHub Actions UI. The publish job's npm step is idempotent (skips if already published); MCP Registry publish is idempotent in practice; `gh release upload --clobber` overwrites any prior uploads.
 
-The branch-and-PR shape is still required because `main` is protected by the *main protection (PR + ci)* ruleset.
+The branch-and-PR shape is still required because `main` is protected by **two** rulesets: *Block force-push and deletion on main* and *main protection (PR + ci)* — the latter requires every change to go through a PR and `ci` to pass (strict mode: the branch must be up to date with `main`). No bypass actors; admins are not exempt. Inspect with `gh api /repos/chrischall/ofw-mcp/rulesets`.
 
 <!-- pr-workflow:v3 -->
 ## Pull requests & release notes
