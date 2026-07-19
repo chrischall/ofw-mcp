@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.6.6](https://github.com/chrischall/ofw-mcp/compare/v2.6.5...v2.6.6) (2026-07-19)
+
+
+### Bug Fixes
+
+* **deps:** move to workers-oauth-provider 0.8.x ([#156](https://github.com/chrischall/ofw-mcp/issues/156)) ([356f735](https://github.com/chrischall/ofw-mcp/commit/356f735e53432bd7259787f33d186f3f889bedf5))
+
 ## [2.6.5](https://github.com/chrischall/ofw-mcp/compare/v2.6.4...v2.6.5) (2026-07-19)
 
 
