@@ -170,66 +170,29 @@ Recovery from a flaky publish step: re-run the failed `release-please.yml` workf
 
 The branch-and-PR shape is still required because `main` is protected by the *main protection (PR + ci)* ruleset.
 
-<!-- pr-workflow:v4 -->
+<!-- pr-workflow:v3 -->
 ## Pull requests & release notes
 
-**Default workflow: branch + PR. Direct pushes to `main` are blocked by the *main protection (PR + ci)* ruleset.** The PR mechanism is also how release-please learns what's queued: every merged PR's conventional-commit prefixes (`fix:`, `feat:`, etc.) drive both the next version bump and the CHANGELOG section.
+Fleet policy — Conventional-Commit PR titles, labels, the auto-review /
+auto-merge ladder, auto-review follow-up issues, PR timing, and release PRs —
+lives in `~/.claude/CLAUDE.md`. Don't restate it here; the copies drifted.
 
-PR handling is **source-aware**:
+Shared technical conventions (publishing, bundling, versioning guards,
+write-verification, transport archetypes, testing traps) live in
+[`chrischall/workflows`](https://github.com/chrischall/workflows):
+`docs/fleet-conventions.md`, plus `README.md` for the CI pipeline contract.
 
-| PR author                          | `auto-review` (Claude verdict + Copilot) | Auto-merge                                                                                       |
-|------------------------------------|-------------------------------------------|--------------------------------------------------------------------------------------------------|
-| **You / same-repo collaborators**  | Yes                                       | Yes when Claude verdict = `pass` OR `warn` AND CI is green. Only `fail` requires a manual `ready-to-merge`. |
-| **External fork PRs**              | No (workflow skips — fork PRs can't see secrets). Manual: `@claude review this` in a comment triggers `claude.yml`. | No — you merge manually after reviewing |
-| **Dependabot / bots**              | No (skipped to keep noise down)           | Yes, armed immediately; merges when CI is green                                                  |
+Repo-specific: PR handling here is **source-aware**.
 
-`pr-auto-review.yml` is a thin stub that calls `chrischall/workflows/.github/workflows/reusable-pr-auto-review.yml@main` on `pull_request` events; the reusable pipeline runs `claude-code-action` with a JSON-schema-bound verdict (`pass` / `warn` / `fail`). Claude (posting as `claude[bot]` via the installed Claude GitHub App) leaves inline comments on specific lines plus a top-level summary, and emits the verdict to `structured_output`. On `verdict == pass` OR `warn` the pipeline adds `ready-to-merge` via RELEASE_PAT and `auto-merge.yml` (also a stub → `reusable-auto-merge.yml@main`) arms `gh pr merge --auto`. Required status check `ci` still gates the actual merge.
+| PR author | `auto-review` | Auto-merge |
+|---|---|---|
+| You / same-repo collaborators | Yes | Yes on `pass` OR `warn` + green CI |
+| External fork PRs | No — the workflow skips them (fork PRs can't see secrets). Comment `@claude review this` to trigger `claude.yml`. | No — merge manually after review |
+| Dependabot / bots | No (skipped to keep noise down) | Yes, armed immediately; merges on green CI |
 
-The workflow uses `pull_request` (not `pull_request_target`) because Anthropic's GitHub App OIDC backend doesn't accept `pull_request_target` events (see [anthropics/claude-code-action#713](https://github.com/anthropics/claude-code-action/issues/713)). The tradeoff is that fork PRs are skipped entirely — for those, mention `@claude` in a PR comment to invoke the ad-hoc dispatch in `claude.yml`.
-
-Verdict semantics (Claude follows the official `code-review` plugin's severity model with confidence ≥80 to count):
-- `pass` — no 🔴 Important findings. Arms auto-merge.
-- `warn` — at least one 🟡 Nit but no 🔴 Important. Still arms auto-merge; the nits are carried forward to an `auto-review-followup` issue (see below).
-- `fail` — at least one 🔴 Important finding. Blocks: opens/updates the follow-up issue and does NOT arm `ready-to-merge`.
-
-Override: only a `fail` needs a manual override — add `ready-to-merge` by hand and it still arms auto-merge. To suppress auto-merge on a `pass`/`warn`, remove the label or close-and-reopen the PR draft.
-
-### Auto-review follow-up issues
-
-When a PR's auto-review verdict is `warn` or `fail`, the `chrischall/workflows` pipeline opens or updates a single `auto-review-followup` issue ("Auto-review follow-ups for PR #N") whose checklist captures every finding, and links it from the PR's `<!-- auto-review-verdict -->` comment (`📋 Tracking follow-ups: #N`). `warn` (nits only) still auto-merges — the issue carries the nits forward, so most nits are fixed in a *later* PR; `fail` blocks until the important findings are addressed on the PR itself.
-
-When asked to address the auto-review comments / review findings on a PR:
-
-1. Read the verdict comment, open the linked `auto-review-followup` issue, and treat its checklist as the work list (alongside any inline review comments).
-2. Resolve each item, checking off only what you've **verified** is genuinely fixed.
-3. If every item is resolved on the current PR, add `Closes #<issue>` to that PR's body so the merge closes it; if some are deferred, check off only the resolved ones and leave the issue open.
-4. For nits whose `warn` PR already auto-merged, address them in a follow-up PR that references `Closes #<issue>`.
-
-(Mirrors the fleet-wide convention in `~/.claude/CLAUDE.md`.)
-
-PR titles use conventional-commit prefixes — release-please reads them to pick the next version and to write the CHANGELOG entry (see [Conventional Commits](https://www.conventionalcommits.org/)):
-
-| Prefix       | Bumps    | CHANGELOG section            |
-|--------------|----------|------------------------------|
-| `feat:`      | minor    | Features                     |
-| `fix:`       | patch    | Bug Fixes                    |
-| `perf:`      | patch    | Performance                  |
-| `revert:`    | patch    | Reverts                      |
-| `refactor:`  | none     | Refactor                     |
-| `docs:`      | none     | Documentation                |
-| `test:`      | none     | hidden                       |
-| `build:`     | none     | hidden                       |
-| `ci:`        | none     | hidden                       |
-| `chore:`     | none     | hidden                       |
-| `feat!:` / `BREAKING CHANGE:` | major | Features (with ⚠ marker) |
-
-The bullet text in the CHANGELOG is the part after the prefix — write it like a user-facing changelog entry (`ofw_sync_messages: resume from saved cursor`), not internal shorthand (`sync tweaks`).
-
-**Exception for first-party dependency bumps.** When bumping a package we own (`@chrischall/mcp-utils`, `@chrischall/realty-core`, `@fetchproxy/server` — anything published from a chrischall-owned repo), use a `feat:` or `fix:` prefix instead of `chore:`/`build(deps):` (and if you're labeling the PR, `enhancement`/`bug` instead of `dependencies`). Those bumps deliver real product fixes or features through us, so they should drive a release-please version bump and show up under Features/Bug Fixes in the release notes — not get hidden as an invisible `chore`/under "Dependencies" (which doesn't trigger a release).
-
-Open with `gh pr create`; you don't need any labels. Let Claude's review verdict add `ready-to-merge` for you. If you want to skip the review on a trivial chore, add `--label ready-to-merge` at PR-create time and it'll arm immediately. Dependabot PRs auto-arm without it. The repo is squash-only (merge commits and rebase are blocked — `auto-merge.yml` calls `gh pr merge --auto --squash`, so every PR lands as a single squash commit whose subject is the PR title); if you call `gh pr merge` manually, don't pass `--merge`/`--rebase` or the call will fail.
-
-`main` is protected by two rulesets: *Block force-push and deletion on main* and *main protection (PR + ci)* — the latter requires every change to go through a PR and `ci` to pass (strict mode = branch must be up-to-date with main). No bypass actors; admins are not exempt. See `gh api /repos/chrischall/ofw-mcp/rulesets` to inspect.
+The fork gap is structural: the workflow uses `pull_request`, not
+`pull_request_target`, because Anthropic's GitHub App OIDC backend rejects
+`pull_request_target` ([claude-code-action#713](https://github.com/anthropics/claude-code-action/issues/713)).
 
 ## Plugin / Distribution
 
