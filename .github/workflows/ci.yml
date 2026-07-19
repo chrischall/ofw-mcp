@@ -22,5 +22,5 @@ jobs:
     with:
       node-version: "26"
       build-command: npm run build
-      test-command: npm run test:coverage
+      test-command: npm run test:coverage && npm run worker:test
       gate-mode: status
