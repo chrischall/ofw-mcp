@@ -7,6 +7,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { OFWClient } from '../../src/client.js';
 import { registerMessageTools } from '../../src/tools/messages.js';
 import { NodeAttachmentIO } from '../../src/tools/attachments.js';
+import { draftRevision } from '../../src/tools/draft-freshness.js';
 import { OFWCache } from '../../src/cache/node.js';
 import type {
   CacheStore, MessageRow, DraftRow, UpsertAttachmentInput, AttachmentRow,
@@ -103,11 +104,12 @@ describe('ofw_sync_messages', () => {
           { id: '333', folderType: 'DRAFTS' },
         ],
       })
+      // drafts run first now, then inbox (1 new + empty page), then sent
+      .mockResolvedValueOnce({ data: [] })
       .mockResolvedValueOnce({ data: [{
         id: 1, subject: 'New', from: { name: 'Alice' }, date: { dateTime: '2026-05-04T12:00:00Z' },
         showNeverViewed: true, recipients: [],
       }] })
-      .mockResolvedValueOnce({ data: [] })
       .mockResolvedValueOnce({ data: [] })
       .mockResolvedValueOnce({ data: [] });
 
@@ -997,8 +999,15 @@ describe('ofw_save_draft', () => {
     // OFW's POST /pub/v3/messages with messageId silently no-ops. We
     // sidestep the endpoint entirely: POST without messageId (creates a
     // new draft), then DELETE the old one.
+    upsertDraft({
+      id: 99, subject: 'Old subject', body: 'Old body', recipients: [], replyToId: 55,
+      modifiedAt: '2026-05-04T00:00:00Z', listData: {},
+    });
     const client = new OFWClient();
     const spy = vi.spyOn(client, 'request')
+      .mockResolvedValueOnce({                                       // freshness GET (matches cache)
+        subject: 'Old subject', body: 'Old body', replyToId: 55, recipients: [],
+      })
       .mockResolvedValueOnce({ entityId: 1234 })                    // POST → new id
       .mockResolvedValueOnce({                                       // GET detail
         id: 1234, subject: 'Updated subject', body: 'Updated body',
@@ -1053,8 +1062,13 @@ describe('ofw_save_draft', () => {
   });
 
   it('surfaces a WARNING when the create succeeds but the old-draft delete fails', async () => {
+    upsertDraft({
+      id: 444, subject: 'old', body: 'old', recipients: [], replyToId: null,
+      modifiedAt: '2026-05-04T00:00:00Z', listData: {},
+    });
     const client = new OFWClient();
     vi.spyOn(client, 'request')
+      .mockResolvedValueOnce({ subject: 'old', body: 'old', replyToId: null, recipients: [] })
       .mockResolvedValueOnce({ entityId: 555 })
       .mockResolvedValueOnce({
         id: 555, subject: 's', body: 'b',
@@ -1066,10 +1080,13 @@ describe('ofw_save_draft', () => {
       subject: 's', body: 'b', messageId: 444,
     });
     expect(result.content[0].text).toMatch(/WARNING/);
-    expect(result.content[0].text).toMatch(/failed to delete the old draft \(444\)/);
+    expect(result.content[0].text).toMatch(/could NOT be deleted/);
     expect(result.content[0].text).toMatch(/delete blew up/);
-    // The new draft is still committed locally.
+    // Partial-failure safety: the new draft is committed AND the old one is
+    // kept (both exist) — the create ran before the delete, so nothing is lost.
     expect(getDraft(555)?.body).toBe('b');
+    expect(getDraft(444)).not.toBeNull();
+    expect(result.content[0].text).toMatch(/BOTH drafts now exist/);
   });
 });
 
@@ -1151,31 +1168,402 @@ describe('ofw_save_draft (thread-tip + cache upsert)', () => {
   });
 });
 
+describe('ofw_save_draft — stale-overwrite guard', () => {
+  // The incident this guards: a user edited a draft in the OFW web app, the
+  // edit never reached the cache, and ofw_save_draft's create-then-delete
+  // destroyed it. Replacing a draft does not merge — it DESTROYS.
+  const cachedBase = {
+    id: 500, subject: 'Pickup', body: 'cached body', recipients: [],
+    replyToId: null, modifiedAt: '2026-07-19T12:42:00Z', listData: {},
+  };
+  const serverEdited = {
+    subject: 'Pickup', body: 'the edits made in the web app', replyToId: null, recipients: [],
+  };
+
+  it('refuses to overwrite when the server draft diverges from the cached base', async () => {
+    upsertDraft(cachedBase);
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request').mockResolvedValueOnce(serverEdited);
+    setup(client);
+
+    const result = await handlers.get('ofw_save_draft')!({
+      subject: 'Pickup', body: 'my new body', messageId: 500,
+    });
+
+    expect(result.isError).toBe(true);
+    const payload = JSON.parse(result.content[0].text);
+    expect(payload.error).toBe('STALE_DRAFT');
+    expect(payload.draftId).toBe(500);
+    expect(payload.changedFields).toContain('body');
+    // The content we declined to destroy rides along, so it is not lost.
+    expect(payload.serverBody).toBe('the edits made in the web app');
+    expect(payload.cachedBody).toBe('cached body');
+    expect(payload.recovery).toMatch(/expectedRevision/);
+    // NO destructive side effect whatsoever.
+    expect(spy.mock.calls.some((c) => c[0] === 'POST')).toBe(false);
+    expect(spy.mock.calls.some((c) => c[0] === 'DELETE')).toBe(false);
+    expect(getDraft(500)?.body).toBe('cached body');
+  });
+
+  it('refuses when expectedRevision is older than the live server revision', async () => {
+    upsertDraft(cachedBase);
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request').mockResolvedValueOnce(serverEdited);
+    setup(client);
+
+    const result = await handlers.get('ofw_save_draft')!({
+      subject: 'Pickup',
+      body: 'my new body',
+      messageId: 500,
+      expectedRevision: draftRevision({
+        subject: 'Pickup', body: 'cached body', replyToId: null, recipients: [],
+      }),
+    });
+
+    expect(result.isError).toBe(true);
+    expect(JSON.parse(result.content[0].text).reason).toMatch(/expectedRevision/);
+    expect(spy.mock.calls.some((c) => c[0] === 'DELETE')).toBe(false);
+  });
+
+  it('allows the overwrite when expectedRevision matches the server, deleting the old id only after the new one is confirmed', async () => {
+    upsertDraft(cachedBase);
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request')
+      .mockResolvedValueOnce(serverEdited)                    // freshness GET
+      .mockResolvedValueOnce({ entityId: 501 })               // POST create
+      .mockResolvedValueOnce({                                // GET detail (confirms create)
+        id: 501, subject: 'Pickup', body: 'my new body',
+        date: { dateTime: '2026-07-19T13:30:00Z' },
+      })
+      .mockResolvedValueOnce({});                             // DELETE old
+    setup(client);
+
+    const result = await handlers.get('ofw_save_draft')!({
+      subject: 'Pickup',
+      body: 'my new body',
+      messageId: 500,
+      expectedRevision: draftRevision(serverEdited),
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.content[0].text).toMatch(/replaced draft 500 via create-then-delete/);
+    expect(getDraft(501)?.body).toBe('my new body');
+    expect(getDraft(500)).toBeNull();
+
+    // Ordering matters: the replacement must be confirmed before the old draft
+    // is destroyed, so a failed create can never leave the user with neither.
+    const kinds = spy.mock.calls.map((c) => c[0]);
+    expect(kinds.indexOf('POST')).toBeLessThan(kinds.indexOf('DELETE'));
+    expect(kinds.lastIndexOf('GET')).toBeLessThan(kinds.indexOf('DELETE'));
+  });
+
+  it('force:true overwrites a stale draft but echoes the discarded server version and warns', async () => {
+    upsertDraft(cachedBase);
+    const warn = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce(serverEdited)
+      .mockResolvedValueOnce({ entityId: 501 })
+      .mockResolvedValueOnce({
+        id: 501, subject: 'Pickup', body: 'my new body',
+        date: { dateTime: '2026-07-19T13:30:00Z' },
+      })
+      .mockResolvedValueOnce({});
+    setup(client);
+
+    const result = await handlers.get('ofw_save_draft')!({
+      subject: 'Pickup', body: 'my new body', messageId: 500, force: true,
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.content[0].text).toMatch(/WARNING: force:true overrode a STALE/);
+    // The destroyed content is recoverable from the tool result itself.
+    expect(result.content[0].text).toMatch(/the edits made in the web app/);
+    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/force:true overrode a STALE verdict on draft 500/));
+    expect(getDraft(501)?.body).toBe('my new body');
+    warn.mockRestore();
+  });
+
+  it('aborts the write when the freshness check itself fails (never a blind overwrite)', async () => {
+    upsertDraft(cachedBase);
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request').mockRejectedValueOnce(
+      new Error('OFW API error: 503 Service Unavailable for GET /pub/v3/messages/500'),
+    );
+    setup(client);
+
+    const result = await handlers.get('ofw_save_draft')!({
+      subject: 'Pickup', body: 'my new body', messageId: 500,
+    });
+
+    expect(result.isError).toBe(true);
+    expect(JSON.parse(result.content[0].text).error).toBe('FRESHNESS_CHECK_FAILED');
+    expect(spy.mock.calls.some((c) => c[0] === 'POST')).toBe(false);
+    expect(spy.mock.calls.some((c) => c[0] === 'DELETE')).toBe(false);
+    expect(getDraft(500)?.body).toBe('cached body');
+  });
+
+  it('force:true proceeds even when the freshness check could not run, and says so', async () => {
+    upsertDraft(cachedBase);
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockRejectedValueOnce(new Error('OFW API error: 503 Service Unavailable for GET /pub/v3/messages/500'))
+      .mockResolvedValueOnce({ entityId: 501 })
+      .mockResolvedValueOnce({
+        id: 501, subject: 'Pickup', body: 'my new body',
+        date: { dateTime: '2026-07-19T13:30:00Z' },
+      })
+      .mockResolvedValueOnce({});
+    setup(client);
+
+    const result = await handlers.get('ofw_save_draft')!({
+      subject: 'Pickup', body: 'my new body', messageId: 500, force: true,
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.content[0].text).toMatch(/current state could not be read/);
+    expect(result.content[0].text).toMatch(/NOT recoverable/);
+  });
+
+  it('force:true on a draft already gone from OFW reports that there was nothing to preserve', async () => {
+    upsertDraft(cachedBase);
+    const warn = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockRejectedValueOnce(new Error('OFW API error: 404 Not Found for GET /pub/v3/messages/500'))
+      .mockResolvedValueOnce({ entityId: 501 })
+      .mockResolvedValueOnce({
+        id: 501, subject: 'Pickup', body: 'my new body',
+        date: { dateTime: '2026-07-19T13:30:00Z' },
+      })
+      .mockResolvedValueOnce({});
+    setup(client);
+
+    const result = await handlers.get('ofw_save_draft')!({
+      subject: 'Pickup', body: 'my new body', messageId: 500, force: true,
+    });
+
+    expect(result.content[0].text).toMatch(/no longer existed on OurFamilyWizard/);
+    expect(result.content[0].text).toMatch(/"overwrittenServerDraft": null/);
+    warn.mockRestore();
+  });
+
+  it('refuses a replace when the id is absent from the cache (no base to compare)', async () => {
+    const client = new OFWClient();
+    vi.spyOn(client, 'request').mockResolvedValueOnce(serverEdited);
+    setup(client);
+
+    const result = await handlers.get('ofw_save_draft')!({
+      subject: 'Pickup', body: 'my new body', messageId: 500,
+    });
+
+    expect(result.isError).toBe(true);
+    expect(JSON.parse(result.content[0].text).serverBody).toBe('the edits made in the web app');
+  });
+
+  it('leaves the plain create path (no messageId) unguarded — nothing is destroyed', async () => {
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request')
+      .mockResolvedValueOnce({ entityId: 600 })
+      .mockResolvedValueOnce({
+        id: 600, subject: 'Fresh', body: 'brand new',
+        date: { dateTime: '2026-07-19T13:30:00Z' },
+      });
+    setup(client);
+
+    const result = await handlers.get('ofw_save_draft')!({ subject: 'Fresh', body: 'brand new' });
+
+    expect(result.isError).toBeFalsy();
+    // First call is the POST — no freshness GET was needed.
+    expect(spy.mock.calls[0][0]).toBe('POST');
+    expect(getDraft(600)?.body).toBe('brand new');
+  });
+
+  it('after a sync that never verified drafts, a stale cached base still blocks the overwrite', async () => {
+    // Regression for the reported incident end-to-end: the drafts pass was
+    // deferred for budget, so the cache is unverified AND behind the server.
+    setMeta('drafts_cache_status', 'unverified');
+    upsertDraft(cachedBase);
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request').mockResolvedValueOnce(serverEdited);
+    setup(client);
+
+    const result = await handlers.get('ofw_save_draft')!({
+      subject: 'Pickup', body: 'my new body', messageId: 500,
+    });
+
+    expect(result.isError).toBe(true);
+    expect(JSON.parse(result.content[0].text).error).toBe('STALE_DRAFT');
+    expect(spy.mock.calls.some((c) => c[0] === 'DELETE')).toBe(false);
+  });
+});
+
+describe('draft reads expose revision + cacheStatus', () => {
+  const row = {
+    id: 500, subject: 'Pickup', body: 'cached body', recipients: [],
+    replyToId: null, modifiedAt: '2026-07-19T12:42:00Z', listData: {},
+  };
+
+  it('ofw_list_drafts stamps each draft with a revision and the cache status', async () => {
+    upsertDraft(row);
+    setMeta('drafts_cache_status', 'fresh');
+    setup(makeClient({}));
+
+    const parsed = JSON.parse((await handlers.get('ofw_list_drafts')!({})).content[0].text);
+
+    expect(parsed.drafts[0].revision).toBe(draftRevision({
+      subject: 'Pickup', body: 'cached body', replyToId: null, recipients: [],
+    }));
+    expect(parsed.drafts[0].cacheStatus).toBe('fresh');
+    expect(parsed.note).toBeUndefined();
+  });
+
+  it('ofw_list_drafts reports unverified and warns when the drafts pass was deferred', async () => {
+    upsertDraft(row);
+    setMeta('drafts_cache_status', 'unverified');
+    setup(makeClient({}));
+
+    const parsed = JSON.parse((await handlers.get('ofw_list_drafts')!({})).content[0].text);
+
+    expect(parsed.drafts[0].cacheStatus).toBe('unverified');
+    expect(parsed.note).toMatch(/may be behind the server/);
+  });
+
+  it('treats a never-synced drafts cache as unverified', async () => {
+    upsertDraft(row);
+    setup(makeClient({}));
+
+    const parsed = JSON.parse((await handlers.get('ofw_list_drafts')!({})).content[0].text);
+
+    expect(parsed.drafts[0].cacheStatus).toBe('unverified');
+  });
+
+  it('ofw_get_message returns revision + cacheStatus for a draft id', async () => {
+    upsertDraft(row);
+    setMeta('drafts_cache_status', 'fresh');
+    setup(makeClient({}));
+
+    const parsed = JSON.parse(
+      (await handlers.get('ofw_get_message')!({ messageId: '500' })).content[0].text,
+    );
+
+    expect(parsed.folder).toBe('drafts');
+    expect(parsed.cacheStatus).toBe('fresh');
+    expect(parsed.revision).toBe(draftRevision({
+      subject: 'Pickup', body: 'cached body', replyToId: null, recipients: [],
+    }));
+  });
+});
+
 describe('ofw_delete_draft', () => {
-  it('deletes a draft by messageId using multipart form', async () => {
-    const client = makeClient({});
+  // Every delete now re-reads the draft from OFW first (the freshness guard),
+  // so each test mocks that GET before the DELETE.
+  const seedDraft = (id: number): void => upsertDraft({
+    id, subject: 'D', body: 'b', recipients: [], replyToId: null,
+    modifiedAt: '2026-05-04T00:00:00Z', listData: {},
+  });
+  const serverMatching = { subject: 'D', body: 'b', replyToId: null, recipients: [] };
+
+  it('deletes a draft by messageId using multipart form when the cache is current', async () => {
+    seedDraft(42);
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce(serverMatching) // freshness GET
+      .mockResolvedValueOnce({}); // DELETE
     setup(client);
 
     const result = await handlers.get('ofw_delete_draft')!({ messageId: 42 });
 
     expect(client.request).toHaveBeenCalledWith('DELETE', '/pub/v1/messages', expect.any(FormData));
-    const form = (client.request as ReturnType<typeof vi.fn>).mock.calls[0][2] as FormData;
-    expect(form.get('messageIds')).toBe('42');
-    expect(result.content).toHaveLength(1);
+    const deleteCall = (client.request as ReturnType<typeof vi.fn>).mock.calls
+      .find((c) => c[0] === 'DELETE')!;
+    expect((deleteCall[2] as FormData).get('messageIds')).toBe('42');
     expect(result.content[0].type).toBe('text');
+    expect(result.isError).toBeFalsy();
   });
 
   it('removes the draft from cache after OFW delete', async () => {
-    upsertDraft({
-      id: 50, subject: 'D', body: 'b', recipients: [], replyToId: null,
-      modifiedAt: '2026-05-04T00:00:00Z', listData: {},
-    });
+    seedDraft(50);
     const client = new OFWClient();
-    vi.spyOn(client, 'request').mockResolvedValueOnce(null);
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce(serverMatching)
+      .mockResolvedValueOnce(null);
     setup(client);
 
     await handlers.get('ofw_delete_draft')!({ messageId: 50 });
     expect(getDraft(50)).toBeNull();
+  });
+
+  it('REFUSES to delete a draft that changed on OFW since it was cached', async () => {
+    seedDraft(50);
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request')
+      .mockResolvedValueOnce({ ...serverMatching, body: 'edited in the web app' });
+    setup(client);
+
+    const result = await handlers.get('ofw_delete_draft')!({ messageId: 50 });
+
+    expect(result.isError).toBe(true);
+    const payload = JSON.parse(result.content[0].text);
+    expect(payload.error).toBe('STALE_DRAFT');
+    expect(payload.serverBody).toBe('edited in the web app');
+    // No destructive side effect: no DELETE issued, draft still cached.
+    expect(spy.mock.calls.some((c) => c[0] === 'DELETE')).toBe(false);
+    expect(getDraft(50)).not.toBeNull();
+  });
+
+  it('deletes a changed draft when expectedRevision names the server version', async () => {
+    seedDraft(50);
+    const server = { ...serverMatching, body: 'edited in the web app' };
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce(server)
+      .mockResolvedValueOnce(null);
+    setup(client);
+
+    const result = await handlers.get('ofw_delete_draft')!({
+      messageId: 50,
+      expectedRevision: draftRevision({
+        subject: 'D', body: 'edited in the web app', replyToId: null, recipients: [],
+      }),
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(getDraft(50)).toBeNull();
+  });
+
+  it('force:true deletes a changed draft and echoes the discarded server version', async () => {
+    seedDraft(50);
+    const warn = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce({ ...serverMatching, body: 'edited in the web app' })
+      .mockResolvedValueOnce({ deleted: 1 });
+    setup(client);
+
+    const result = await handlers.get('ofw_delete_draft')!({ messageId: 50, force: true });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.content[0].text).toMatch(/force:true overrode a STALE/);
+    // The deleted content survives in the tool result.
+    expect(result.content[0].text).toMatch(/edited in the web app/);
+    expect(getDraft(50)).toBeNull();
+    warn.mockRestore();
+  });
+
+  it('reports MISSING_DRAFT without issuing a DELETE when the draft is gone from OFW', async () => {
+    seedDraft(50);
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request').mockRejectedValueOnce(
+      new Error('OFW API error: 404 Not Found for GET /pub/v3/messages/50'),
+    );
+    setup(client);
+
+    const result = await handlers.get('ofw_delete_draft')!({ messageId: 50 });
+
+    expect(result.isError).toBe(true);
+    expect(JSON.parse(result.content[0].text).error).toBe('MISSING_DRAFT');
+    expect(spy.mock.calls.some((c) => c[0] === 'DELETE')).toBe(false);
   });
 });
 

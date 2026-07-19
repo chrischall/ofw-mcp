@@ -464,6 +464,21 @@ export interface DraftSyncResult {
   done: boolean;
 }
 
+/**
+ * Meta key holding whether the drafts cache has been compared against OFW.
+ * `'fresh'` only after a COMPLETE drafts walk; `'unverified'` whenever a walk
+ * was deferred for budget. Read by ofw_list_drafts / ofw_get_message to stamp
+ * each draft's `cacheStatus`, and by the destructive draft tools to decide how
+ * loudly to warn. Absent (never synced) reads as unverified.
+ */
+export const DRAFTS_CACHE_STATUS_KEY = 'drafts_cache_status';
+
+export type DraftsCacheStatus = 'fresh' | 'unverified';
+
+export async function getDraftsCacheStatus(store: CacheStore): Promise<DraftsCacheStatus> {
+  return (await store.getMeta(DRAFTS_CACHE_STATUS_KEY)) === 'fresh' ? 'fresh' : 'unverified';
+}
+
 export async function syncDrafts(
   client: OFWClient,
   draftsFolderId: string,
@@ -472,6 +487,15 @@ export async function syncDrafts(
 ): Promise<DraftSyncResult> {
   // No budget → unbounded (local stdio): identical to the original walk.
   const b = budget ?? makeBudget(Number.POSITIVE_INFINITY);
+
+  // Deferring means we never compared the drafts cache to OFW on this call.
+  // Mark it unverified so reads can say so and the destructive draft tools
+  // know the cache is not a trustworthy base — the count we return here is
+  // "nothing applied", NOT "nothing changed on the server".
+  const defer = async (): Promise<DraftSyncResult> => {
+    await store.setMeta(DRAFTS_CACHE_STATUS_KEY, 'unverified');
+    return { synced: 0, done: false };
+  };
 
   // The reconciliation step below DELETES any cached draft not seen in the
   // listing, so a partial walk must apply NOTHING. We therefore buffer the
@@ -483,7 +507,7 @@ export async function syncDrafts(
   const items: DraftListItem[] = [];
   let page = 1;
   while (true) {
-    if (!b.take()) return { synced: 0, done: false };
+    if (!b.take()) return defer();
     const path = `/pub/v3/messages?folders=${encodeURIComponent(draftsFolderId)}&page=${page}&size=50&sort=date&sortDirection=desc`;
     const list = parseLenient(
       DraftListResponseSchema,
@@ -501,7 +525,7 @@ export async function syncDrafts(
   // direct UI edits don't bump it — so we can't skip the detail fetch.
   const rows: DraftRow[] = [];
   for (const item of items) {
-    if (!b.take()) return { synced: 0, done: false };
+    if (!b.take()) return defer();
     const detail = parseLenient(
       DraftDetailSchema,
       await client.request('GET', `/pub/v3/messages/${item.id}`),
@@ -547,6 +571,11 @@ export async function syncDrafts(
     if (!seenIds.has(id)) await store.deleteDraft(id);
   }
 
+  // The complete walk fetched every draft's DETAIL and reconciled deletions, so
+  // the cache is now known-equal to the server. Only here is `synced: 0`
+  // truthful as "verified no changes".
+  await store.setMeta(DRAFTS_CACHE_STATUS_KEY, 'fresh');
+
   return { synced, done: true };
 }
 
@@ -572,7 +601,18 @@ export interface SyncAllResult {
 }
 
 export async function syncAll(client: OFWClient, opts: SyncAllOptions, store: CacheStore): Promise<SyncAllResult> {
-  const folders = opts.folders ?? ['inbox', 'sent', 'drafts'];
+  const requested = opts.folders ?? ['inbox', 'sent', 'drafts'];
+  // Drafts go FIRST. They are the only folder a destructive tool
+  // (ofw_save_draft / ofw_delete_draft) reads as its base, and they are cheap
+  // and bounded — one list page plus one detail per draft. Running them last,
+  // behind inbox and sent, meant a bounded call (the Worker's
+  // OFW_SYNC_MAX_REQUESTS=40) spent its whole budget backfilling history and
+  // deferred drafts on every single call, so server-side draft edits stayed
+  // invisible indefinitely while the response reported `drafts: 0`.
+  const folders: FolderName[] = [
+    ...requested.filter((f) => f === 'drafts'),
+    ...requested.filter((f) => f !== 'drafts'),
+  ];
   // ONE budget shared across resolveFolderIds and every requested folder, in
   // order — so the whole invocation stays under the hosting subrequest cap.
   const budget = makeBudget(opts.maxRequests ?? Number.POSITIVE_INFINITY);
@@ -584,6 +624,7 @@ export async function syncAll(client: OFWClient, opts: SyncAllOptions, store: Ca
   const synced: Partial<Record<FolderName, number>> = {};
   let unreadInbox: UnreadHint[] = [];
   let done = true;
+  let draftsUnverified = false;
 
   for (const folder of folders) {
     if (folder === 'inbox') {
@@ -605,12 +646,22 @@ export async function syncAll(client: OFWClient, opts: SyncAllOptions, store: Ca
       if (!r.done) done = false;
     } else if (folder === 'drafts') {
       const r = await syncDrafts(client, ids.drafts, store, budget);
-      synced.drafts = r.synced;
-      if (!r.done) done = false;
+      // Only report a drafts count when the walk actually compared against
+      // OFW. A deferred walk applied nothing, and reporting its `0` as
+      // `drafts: 0` reads as "verified, no changes" — the exact lie that let a
+      // server-side draft edit be overwritten. Omit the number instead.
+      if (r.done) synced.drafts = r.synced;
+      else {
+        draftsUnverified = true;
+        done = false;
+      }
     }
   }
 
   const notes: string[] = [];
+  if (draftsUnverified) {
+    notes.push('The drafts folder was NOT checked against OurFamilyWizard on this call (the request budget ran out first), so no drafts count is reported and the cached drafts are marked "unverified". Cached draft bodies may be behind the server. Call ofw_sync_messages again — or ofw_sync_messages with folders:["drafts"] — before editing or deleting a draft.');
+  }
   if (unreadInbox.length > 0) {
     notes.push(`${unreadInbox.length} unread inbox messages cached without bodies. Call ofw_get_message(id) to read them — this will mark them as read on OFW.`);
   }
