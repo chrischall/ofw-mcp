@@ -3,9 +3,12 @@
 This is the operator runbook for standing up `ofw-mcp` as a hosted Cloudflare
 Worker — a "remote connector" that anyone you share the URL with can add to
 claude.ai (web, desktop, or mobile), each logging in with their own
-OurFamilyWizard account. It's a manual, one-time (per operator) process; there
-is no CI/CD path for it, and none of the steps below can be done by an agent
-since they require your own Cloudflare account.
+OurFamilyWizard account. The setup below is a one-time (per operator) process,
+and none of the steps can be done by an agent since they require your own
+Cloudflare account. Deploys after that are automatic: the `deploy-connector`
+job in `.github/workflows/release-please.yml` deploys the released tag through
+the shared `chrischall/workflows` reusable workflow, and **Actions →
+deploy-connector → Run workflow** deploys any ref on demand.
 
 If you just want the server on your own machine talking only to your own OFW
 account, you don't need any of this — see the main [README](../README.md) for
