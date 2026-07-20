@@ -69,7 +69,13 @@ jobs:
   deploy-connector:
     needs: release-please
     if: needs.release-please.outputs.release_created == 'true'
+    # Scoped down from the workflow-level contents:write/pull-requests:write
+    # that release-please needs; deploying only reads the tree.
+    permissions:
+      contents: read
     uses: chrischall/workflows/.github/workflows/reusable-mcp-connector-deploy.yml@main
     with:
       ref: ${{ needs.release-please.outputs.tag_name }}
-    secrets: inherit
+    secrets:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

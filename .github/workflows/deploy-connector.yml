@@ -9,9 +9,12 @@
 #     needs: release-please
 #     if: needs.release-please.outputs.release_created == 'true'
 #     uses: chrischall/workflows/.github/workflows/reusable-mcp-connector-deploy.yml@main
+#     permissions:
+#       contents: read      # scope down from release-please.yml's contents: write
 #     with:
 #       ref: ${{ needs.release-please.outputs.tag_name }}
-#     secrets: inherit
+#     secrets:
+#       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
 #
 # Requires a `CLOUDFLARE_API_TOKEN` repo secret (`set-fleet-secrets` adds it to
 # repos carrying a wrangler config).
@@ -44,4 +47,6 @@ jobs:
     uses: chrischall/workflows/.github/workflows/reusable-mcp-connector-deploy.yml@main
     with:
       ref: ${{ inputs.ref }}
-    secrets: inherit
+    secrets:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
