@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { getAttachmentsDir, getCacheDbPath, getCalendarWritesAllowed, getDefaultInlineAttachments, getCacheDir, getSyncMaxRequests, getWriteMode } from '../src/config.js';
+import { DEFAULT_FRESHNESS_TTL_SECONDS, getAttachmentsDir, getCacheDbPath, getCalendarWritesAllowed, getDefaultInlineAttachments, getCacheDir, getFreshnessTtlSeconds, getSyncMaxRequests, getWriteMode } from '../src/config.js';
 
 describe('getCacheDbPath', () => {
   let tmp: string;
@@ -251,5 +251,37 @@ describe('getCalendarWritesAllowed', () => {
     process.env.OFW_WRITE_MODE = 'readonly'; // fails closed to 'none'
     expect(getCalendarWritesAllowed()).toBe(false);
     expect(err).toHaveBeenCalled();
+  });
+});
+
+describe('getFreshnessTtlSeconds', () => {
+  let original: string | undefined;
+  beforeEach(() => {
+    original = process.env.OFW_FRESHNESS_TTL_SECONDS;
+    delete process.env.OFW_FRESHNESS_TTL_SECONDS;
+  });
+  afterEach(() => {
+    if (original === undefined) delete process.env.OFW_FRESHNESS_TTL_SECONDS;
+    else process.env.OFW_FRESHNESS_TTL_SECONDS = original;
+  });
+
+  it('defaults to 5 minutes when unset or blank', () => {
+    expect(getFreshnessTtlSeconds()).toBe(DEFAULT_FRESHNESS_TTL_SECONDS);
+    process.env.OFW_FRESHNESS_TTL_SECONDS = '   ';
+    expect(getFreshnessTtlSeconds()).toBe(DEFAULT_FRESHNESS_TTL_SECONDS);
+  });
+
+  it('honours a positive integer', () => {
+    process.env.OFW_FRESHNESS_TTL_SECONDS = '30';
+    expect(getFreshnessTtlSeconds()).toBe(30);
+  });
+
+  it('falls back to the default on junk rather than widening the window', () => {
+    // A bad value must never make stale data pass as fresh for longer, so
+    // every unusable input lands on the default instead of Infinity/NaN.
+    for (const bad of ['0', '-5', '1.5', 'soon', 'Infinity']) {
+      process.env.OFW_FRESHNESS_TTL_SECONDS = bad;
+      expect(getFreshnessTtlSeconds()).toBe(DEFAULT_FRESHNESS_TTL_SECONDS);
+    }
   });
 });

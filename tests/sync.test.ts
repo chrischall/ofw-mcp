@@ -1123,6 +1123,52 @@ describe('syncMessageFolder — bounded + resumable (budget)', () => {
     expect(newestOf('sent')).toBe(999);
   });
 
+  it('does NOT move the backfill cursor when the forward pass could not fetch anything', async () => {
+    // Regression. When the budget is already spent, walkPages returns before
+    // its first request with nextPage = startPage = 1. The old
+    // `Math.min(fwd.nextPage, savedResume)` then reset a deep cursor to page 1
+    // — discarding all backfill progress on ZERO information.
+    //
+    // Live impact: on the Worker (OFW_SYNC_MAX_REQUESTS=40), a user with
+    // enough drafts to eat the whole budget — and drafts run first — left
+    // inbox/sent with no budget on every call, so their cursor was reset every
+    // time and the backfill could never advance past page 1.
+    cache.core.setSyncState('sent', {
+      lastSyncAt: '2026-05-04T12:00:00Z', newestId: 50, resumePage: 87,
+    });
+
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request');
+
+    const result = await syncMessageFolder(
+      client, 'sent', '222',
+      { fetchUnreadBodies: false, budget: makeBudget(0) },
+      store(),
+    );
+
+    expect(spy).not.toHaveBeenCalled();      // observed nothing...
+    expect(result.done).toBe(false);
+    expect(result.verified).toBe(false);
+    expect(getSyncState('sent')?.resumePage).toBe(87); // ...so changed nothing
+    expect(newestOf('sent')).toBe(50);       // newestId must not regress either
+  });
+
+  it('leaves resumePage null when a zero-budget pass finds no parked backfill', async () => {
+    const client = new OFWClient();
+    vi.spyOn(client, 'request');
+
+    const result = await syncMessageFolder(
+      client, 'sent', '222',
+      { fetchUnreadBodies: false, budget: makeBudget(0) },
+      store(),
+    );
+
+    expect(result.done).toBe(false);
+    // No spurious cursor invented from a walk that never looked — the next
+    // call's forward pass starts at page 1 regardless.
+    expect(getSyncState('sent')?.resumePage).toBeNull();
+  });
+
   it('caches the REAL view time from detail when first ingesting an already-read sent message (regression)', async () => {
     // Verified against live payloads: the LIST endpoint returns an epoch
     // placeholder for viewed.dateTime even when showNeverViewed is false, while
@@ -1264,7 +1310,14 @@ describe('syncAll — bounded (shared budget across folders)', () => {
     const r1 = await syncAll(c1, { folders: ['inbox'], deep: true, maxRequests: 2 }, store());
 
     expect(r1.done).toBe(false);
-    expect(r1.synced).toEqual({ inbox: 0 });
+    // NOT `{ inbox: 0 }`. The forward pass paused before reaching cached
+    // history, so nothing was diffed against OFW — the same rule the drafts
+    // folder has always had. A `0` here would read as "verified, no new
+    // messages", which is exactly the lie this whole mechanism exists to stop.
+    expect(r1.synced).toEqual({});
+    expect(r1.refreshed).toEqual([]);
+    expect(r1.notRefreshed).toEqual(['inbox']);
+    expect(r1.syncComplete).toBe(false);
     expect(r1.note).toMatch(/call ofw_sync_messages again/i);
     expect(getSyncState('inbox')?.resumePage).toBe(1);
 
@@ -1281,6 +1334,9 @@ describe('syncAll — bounded (shared budget across folders)', () => {
 
     expect(r2.done).toBe(true);
     expect(r2.synced).toEqual({ inbox: 2 });
+    expect(r2.refreshed).toEqual(['inbox']);
+    expect(r2.notRefreshed).toEqual([]);
+    expect(r2.syncComplete).toBe(true);
     expect(r2.note).toBeUndefined();
     expect(getSyncState('inbox')?.resumePage).toBeNull();
   });
@@ -1294,8 +1350,26 @@ describe('syncAll — bounded (shared budget across folders)', () => {
     const result = await syncAll(client, { folders: ['sent'], maxRequests: 1 }, store());
 
     expect(result.done).toBe(false);
-    expect(result.synced).toEqual({ sent: 0 });
+    // Budget died before sent's first list page, so sent was never looked at.
+    expect(result.synced).toEqual({});
+    expect(result.notRefreshed).toEqual(['sent']);
     expect(spy).toHaveBeenCalledTimes(1); // only resolveFolderIds
+  });
+
+  it('lists every unrefreshed folder when several are skipped', async () => {
+    const client = new OFWClient();
+    // maxRequests = 1: resolveFolderIds spends it, so drafts AND sent are both
+    // deferred and neither may report a count.
+    vi.spyOn(client, 'request').mockResolvedValueOnce(foldersResponse());
+
+    const result = await syncAll(client, { folders: ['sent', 'drafts'], maxRequests: 1 }, store());
+
+    expect(result.synced).toEqual({});
+    expect(result.refreshed).toEqual([]);
+    // Drafts are reordered first, so that is the order they are reported in.
+    expect(result.notRefreshed).toEqual(['drafts', 'sent']);
+    expect(result.syncComplete).toBe(false);
+    expect(result.note).toMatch(/those folders/);
   });
 
   it('reports NO drafts count when the drafts folder is deferred under a shared budget', async () => {

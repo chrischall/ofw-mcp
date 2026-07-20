@@ -97,11 +97,12 @@ Always pass `--config ~/.mcporter/mcporter.json` unless a local `config/mcporter
 | `ofw_get_message(messageId)` | Read a message OR draft body. Cache-first. Ids in the drafts cache return `folder: "drafts"`. ⚠️ Falls through to OFW for unread inbox messages, which marks them as read. |
 | `ofw_send_message(subject, body, recipientIds[], replyToId?, draftId?, myFileIDs?)` | Send a message. Pass `replyToId` to thread original history. Pass `draftId` to auto-delete the draft after sending. Pass `myFileIDs` (from `ofw_upload_attachment`) to attach files. |
 | `ofw_get_unread_sent` | Sent messages your co-parent hasn't read yet (from cache). |
-| `ofw_list_drafts` | List saved drafts (cache-backed). |
+| `ofw_list_drafts` | List saved drafts (cache-backed). Each draft carries `serverConfirmed` — see [Freshness](#freshness). |
 | `ofw_save_draft(subject, body, recipientIds?, messageId?, replyToId?, myFileIDs?)` | Create a new draft. Pass `messageId` to **replace** an existing draft: the tool creates a fresh draft and deletes the old one (OFW's update-in-place endpoint silently no-ops). The returned `id` is the NEW id; the response includes a `NOTE` documenting the swap. |
 | `ofw_delete_draft(messageId)` | Delete a draft. |
 | `ofw_upload_attachment(path, shareClass?, label?, description?)` | Upload a local file to My Files; returns a fileId to pass into `myFileIDs`. |
 | `ofw_download_attachment(fileId, inline?, saveTo?, force?)` | Download an attachment. `inline:true` returns bytes as MCP content; default writes to `~/Downloads/ofw-mcp/`. |
+| `ofw_check_freshness(folders?, messageIds?, allowMarkRead?)` | Cheap live check that the cache still matches OFW — one request for folder counts plus one per id, no bodies, no sync. Use before asserting current state. Only probes ids in the drafts cache unless `allowMarkRead:true` (probing others marks inbox messages read). |
 
 ### Calendar
 | Tool | Notes |
@@ -123,6 +124,19 @@ Always pass `--config ~/.mcporter/mcporter.json` unless a local `config/mcporter
 |------|-------|
 | `ofw_list_journal_entries(start?, max?)` | 1-based offset; default max 10 |
 | `ofw_create_journal_entry(title, body)` | Create a new entry |
+
+## Freshness
+
+Message and draft reads come from a local cache, so **a result can be stale without looking stale**. Every read tool returns a `freshness` block: `staleness` (`fresh`/`unverified`/`stale`), `asOf`, `ageSeconds`, and a `warning` whenever it is not `fresh`. Drafts additionally carry `serverConfirmed`.
+
+Rules for using it:
+
+- **Never state current state from memory.** If you saved a draft earlier in the session, that is not evidence it still exists unsent now — the user may have sent or deleted it in the web app since.
+- **`serverConfirmed: false` means "remembered, not known."** Do not say a draft "is still sitting unsent" on that basis. Call `ofw_check_freshness(messageIds: [id])` first, or say plainly that you are reporting cached state and give its age.
+- **If `freshness.staleness` is not `fresh`, either re-read or surface the caveat** in your answer. The `warning` string is written to be quotable.
+- OFW does **not** bump a draft's timestamp when it is edited in the web app, which is why freshness is tracked separately and compared by content revision. "Nothing changed" and "we didn't look" are otherwise indistinguishable.
+- A missing folder count in `ofw_sync_messages` output means that folder was **not checked** — it is never "no changes". Check `notRefreshed`.
+
 
 ## Workflows
 
@@ -152,3 +166,4 @@ Always pass `--config ~/.mcporter/mcporter.json` unless a local `config/mcporter
 - **Always confirm before sending messages or deleting anything** — OFW is a legal co-parenting record.
 - `ofw_get_notifications` updates last-seen status — avoid calling silently in the background.
 - `ofw_get_message` marks messages read — warn the user if they want to keep something unread.
+- **Do not narrate cached state as present fact.** Check `freshness`/`serverConfirmed` before saying what "is" true on OFW right now, and prefer `ofw_check_freshness` over guessing — it is one cheap call.

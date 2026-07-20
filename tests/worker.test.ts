@@ -116,6 +116,7 @@ describe('OFW Cloudflare connector — tool surface', () => {
       const names = (await harness.listTools()).map((t) => t.name).sort();
       expect(names).toEqual(
         [
+          'ofw_check_freshness',
           'ofw_create_event',
           'ofw_create_expense',
           'ofw_create_journal_entry',
@@ -140,7 +141,7 @@ describe('OFW Cloudflare connector — tool surface', () => {
           'ofw_upload_attachment',
         ].sort(),
       );
-      expect(names.length).toBe(22);
+      expect(names.length).toBe(23);
     } finally {
       await harness.close();
     }

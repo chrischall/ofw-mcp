@@ -148,6 +148,7 @@ Read-only tools run automatically. Write tools ask for your confirmation first. 
 | `ofw_get_message` | Full content of a single message | Auto | any |
 | `ofw_sync_messages` | Sync messages into the local cache (unread bodies left unfetched to avoid read receipts) | Auto | any |
 | `ofw_get_unread_sent` | Sent messages a recipient hasn't read yet (from local cache) | Auto | any |
+| `ofw_check_freshness` | Cheap live check that the cache still matches OFW — confirm a draft still exists unsent, without a full sync | Auto | any |
 | `ofw_download_attachment` | Download a message attachment to disk (or inline as MCP content) | Auto | any |
 | `ofw_send_message` | Send a message | Confirm | `all` |
 | `ofw_list_drafts` | Draft messages | Auto | any |
@@ -163,6 +164,33 @@ Read-only tools run automatically. Write tools ask for your confirmation first. 
 | `ofw_create_expense` | Log a new expense | Confirm | `all` |
 | `ofw_list_journal_entries` | Journal entries | Auto | any |
 | `ofw_create_journal_entry` | Create a journal entry | Confirm | `all` |
+
+### Data freshness (`OFW_FRESHNESS_TTL_SECONDS`)
+
+Message and draft reads are served from the local cache, which means a result can look authoritative while being minutes or months out of date. The cache also cannot detect some changes on its own: **editing a draft in the OFW web app bumps no timestamp at all**, so "nothing changed" and "we didn't look" are indistinguishable unless the server says which happened.
+
+So every read tool (`ofw_list_messages`, `ofw_list_drafts`, `ofw_get_message`, `ofw_list_message_folders`, `ofw_sync_messages`) returns a `freshness` block alongside its data:
+
+```json
+"freshness": {
+  "source": "cache",
+  "asOf": "2026-07-20T12:40:00.000Z",
+  "ageSeconds": 5231,
+  "staleness": "unverified",
+  "lastServerSyncAt": "2026-07-20T13:59:00.000Z",
+  "syncComplete": false,
+  "historyComplete": true,
+  "warning": "Served from cache last verified 87 min ago; the last sync did not finish checking drafts. Re-read before asserting current state — call ofw_check_freshness for a cheap live confirmation, or ofw_sync_messages to refresh."
+}
+```
+
+`staleness` is `fresh` only when the data was fetched live in that call, or verified against OFW within the threshold by a sync that actually reached that folder. It degrades to `unverified` when it ages out or a sync skipped the folder, and `stale` when the folder has never been checked at all. Anything other than `fresh` always carries a human-readable `warning` stating the age and the reason. The bias is deliberate and one-directional: a false `unverified` costs one extra call, whereas a false `fresh` lets remembered state be narrated as present fact.
+
+Drafts additionally carry per-item `cacheStatus`, `asOf`, and **`serverConfirmed`** — true only when a completed drafts walk verified them inside the threshold. `serverConfirmed: false` means a draft's existence and unsent status are *remembered*, not known, and should not be stated as current fact without calling `ofw_check_freshness` first.
+
+`ofw_check_freshness` is the cheap way to re-verify: one request for a folder count comparison plus one per message id, no bodies, no full sync. Draft ids are compared by **content revision**, not timestamp, for the reason above. By default it only probes ids that are in the drafts cache — fetching any other id would mark an unread inbox message as read on OurFamilyWizard, an irreversible change to a court-visible record, so those are skipped unless you pass `allowMarkRead: true`.
+
+Set `OFW_FRESHNESS_TTL_SECONDS` to tune the threshold (default `300`, i.e. 5 minutes). Unusable values fall back to the default rather than widening the window.
 
 ### Write protection (`OFW_WRITE_MODE`)
 

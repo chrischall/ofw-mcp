@@ -2,11 +2,15 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import type { OFWClient } from '../client.js';
 import { syncAll, fetchAttachmentMeta, fetchAttachmentMetaForMessage, getDraftsCacheStatus } from '../sync.js';
+import type { DraftsCacheStatus } from '../sync.js';
+import { buildFreshness } from './freshness.js';
+import type { FreshnessBlock } from './freshness.js';
 import {
   DraftFreshnessError, checkDraftFreshness, draftRevision, fetchServerDraft, staleDraftPayload,
 } from './draft-freshness.js';
 import type { DraftContent } from './draft-freshness.js';
-import type { CacheStore, MessageRow, DraftRow } from '../cache/store.js';
+import type { CacheStore, MessageRow, DraftRow, FolderName } from '../cache/store.js';
+import { getFolderVerifiedAt } from '../sync.js';
 import type { AttachmentIO } from './attachments.js';
 import { getAttachmentsDir, getDefaultInlineAttachments, getSyncMaxRequests, getWriteMode } from '../config.js';
 import { basename, join } from 'node:path';
@@ -55,6 +59,36 @@ const MessageDetailSchema = z.looseObject({
 // Attachment-backfill detail fetch reads only `files`.
 const DetailFilesSchema = z.looseObject({ files: z.array(z.number()).optional() });
 
+// ofw_check_freshness' folder probe. `includeFolderCounts=true` returns a
+// per-folder count, but the field name varies across OFW payload versions —
+// accept the known spellings and degrade to a null serverCount rather than
+// guessing, since a wrong count would manufacture a false out-of-sync verdict.
+const FolderCountsSchema = z.looseObject({
+  systemFolders: z.array(z.looseObject({
+    id: z.string(),
+    folderType: z.string(),
+    totalCount: z.number().optional(),
+    messageCount: z.number().optional(),
+    count: z.number().optional(),
+  })).optional(),
+});
+
+const FOLDER_TYPE: Record<FolderName, string> = {
+  inbox: 'INBOX',
+  sent: 'SENT_MESSAGES',
+  drafts: 'DRAFTS',
+};
+
+/**
+ * Cap on per-id probes in one ofw_check_freshness call.
+ *
+ * Each id costs one OFW request, and on the hosted Worker every request counts
+ * against the subrequest cap (see OFW_SYNC_MAX_REQUESTS). The check has to stay
+ * cheap enough that a caller reaches for it freely — that is the entire point
+ * of it existing — so it truncates loudly rather than turning into a sync.
+ */
+const MAX_FRESHNESS_IDS = 25;
+
 // Upload response — STRICT: fileId is the whole point of the call; caching
 // or returning an undefined/mistyped fileId produces an unusable attachment.
 const UploadedFileSchema = z.looseObject({
@@ -78,6 +112,35 @@ function listDataHintsAtFiles(listData: unknown): boolean {
   return false;
 }
 
+/**
+ * Freshness for a drafts read, plus the per-draft `serverConfirmed` flag.
+ *
+ * `serverConfirmed` answers the question that triggered this whole mechanism:
+ * "is this draft actually still sitting unsent on OFW?" It is true ONLY when a
+ * completed drafts walk verified the cache against OFW within the freshness
+ * window (getFreshnessTtlSeconds, default 300s) — NOT a claim about this exact
+ * instant, which no cache can make. Anything less — a deferred walk, an aged
+ * stamp, a cache that was never checked — is false, meaning the draft's
+ * existence and unsent status are remembered, not known. On a false, a caller
+ * must not state either as present-tense fact without calling
+ * ofw_check_freshness first.
+ */
+async function draftsFreshness(
+  cache: CacheStore,
+): Promise<{ freshness: FreshnessBlock; serverConfirmed: boolean; cacheStatus: DraftsCacheStatus }> {
+  const freshness = await buildFreshness(cache, { source: 'cache', folders: ['drafts'] });
+  // Reconcile the two signals so a single response can never contradict
+  // itself (the same rule withReadState applies to read flags). The drafts
+  // meta key says whether the last walk COMPLETED; freshness additionally
+  // knows whether that walk has since aged out or been overtaken by a sync
+  // that skipped drafts. Downgrade only — this can turn 'fresh' off, never on.
+  const completed = await getDraftsCacheStatus(cache);
+  const cacheStatus: DraftsCacheStatus = completed === 'fresh' && freshness.staleness === 'fresh'
+    ? 'fresh'
+    : 'unverified';
+  return { freshness, serverConfirmed: cacheStatus === 'fresh', cacheStatus };
+}
+
 export function registerMessageTools(
   server: McpServer,
   client: OFWClient,
@@ -93,11 +156,12 @@ export function registerMessageTools(
   const allowDrafts = writeMode !== 'none';
 
   server.registerTool('ofw_list_message_folders', {
-    description: 'List OurFamilyWizard message folders (inbox, sent, etc.) and their unread counts. Returns folder IDs needed to call ofw_list_messages. Does NOT return message content.',
+    description: 'List OurFamilyWizard message folders (inbox, sent, etc.) and their unread counts. Fetched LIVE from OFW, so the counts are current. Returns folder IDs needed to call ofw_list_messages. Does NOT return message content.',
     annotations: { readOnlyHint: true },
   }, async () => {
     const data = await client.request('GET', '/pub/v1/messageFolders?includeFolderCounts=true');
-    return jsonResponse(data);
+    const freshness = await buildFreshness(cacheProvider(), { source: 'live', folders: [] });
+    return jsonResponse({ folders: data, freshness });
   });
 
   server.registerTool('ofw_list_messages', {
@@ -121,9 +185,16 @@ export function registerMessageTools(
     else if (folderArg === 'sent') folder = 'sent';
     else if (folderArg === 'both') folder = undefined;
     else {
+      // Still carries freshness: `messages: []` with no age label is exactly
+      // the shape this mechanism exists to eliminate, even when the emptiness
+      // is caused by a bad argument rather than an empty cache.
       return jsonResponse({
         messages: [],
-        note: 'folderId must be "inbox", "sent", or "both". Numeric OFW folder IDs are not supported by the cache.',
+        freshness: await buildFreshness(cacheProvider(), {
+          source: 'cache',
+          folders: ['inbox', 'sent'],
+        }),
+        note: 'folderId must be "inbox", "sent", or "both". Numeric OFW folder IDs are not supported by the cache. No lookup was performed — this empty result says nothing about what is in the cache.',
       });
     }
 
@@ -136,7 +207,15 @@ export function registerMessageTools(
     // to agree — see withReadState.
     const messages = (await cache.listMessages({ ...filter, page, size })).map((m) => withReadState(m));
 
-    const payload: Record<string, unknown> = { messages, total, page, size };
+    // Served from the local cache, so the result must say how old it is and
+    // whether anything vouches for it — a caller cannot state current state
+    // from this payload without either re-reading or surfacing the caveat.
+    const freshness = await buildFreshness(cache, {
+      source: 'cache',
+      folders: folder === undefined ? ['inbox', 'sent'] : [folder],
+    });
+
+    const payload: Record<string, unknown> = { messages, total, page, size, freshness };
     if (total === 0) {
       payload.note = 'No messages match these filters. If you expected results, check ofw_sync_messages was run, or relax the filters.';
     } else if (page * size < total) {
@@ -164,6 +243,7 @@ export function registerMessageTools(
     // up — see syncDrafts, which also evicts these stale rows.
     const draftRow = await cache.getDraft(id);
     if (draftRow !== null) {
+      const { freshness, serverConfirmed, cacheStatus } = await draftsFreshness(cache);
       return jsonResponse({
         id: draftRow.id,
         folder: 'drafts',
@@ -183,7 +263,12 @@ export function registerMessageTools(
         // Concurrency token — pass as expectedRevision to ofw_save_draft /
         // ofw_delete_draft to assert you are editing THIS version.
         revision: draftRevision(draftRow),
-        cacheStatus: await getDraftsCacheStatus(cache),
+        cacheStatus,
+        // False = this draft's existence and unsent status are remembered from
+        // a cache, not confirmed on OFW. Call ofw_check_freshness before
+        // stating either as current fact.
+        serverConfirmed,
+        freshness,
       });
     }
 
@@ -241,7 +326,11 @@ export function registerMessageTools(
           // Backfill is best-effort. Fall through with whatever we have.
         }
       }
-      return jsonResponse({ ...withReadState(row), attachments });
+      // Cache-served: the body is whatever the last sync stored. Even though
+      // this call may have re-hit detail for view status, the message content
+      // itself was not re-verified, so report the folder's cache freshness.
+      const freshness = await buildFreshness(cache, { source: 'cache', folders: [row.folder] });
+      return jsonResponse({ ...withReadState(row), attachments, freshness });
     }
 
     const detail = parseLenient(
@@ -282,7 +371,9 @@ export function registerMessageTools(
       await fetchAttachmentMetaForMessage(client, detail.id, detail.files, cache);
     }
     const attachments = await cache.listAttachmentsForMessage(detail.id);
-    return jsonResponse({ ...withReadState(row), attachments });
+    // Fetched live from OFW in this call — current by construction.
+    const freshness = await buildFreshness(cache, { source: 'live', folders: [folder] });
+    return jsonResponse({ ...withReadState(row), attachments, freshness });
   });
 
   if (allowSend) server.registerTool('ofw_send_message', {
@@ -523,18 +614,29 @@ export function registerMessageTools(
     const page = args.page ?? 1;
     const size = args.size ?? 50;
     const cache = cacheProvider();
-    const cacheStatus = await getDraftsCacheStatus(cache);
+    const { freshness, serverConfirmed, cacheStatus } = await draftsFreshness(cache);
     const rows = await cache.listDrafts({ page, size });
     // Every draft carries the concurrency token to echo back on a write, plus
-    // whether the last sync actually compared this cache against OFW.
-    const drafts = rows.map((d) => ({ ...d, revision: draftRevision(d), cacheStatus }));
+    // whether the last sync actually compared this cache against OFW and
+    // whether its presence-on-server is confirmed or merely remembered.
+    const drafts = rows.map((d) => ({
+      ...d,
+      revision: draftRevision(d),
+      cacheStatus,
+      serverConfirmed,
+      asOf: freshness.asOf,
+    }));
 
     if (drafts.length === 0) {
-      return jsonResponse({ drafts: [], note: 'Cache empty. Call ofw_sync_messages to populate.' });
+      return jsonResponse({
+        drafts: [],
+        freshness,
+        note: 'No drafts in the local cache. That is NOT proof there are no drafts on OurFamilyWizard — call ofw_sync_messages to populate, or ofw_check_freshness to confirm.',
+      });
     }
-    const payload: Record<string, unknown> = { drafts };
-    if (cacheStatus !== 'fresh') {
-      payload.note = 'cacheStatus "unverified": the last ofw_sync_messages did not finish checking the drafts folder against OurFamilyWizard, so these bodies may be behind the server (drafts edited in the OFW web app do not bump any timestamp). Run ofw_sync_messages again before relying on them. Writes are guarded regardless — ofw_save_draft and ofw_delete_draft re-check the server and refuse a stale overwrite.';
+    const payload: Record<string, unknown> = { drafts, freshness };
+    if (!serverConfirmed) {
+      payload.note = 'serverConfirmed:false — these drafts are remembered from the local cache, NOT confirmed to still exist unsent on OurFamilyWizard right now, and their bodies may be behind the server. Do not state that a draft "is still sitting unsent" on this basis; drafts edited or deleted in the OFW web app bump no timestamp, so the cache cannot detect it on its own. Call ofw_check_freshness (cheap, live) or ofw_sync_messages first. Writes are guarded regardless — ofw_save_draft and ofw_delete_draft re-check the server and refuse a stale overwrite.';
     }
     return jsonResponse(payload);
   });
@@ -636,8 +738,11 @@ export function registerMessageTools(
       }
     }
 
+    // The draft was just re-fetched from OFW by postMessageAndRefetch, so this
+    // one row IS server-confirmed regardless of the drafts folder's overall
+    // cache freshness.
     const responseObj = persisted !== null
-      ? { ...persisted, revision: newRevision, cacheStatus: 'fresh' }
+      ? { ...persisted, revision: newRevision, cacheStatus: 'fresh', serverConfirmed: true }
       : raw;
     const text = responseObj ? JSON.stringify(responseObj, null, 2) : 'Draft saved.';
     const notes = [forceNote, rewriteNote, verifyNote, replaceNote].filter((n): n is string => n !== null).join('\n\n');
@@ -679,10 +784,19 @@ export function registerMessageTools(
   }, async (args) => {
     const page = args.page ?? 1;
     const size = args.size ?? 50;
-    const sent = await cacheProvider().listMessages({ folder: 'sent', page, size });
+    const cache = cacheProvider();
+    const sent = await cache.listMessages({ folder: 'sent', page, size });
+    // "Nobody has read it yet" is a present-tense claim drawn entirely from
+    // cached view timestamps, which only move when a sync refreshes them —
+    // so it needs the same age label as any other cached read.
+    const freshness = await buildFreshness(cache, { source: 'cache', folders: ['sent'] });
 
     if (sent.length === 0) {
-      return jsonResponse({ note: 'Sent cache is empty. Call ofw_sync_messages to populate.' });
+      return jsonResponse({
+        unread: [],
+        freshness,
+        note: 'Sent cache is empty. Call ofw_sync_messages to populate. An empty cache is NOT evidence that no sent messages exist.',
+      });
     }
 
     const unread: Array<{ id: number; subject: string; sentAt: string; unreadBy: string[] }> = [];
@@ -694,9 +808,13 @@ export function registerMessageTools(
     }
 
     if (unread.length === 0) {
-      return jsonResponse({ message: 'All scanned sent messages have been read.' });
+      return jsonResponse({
+        unread: [],
+        freshness,
+        message: 'All scanned sent messages had been read as of the timestamp in `freshness.asOf`. A recipient may have read a message since without the cache hearing about it.',
+      });
     }
-    return jsonResponse(unread);
+    return jsonResponse({ unread, freshness });
   });
 
   if (allowDrafts) server.registerTool('ofw_upload_attachment', {
@@ -841,19 +959,157 @@ export function registerMessageTools(
     description: 'Sync messages from OurFamilyWizard into the local cache. Returns counts per folder and a list of unread inbox messages whose bodies were NOT fetched (to avoid mark-as-read on OFW). Call ofw_get_message(id) on those to read them. EVERY call re-checks the newest page first, so new messages are picked up promptly even while an old-history backfill is still running; only then does it spend what is left of its budget advancing that backfill. Pass deep:true to walk all OFW pages instead of stopping at the first all-cached page (use to backfill suspected gaps). Sync is BOUNDED and RESUMABLE: on hosted deployments a per-call OFW-request budget (env OFW_SYNC_MAX_REQUESTS, or the maxRequests argument) caps how far one call walks; when the budget is hit the response reports done:false with a note — call again with the SAME arguments to resume. done:false means older history is still being backfilled; it does NOT mean recent messages are missing. Local installs are unbounded by default (done is always true).',
     annotations: { readOnlyHint: false },
     inputSchema: {
-      folders: z.array(z.enum(['inbox', 'sent', 'drafts'])).describe('Folders to sync (default: all three)').optional(),
+      folders: z.array(z.enum(['inbox', 'sent', 'drafts'])).min(1).describe('Folders to sync (default: all three). Must be non-empty if given — an empty list would sync nothing while reporting success.').optional(),
       fetchUnreadBodies: z.boolean().describe('If true, also fetch bodies for unread inbox messages (will mark them as read on OFW). Default false.').optional(),
       deep: z.boolean().describe('If true, walk every OFW page until empty regardless of cache state. Use to backfill gaps. Default false.').optional(),
       maxRequests: z.number().int().min(1).describe('Maximum OFW requests this single call may make before pausing. When hit, the response reports done:false — call again with the same arguments to continue. Omit to use the server default (OFW_SYNC_MAX_REQUESTS, or unbounded on local installs).').optional(),
     },
   }, async (args) => {
+    const cache = cacheProvider();
     const result = await syncAll(client, {
       folders: args.folders,
       fetchUnreadBodies: args.fetchUnreadBodies,
       deep: args.deep,
       maxRequests: args.maxRequests ?? getSyncMaxRequests(),
-    }, cacheProvider());
-    return jsonResponse(result);
+    }, cache);
+    // Freshness of the cache AS OF this sync completing — so a paused call
+    // that skipped a folder says so here too, not just in `notRefreshed`.
+    const freshness = await buildFreshness(cache, {
+      source: 'cache',
+      folders: args.folders ?? ['inbox', 'sent', 'drafts'],
+    });
+    return jsonResponse({ ...result, freshness });
+  });
+
+  server.registerTool('ofw_check_freshness', {
+    description: 'Cheaply confirm whether the local cache still matches OurFamilyWizard, WITHOUT running a full sync. Use this before asserting anything about current state — especially "draft X is still sitting unsent" — when a read returned serverConfirmed:false or freshness.staleness other than "fresh". Costs one OFW request for the folder check plus one per messageId. For each folder it returns the live server count next to the cached count; for each id, whether it still exists on OFW and whether its content matches the cache (compared by content revision, because OFW draft timestamps do NOT change when a draft is edited in the web app). Does not fetch bodies into the cache, does not touch attachments, and does not depend on sync state.',
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      folders: z.array(z.enum(['inbox', 'sent', 'drafts'])).min(1).describe('Folders to compare cached vs live counts for. Defaults to all three when messageIds is not given. Must be non-empty if given.').optional(),
+      messageIds: z.array(z.number()).describe(`Specific ids to verify against OFW (max ${MAX_FRESHNESS_IDS}). By default only ids present in the drafts cache are probed — see allowMarkRead.`).optional(),
+      allowMarkRead: z.boolean().describe('Default false. Probing an id that is NOT a cached draft requires fetching its detail, which marks an unread inbox message as READ on OurFamilyWizard — an irreversible change to the record. Such ids are skipped unless you set this to true.').optional(),
+    },
+  }, async (args) => {
+    const cache = cacheProvider();
+    const allowMarkRead = args.allowMarkRead ?? false;
+    const requestedIds = args.messageIds ?? [];
+    const ids = requestedIds.slice(0, MAX_FRESHNESS_IDS);
+    // Folders default to "all three" only when the caller asked about nothing
+    // else; an ids-only call shouldn't silently spend a request on folders.
+    const wantFolders: FolderName[] = args.folders
+      ?? (requestedIds.length > 0 ? [] : ['inbox', 'sent', 'drafts']);
+
+    let requestsUsed = 0;
+    const folders: Array<Record<string, unknown>> = [];
+
+    if (wantFolders.length > 0) {
+      requestsUsed++;
+      const data = parseLenient(
+        FolderCountsSchema,
+        await client.request('GET', '/pub/v1/messageFolders?includeFolderCounts=true'),
+        { label: 'ofw-mcp', context: 'GET /pub/v1/messageFolders (ofw_check_freshness)' },
+      );
+      const sys = data.systemFolders ?? [];
+      for (const folder of wantFolders) {
+        const entry = sys.find((x) => x.folderType === FOLDER_TYPE[folder]);
+        const serverCount = entry?.totalCount ?? entry?.messageCount ?? entry?.count ?? null;
+        const cachedCount = folder === 'drafts'
+          ? (await cache.listDraftIds()).length
+          : await cache.countMessages({ folder });
+        const state = await cache.getSyncState(folder);
+        const historyComplete = state !== null && state.resumePage === null;
+        // A partially backfilled folder legitimately holds fewer messages than
+        // the server, so a count mismatch there proves nothing. Report both
+        // numbers and leave the verdict null rather than crying wolf for the
+        // entire duration of a backfill.
+        const inSync = serverCount === null || !historyComplete
+          ? null
+          : serverCount === cachedCount;
+        folders.push({
+          folder,
+          existsOnServer: entry !== undefined,
+          serverCount,
+          cachedCount,
+          historyComplete,
+          lastVerifiedAt: await getFolderVerifiedAt(cache, folder),
+          inSync,
+          ...(inSync === null
+            ? { note: serverCount === null
+              ? 'OFW did not report a count for this folder, so cached-vs-server cannot be compared. Use the per-id check instead.'
+              : 'Older history is still being backfilled, so a lower cachedCount is expected and does not indicate drift.' }
+            : {}),
+        });
+      }
+    }
+
+    const items: Array<Record<string, unknown>> = [];
+    for (const id of ids) {
+      const cachedDraft = await cache.getDraft(id);
+      // Drafts have no read state, so probing one is genuinely side-effect
+      // free. Any other id means GET /pub/v3/messages/{id}, which marks an
+      // unread inbox message read on OFW — a permanent change to a
+      // court-visible record. Refuse by default rather than quietly doing it.
+      if (cachedDraft === null && !allowMarkRead) {
+        items.push({
+          id,
+          skipped: true,
+          reason: 'NOT_A_CACHED_DRAFT',
+          note: 'Not in the drafts cache. Verifying it requires fetching its detail from OFW, which would mark an unread inbox message as READ on OurFamilyWizard. Pass allowMarkRead:true if that is acceptable.',
+        });
+        continue;
+      }
+      requestsUsed++;
+      try {
+        const server = await fetchServerDraft(client, id);
+        const cacheRevision = cachedDraft === null ? null : draftRevision(cachedDraft);
+        if (server === null) {
+          items.push({
+            id,
+            existsOnServer: false,
+            inSync: false,
+            cacheRevision,
+            serverRevision: null,
+            note: cachedDraft === null
+              ? 'Not found on OurFamilyWizard.'
+              : 'This draft is in the local cache but NO LONGER EXISTS on OurFamilyWizard — it was sent or deleted elsewhere. Do not describe it as still unsent.',
+          });
+          continue;
+        }
+        const serverRevision = draftRevision(server);
+        items.push({
+          id,
+          existsOnServer: true,
+          cacheRevision,
+          serverRevision,
+          inSync: cacheRevision !== null && cacheRevision === serverRevision,
+          ...(cacheRevision === null
+            ? { note: 'Exists on OurFamilyWizard but is not in the local cache.' }
+            : cacheRevision !== serverRevision
+              ? { note: 'Content differs from the cache — it was edited on OurFamilyWizard since the last sync. Run ofw_sync_messages before reading or writing it.' }
+              : {}),
+        });
+      } catch (e) {
+        // A check that could not run must not read as "in sync".
+        items.push({
+          id,
+          error: 'FRESHNESS_CHECK_FAILED',
+          message: (e as Error).message,
+          inSync: null,
+          note: 'The freshness check itself failed, so nothing is confirmed either way.',
+        });
+      }
+    }
+
+    const payload: Record<string, unknown> = {
+      checkedAt: new Date().toISOString(),
+      requestsUsed,
+      ...(folders.length > 0 ? { folders } : {}),
+      ...(items.length > 0 ? { items } : {}),
+    };
+    if (requestedIds.length > ids.length) {
+      payload.note = `Only the first ${MAX_FRESHNESS_IDS} of ${requestedIds.length} messageIds were checked (per-call cap). The remaining ${requestedIds.length - ids.length} were NOT verified — call again with the rest.`;
+    }
+    return jsonResponse(payload);
   });
 }
 

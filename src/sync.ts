@@ -180,6 +180,15 @@ export interface MessageSyncResult {
   unread: UnreadHint[];
   /** True when the folder walk completed within budget; false when it paused. */
   done: boolean;
+  /**
+   * True when the FORWARD pass completed, i.e. this folder was actually
+   * compared against OFW down to cached history. Distinct from `done`: a call
+   * can verify the present (`verified: true`) while still owing old history
+   * (`done: false`). Only `verified` licenses reporting the folder as
+   * refreshed — a paused forward pass never reached cached history, so its
+   * `synced` count is "what we applied", not "what changed on the server".
+   */
+  verified: boolean;
 }
 
 interface WalkTotals {
@@ -187,6 +196,14 @@ interface WalkTotals {
   unread: UnreadHint[];
   /** Highest message id seen on the pages this walk actually fetched. */
   newestId: number | null;
+  /**
+   * How many list pages this walk actually fetched. Zero means the budget was
+   * already spent when it started, so the walk observed NOTHING about the
+   * folder — distinct from "fetched a page and found it all cached". Callers
+   * must not draw conclusions (or move persisted cursors) from a zero-page
+   * walk; see the resume-cursor logic in syncMessageFolder.
+   */
+  pagesFetched: number;
 }
 
 /**
@@ -233,12 +250,13 @@ async function walkPages(
   let page = opts.startPage;
   let newestId: number | null = null;
   let synced = 0;
+  let pagesFetched = 0;
   const unread: UnreadHint[] = [];
 
   while (true) {
     // One unit per list-page fetch. Out of budget → pause and resume at `page`.
     if (!budget.take()) {
-      return { synced, unread, newestId, done: false, nextPage: page };
+      return { synced, unread, newestId, pagesFetched, done: false, nextPage: page };
     }
     const path = `/pub/v3/messages?folders=${encodeURIComponent(folderId)}&page=${page}&size=50&sort=date&sortDirection=desc`;
     const list = parseLenient(
@@ -246,9 +264,10 @@ async function walkPages(
       await client.request('GET', path),
       { label: 'ofw-mcp', context: `GET /pub/v3/messages?folders={${folder}}` },
     );
+    pagesFetched++;
     const items = list.data ?? [];
     if (items.length === 0) {
-      return { synced, unread, newestId, done: true, nextPage: null };
+      return { synced, unread, newestId, pagesFetched, done: true, nextPage: null };
     }
 
     // One batch read of this page's ids (S1) instead of a per-item getMessage.
@@ -346,7 +365,7 @@ async function walkPages(
     if (pageBudgetHit) {
       // Paused mid-page. Resume at THIS page: the partial rows are cached, so
       // getMessages skips them next time and upserts are idempotent.
-      return { synced, unread, newestId, done: false, nextPage: page };
+      return { synced, unread, newestId, pagesFetched, done: false, nextPage: page };
     }
 
     // Reached cached history (see `stopAtCachedPage`). Report THIS page as the
@@ -354,7 +373,7 @@ async function walkPages(
     // all-cached) fetch if a backfill later starts here, and it cannot skip a
     // message the way an off-by-one `page + 1` could.
     if (opts.stopAtCachedPage && !pageHadNewItem) {
-      return { synced, unread, newestId, done: true, nextPage: page };
+      return { synced, unread, newestId, pagesFetched, done: true, nextPage: page };
     }
     page++;
   }
@@ -405,12 +424,28 @@ export async function syncMessageFolder(
   let resumePage: number | null;
 
   if (!fwd.done) {
-    // The forward pass itself ran out of budget, so it never reached cached
-    // history — everything from `fwd.nextPage` down is unverified. Park the
-    // backfill at whichever cursor is higher up the folder, so no page that
-    // still owes us messages ends up above the resume point.
     done = false;
-    resumePage = savedResume === null ? fwd.nextPage : Math.min(fwd.nextPage, savedResume);
+    if (fwd.pagesFetched === 0) {
+      // The budget was already spent when the forward pass started, so it
+      // fetched nothing and observed NOTHING about this folder. Leave the
+      // parked cursor exactly as it was: moving it on zero information is a
+      // pure loss.
+      //
+      // This was a real starvation bug. `fwd.nextPage` is just the start page
+      // (1) when nothing was fetched, so the `Math.min` below would silently
+      // reset a deep backfill — e.g. resumePage 87 → 1 — discarding 86 pages
+      // of progress. On the hosted Worker (OFW_SYNC_MAX_REQUESTS=40) a user
+      // with enough drafts to consume the whole budget, with drafts running
+      // first, hit this on EVERY call: inbox/sent never got budget, their
+      // cursor was reset every time, and the backfill could never advance.
+      resumePage = savedResume;
+    } else {
+      // The forward pass did look, and ran out before reaching cached history
+      // — everything from `fwd.nextPage` down is unverified. Park the backfill
+      // at whichever cursor is higher up the folder, so no page that still
+      // owes us messages ends up above the resume point.
+      resumePage = savedResume === null ? fwd.nextPage : Math.min(fwd.nextPage, savedResume);
+    }
   } else if (fwd.nextPage === null) {
     // The forward pass walked clean off the end of the folder — by definition
     // there is no older history left to backfill.
@@ -434,13 +469,16 @@ export async function syncMessageFolder(
     resumePage = bf.done ? null : bf.nextPage;
   }
 
-  await store.setSyncState(folder, {
-    lastSyncAt: new Date().toISOString(),
-    newestId,
-    resumePage,
-  });
+  const now = new Date().toISOString();
+  await store.setSyncState(folder, { lastSyncAt: now, newestId, resumePage });
+  // The FORWARD pass is what proves our picture of the present is current: it
+  // always starts at page 1 and stops only once it reaches cached history. Its
+  // completion — not the backfill's — is what makes reads `fresh`. Same `now`
+  // as lastSyncAt so a verified folder never looks a millisecond behind its own
+  // sync (buildFreshness downgrades when lastSyncAt runs ahead of verifiedAt).
+  if (fwd.done) await markFolderVerified(store, folder, now);
 
-  return { synced, unread, done };
+  return { synced, unread, done, verified: fwd.done };
 }
 
 const DraftListItemSchema = z.looseObject({
@@ -479,6 +517,46 @@ export async function getDraftsCacheStatus(store: CacheStore): Promise<DraftsCac
   return (await store.getMeta(DRAFTS_CACHE_STATUS_KEY)) === 'fresh' ? 'fresh' : 'unverified';
 }
 
+export async function setDraftsCacheStatus(store: CacheStore, status: DraftsCacheStatus): Promise<void> {
+  await store.setMeta(DRAFTS_CACHE_STATUS_KEY, status);
+}
+
+/**
+ * Meta key holding when a folder was last actually COMPARED against OFW.
+ *
+ * Deliberately distinct from `sync_state.last_sync_at`, which is written on
+ * every call including one that paused mid-walk — so `last_sync_at` alone
+ * cannot mean "this folder is current", only "we tried". This key advances
+ * only when the folder was verified:
+ *
+ *   inbox/sent  the FORWARD pass completed, i.e. it walked from page 1 down to
+ *               cached history (or off the end of the folder). That is exactly
+ *               the pass that proves no new message is missing. A parked
+ *               BACKFILL does not hold it back: incomplete old history says
+ *               nothing about whether our picture of the present is current,
+ *               and letting it downgrade every read would make the whole
+ *               freshness signal noise during a long backfill.
+ *   drafts      the full walk + reconciliation ran (the same moment
+ *               DRAFTS_CACHE_STATUS_KEY goes 'fresh').
+ *
+ * Absent = never verified, which reads as `stale`, not `fresh`.
+ */
+export function folderVerifiedAtKey(folder: FolderName): string {
+  return `folder_verified_at:${folder}`;
+}
+
+export async function getFolderVerifiedAt(store: CacheStore, folder: FolderName): Promise<string | null> {
+  return (await store.getMeta(folderVerifiedAtKey(folder))) ?? null;
+}
+
+export async function markFolderVerified(
+  store: CacheStore,
+  folder: FolderName,
+  at: string = new Date().toISOString(),
+): Promise<void> {
+  await store.setMeta(folderVerifiedAtKey(folder), at);
+}
+
 export async function syncDrafts(
   client: OFWClient,
   draftsFolderId: string,
@@ -493,7 +571,16 @@ export async function syncDrafts(
   // know the cache is not a trustworthy base — the count we return here is
   // "nothing applied", NOT "nothing changed on the server".
   const defer = async (): Promise<DraftSyncResult> => {
-    await store.setMeta(DRAFTS_CACHE_STATUS_KEY, 'unverified');
+    await setDraftsCacheStatus(store, 'unverified');
+    // Record the ATTEMPT but not a verification: buildFreshness compares the
+    // two and downgrades when a sync ran without verifying this folder, so a
+    // deferred walk actively marks reads unverified rather than leaving them
+    // coasting on an older stamp.
+    await store.setSyncState('drafts', {
+      lastSyncAt: new Date().toISOString(),
+      newestId: null,
+      resumePage: null,
+    });
     return { synced: 0, done: false };
   };
 
@@ -573,8 +660,12 @@ export async function syncDrafts(
 
   // The complete walk fetched every draft's DETAIL and reconciled deletions, so
   // the cache is now known-equal to the server. Only here is `synced: 0`
-  // truthful as "verified no changes".
-  await store.setMeta(DRAFTS_CACHE_STATUS_KEY, 'fresh');
+  // truthful as "verified no changes" — and only here may reads report the
+  // drafts as server-confirmed.
+  const now = new Date().toISOString();
+  await setDraftsCacheStatus(store, 'fresh');
+  await store.setSyncState('drafts', { lastSyncAt: now, newestId: null, resumePage: null });
+  await markFolderVerified(store, 'drafts', now);
 
   return { synced, done: true };
 }
@@ -593,10 +684,25 @@ export interface SyncAllOptions {
 }
 
 export interface SyncAllResult {
+  /**
+   * Per-folder count of messages/drafts applied. A key is present ONLY when
+   * that folder was actually diffed against OFW — see `notRefreshed`. A `0`
+   * here always means "verified, nothing changed", never "not looked at".
+   */
   synced: Partial<Record<FolderName, number>>;
   unreadInbox: UnreadHint[];
   /** True only when every requested folder completed within the budget. */
   done: boolean;
+  /** Alias of `done`, named for callers reading the freshness contract. */
+  syncComplete: boolean;
+  /** Requested folders that WERE compared against OFW on this call. */
+  refreshed: FolderName[];
+  /**
+   * Requested folders that were NOT compared against OFW on this call (the
+   * request budget ran out first). Their cached contents are unverified and
+   * carry no `synced` count.
+   */
+  notRefreshed: FolderName[];
   note?: string;
 }
 
@@ -625,6 +731,21 @@ export async function syncAll(client: OFWClient, opts: SyncAllOptions, store: Ca
   let unreadInbox: UnreadHint[] = [];
   let done = true;
   let draftsUnverified = false;
+  const refreshed: FolderName[] = [];
+  const notRefreshed: FolderName[] = [];
+
+  // Same rule for every folder: a count is reported, and the folder is listed
+  // as refreshed, ONLY when it was actually diffed against OFW. A folder the
+  // budget never reached reports no number at all — `inbox: 0` reads as
+  // "verified, no new messages", and that lie is the whole bug this guards.
+  const record = (folder: FolderName, verified: boolean, count: number): void => {
+    if (verified) {
+      synced[folder] = count;
+      refreshed.push(folder);
+    } else {
+      notRefreshed.push(folder);
+    }
+  };
 
   for (const folder of folders) {
     if (folder === 'inbox') {
@@ -633,7 +754,7 @@ export async function syncAll(client: OFWClient, opts: SyncAllOptions, store: Ca
         deep: opts.deep ?? false,
         budget,
       }, store);
-      synced.inbox = r.synced;
+      record('inbox', r.verified, r.synced);
       unreadInbox = r.unread;
       if (!r.done) done = false;
     } else if (folder === 'sent') {
@@ -642,7 +763,7 @@ export async function syncAll(client: OFWClient, opts: SyncAllOptions, store: Ca
         deep: opts.deep ?? false,
         budget,
       }, store);
-      synced.sent = r.synced;
+      record('sent', r.verified, r.synced);
       if (!r.done) done = false;
     } else if (folder === 'drafts') {
       const r = await syncDrafts(client, ids.drafts, store, budget);
@@ -650,8 +771,8 @@ export async function syncAll(client: OFWClient, opts: SyncAllOptions, store: Ca
       // OFW. A deferred walk applied nothing, and reporting its `0` as
       // `drafts: 0` reads as "verified, no changes" — the exact lie that let a
       // server-side draft edit be overwritten. Omit the number instead.
-      if (r.done) synced.drafts = r.synced;
-      else {
+      record('drafts', r.done, r.synced);
+      if (!r.done) {
         draftsUnverified = true;
         done = false;
       }
@@ -665,10 +786,21 @@ export async function syncAll(client: OFWClient, opts: SyncAllOptions, store: Ca
   if (unreadInbox.length > 0) {
     notes.push(`${unreadInbox.length} unread inbox messages cached without bodies. Call ofw_get_message(id) to read them — this will mark them as read on OFW.`);
   }
+  if (notRefreshed.length > 0) {
+    notes.push(`NOT checked against OurFamilyWizard on this call: ${notRefreshed.join(', ')}. No count is reported for ${notRefreshed.length > 1 ? 'those folders' : 'that folder'} — absence of a count means "not looked at", not "no changes". Cached contents may be behind the server; call ofw_sync_messages again to finish, or ofw_check_freshness for a cheap live confirmation.`);
+  }
   if (!done) {
     notes.push('Paused after the request budget to stay within the hosting limit; more pages remain — call ofw_sync_messages again with the same arguments to resume where it left off and continue the backfill.');
   }
   const note = notes.length > 0 ? notes.join('\n\n') : undefined;
 
-  return { synced, unreadInbox, done, ...(note ? { note } : {}) };
+  return {
+    synced,
+    unreadInbox,
+    done,
+    syncComplete: done,
+    refreshed,
+    notRefreshed,
+    ...(note ? { note } : {}),
+  };
 }

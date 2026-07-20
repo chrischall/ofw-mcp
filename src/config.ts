@@ -115,3 +115,28 @@ export function getSyncMaxRequests(): number {
   if (!Number.isInteger(n) || n <= 0) return Number.POSITIVE_INFINITY;
   return n;
 }
+
+/** Default for getFreshnessTtlSeconds() when OFW_FRESHNESS_TTL_SECONDS is unset. */
+export const DEFAULT_FRESHNESS_TTL_SECONDS = 300;
+
+/**
+ * How long a folder's verified-against-OFW state stays labelled `fresh`.
+ *
+ * Read tools serve from the local cache, so every read result carries a
+ * `freshness` block saying when the data was last actually compared against
+ * OFW. Past this age the block downgrades to `unverified` and grows a warning,
+ * because a co-parent can send a message — or edit a draft in the OFW web app,
+ * which bumps no timestamp at all — at any moment without us hearing about it.
+ *
+ * Set OFW_FRESHNESS_TTL_SECONDS to a positive integer to tune it. Anything
+ * else (unset / blank / zero / negative / non-integer) falls back to the
+ * default: a bad value must not silently widen the window in which stale data
+ * is presented as current.
+ */
+export function getFreshnessTtlSeconds(): number {
+  const raw = readEnvVar('OFW_FRESHNESS_TTL_SECONDS');
+  if (raw === undefined) return DEFAULT_FRESHNESS_TTL_SECONDS;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n <= 0) return DEFAULT_FRESHNESS_TTL_SECONDS;
+  return n;
+}
