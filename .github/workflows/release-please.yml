@@ -60,3 +60,16 @@ jobs:
           skill-path: skills/ofw/SKILL.md
           clawhub-token: ${{ secrets.CLAWHUB_TOKEN }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
+
+  # Deploy the hosted connector Worker at the released tag, so what is live
+  # tracks the release instead of drifting behind main. Deliberately not
+  # `needs: publish` — the connector is independent of npm and the MCP registry,
+  # so a registry hiccup should not leave it stale. Serialisation against the
+  # workflow_dispatch stub is declared by the reusable workflow.
+  deploy-connector:
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    uses: chrischall/workflows/.github/workflows/reusable-mcp-connector-deploy.yml@main
+    with:
+      ref: ${{ needs.release-please.outputs.tag_name }}
+    secrets: inherit
