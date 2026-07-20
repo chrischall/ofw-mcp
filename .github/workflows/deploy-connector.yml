@@ -1,0 +1,47 @@
+# Copy to `.github/workflows/deploy-connector.yml` in an MCP repo that ships a
+# hosted connector Worker.
+#
+# This stub is ONLY the on-demand path — redeploy any ref without cutting a
+# release, or retry a release deploy that failed. The automatic path belongs in
+# `release-please.yml`, so the deploy is pinned to the release tag:
+#
+#   deploy-connector:
+#     needs: release-please
+#     if: needs.release-please.outputs.release_created == 'true'
+#     uses: chrischall/workflows/.github/workflows/reusable-mcp-connector-deploy.yml@main
+#     with:
+#       ref: ${{ needs.release-please.outputs.tag_name }}
+#     secrets: inherit
+#
+# Requires a `CLOUDFLARE_API_TOKEN` repo secret (`set-fleet-secrets` adds it to
+# repos carrying a wrangler config).
+#
+# NOTE: workflow_dispatch only appears in the Actions UI once this file is on the
+# repo's DEFAULT branch — you cannot trigger it from a PR branch.
+
+name: deploy-connector
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Git ref to deploy (branch, tag or SHA).
+        type: string
+        default: main
+        required: true
+
+permissions:
+  contents: read
+
+# No concurrency block here on purpose. A group declared in THIS file would only
+# serialise workflow_dispatch runs against each other — the release-triggered
+# deploy lives in release-please.yml and inherits that workflow's group instead,
+# so the two could still race onto the same Worker. The reusable workflow
+# declares one shared group per repository, which covers both entry points.
+
+jobs:
+  deploy:
+    uses: chrischall/workflows/.github/workflows/reusable-mcp-connector-deploy.yml@main
+    with:
+      ref: ${{ inputs.ref }}
+    secrets: inherit
