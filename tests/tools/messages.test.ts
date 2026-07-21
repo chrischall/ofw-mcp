@@ -7,6 +7,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { OFWClient } from '../../src/client.js';
 import { registerMessageTools } from '../../src/tools/messages.js';
 import { NodeAttachmentIO } from '../../src/tools/attachments.js';
+import type { AttachmentIO, ResolvedUpload } from '../../src/tools/attachments.js';
 import { draftRevision } from '../../src/tools/draft-freshness.js';
 import { OFWCache } from '../../src/cache/node.js';
 import { sampleMessageRow } from '../_fixtures.js';
@@ -2072,6 +2073,237 @@ describe('ofw_download_attachment', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
       void reqSpy; // silence unused-var lint
+    }
+  });
+
+  // Real magic-number signatures for the sniff path.
+  const PNG_SIG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  const pngFixture = (extra = 'png-body'): Buffer => Buffer.concat([PNG_SIG, Buffer.from(extra)]);
+  const jpegFixture = (): Buffer => Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.from('jpeg-body')]);
+  const gifFixture = (): Buffer => Buffer.from('GIF89a' + 'gif-body');
+  const webpFixture = (): Buffer => Buffer.concat([
+    Buffer.from('RIFF'), Buffer.from([0x00, 0x00, 0x00, 0x00]), Buffer.from('WEBP'), Buffer.from('webp-body'),
+  ]);
+
+  // Build a fresh handler set backed by a hosted (no-filesystem) AttachmentIO.
+  function setupHosted(client: OFWClient): Map<string, ToolHandler> {
+    const hostedIO: AttachmentIO = {
+      supportsDisk: false,
+      resolveUpload: (): Promise<ResolvedUpload> => Promise.reject(new Error('no disk')),
+      readDownloaded: (): Buffer | null => { throw new Error('no disk'); },
+      writeDownload: (): void => { throw new Error('no disk'); },
+    };
+    const server = new McpServer({ name: 'test', version: '0.0.0' });
+    const localHandlers = new Map<string, ToolHandler>();
+    vi.spyOn(server, 'registerTool').mockImplementation((name: string, _config: unknown, cb: unknown) => {
+      localHandlers.set(name, cb as ToolHandler);
+      return undefined as never;
+    });
+    registerMessageTools(server, client, cacheProvider, hostedIO);
+    return localHandlers;
+  }
+
+  it('strips a charset parameter off an image Content-Type before rendering (repro fileId 57291220)', async () => {
+    const client = new OFWClient();
+    const bytes = pngFixture('IMG_9905');
+    vi.spyOn(client, 'request').mockResolvedValueOnce({
+      fileId: 57291220, fileName: 'IMG_9905.png', label: 'IMG_9905.png',
+      fileType: 'image/png', fileSize: bytes.length,
+    });
+    vi.spyOn(client, 'requestBinary').mockResolvedValueOnce({
+      // OFW hands back a bogus charset on a binary attachment.
+      body: bytes, contentType: 'image/png;charset=UTF-8', suggestedFileName: 'IMG_9905.png',
+    });
+    setup(client);
+
+    const result = await handlers.get('ofw_download_attachment')!({ fileId: 57291220, inline: true });
+    const meta = JSON.parse(result.content[0].text);
+    expect(meta.mimeType).toBe('image/png');
+    const img = result.content[1];
+    expect(img.type).toBe('image');
+    // Bare media type only — no ";" parameter the host would reject.
+    expect(img.mimeType).toBe('image/png');
+    expect(img.mimeType).not.toContain(';');
+    expect(Buffer.from(img.data, 'base64').equals(bytes)).toBe(true);
+  });
+
+  it('sniffs a PNG from the bytes when the upstream Content-Type is wrong', async () => {
+    const client = new OFWClient();
+    const bytes = pngFixture();
+    vi.spyOn(client, 'request').mockResolvedValueOnce({
+      fileId: 201, fileName: 'photo.bin', label: 'photo.bin',
+      fileType: 'application/octet-stream', fileSize: bytes.length,
+    });
+    vi.spyOn(client, 'requestBinary').mockResolvedValueOnce({
+      // Lying header + non-image extension — only the magic number is truthful.
+      body: bytes, contentType: 'text/plain;charset=UTF-8', suggestedFileName: 'photo.bin',
+    });
+    setup(client);
+
+    const result = await handlers.get('ofw_download_attachment')!({ fileId: 201, inline: true });
+    const meta = JSON.parse(result.content[0].text);
+    expect(meta.mimeType).toBe('image/png');
+    expect(result.content[1].type).toBe('image');
+    expect(result.content[1].mimeType).toBe('image/png');
+  });
+
+  it.each([
+    ['JPEG', 'image/jpeg', 'image/jpeg;charset=UTF-8', 'p.jpg', jpegFixture],
+    ['GIF', 'image/gif', 'image/gif; charset=binary', 'p.gif', gifFixture],
+    ['WEBP', 'image/webp', 'image/webp;charset=UTF-8', 'p.webp', webpFixture],
+  ] as const)('normalizes a parameter-laden %s Content-Type and renders it inline', async (_label, bare, header, name, make) => {
+    const client = new OFWClient();
+    const bytes = make();
+    vi.spyOn(client, 'request').mockResolvedValueOnce({
+      fileId: 300, fileName: name, label: name, fileType: bare, fileSize: bytes.length,
+    });
+    vi.spyOn(client, 'requestBinary').mockResolvedValueOnce({
+      body: bytes, contentType: header, suggestedFileName: name,
+    });
+    setup(client);
+
+    const result = await handlers.get('ofw_download_attachment')!({ fileId: 300, inline: true });
+    const meta = JSON.parse(result.content[0].text);
+    expect(meta.mimeType).toBe(bare);
+    const img = result.content[1];
+    expect(img.type).toBe('image');
+    expect(img.mimeType).toBe(bare);
+    expect(Buffer.from(img.data, 'base64').equals(bytes)).toBe(true);
+  });
+
+  it('returns a non-renderable type (docx) as an EmbeddedResource with a normalized mime', async () => {
+    const client = new OFWClient();
+    const docx = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+    const bytes = Buffer.from('PK\x03\x04 fake docx', 'binary');
+    vi.spyOn(client, 'request').mockResolvedValueOnce({
+      fileId: 400, fileName: 'brief.docx', label: 'brief.docx', fileType: docx, fileSize: bytes.length,
+    });
+    vi.spyOn(client, 'requestBinary').mockResolvedValueOnce({
+      body: bytes, contentType: `${docx}; name=brief.docx`, suggestedFileName: 'brief.docx',
+    });
+    setup(client);
+
+    const result = await handlers.get('ofw_download_attachment')!({ fileId: 400, inline: true });
+    const meta = JSON.parse(result.content[0].text);
+    expect(meta.mimeType).toBe(docx);
+    const res = result.content[1];
+    expect(res.type).toBe('resource');
+    expect(res.resource.mimeType).toBe(docx);
+    expect(res.resource.mimeType).not.toContain(';');
+    expect(Buffer.from(res.resource.blob, 'base64').equals(bytes)).toBe(true);
+  });
+
+  it('normalizes a PDF Content-Type carrying a name parameter', async () => {
+    const client = new OFWClient();
+    const bytes = Buffer.from('%PDF-1.7 body', 'utf8');
+    vi.spyOn(client, 'request').mockResolvedValueOnce({
+      fileId: 500, fileName: 'statement.pdf', label: 'statement.pdf',
+      fileType: 'application/pdf', fileSize: bytes.length,
+    });
+    vi.spyOn(client, 'requestBinary').mockResolvedValueOnce({
+      body: bytes, contentType: 'application/pdf; name="statement.pdf"', suggestedFileName: 'statement.pdf',
+    });
+    setup(client);
+
+    const result = await handlers.get('ofw_download_attachment')!({ fileId: 500, inline: true });
+    expect(result.content[1].resource.mimeType).toBe('application/pdf');
+  });
+
+  it('hosted (no disk): explicit inline:false still returns bytes and marks forcedInline', async () => {
+    const client = new OFWClient();
+    const bytes = pngFixture('hosted');
+    vi.spyOn(client, 'request').mockResolvedValueOnce({
+      fileId: 600, fileName: 'kid.png', label: 'kid.png',
+      fileType: 'image/png', fileSize: bytes.length,
+    });
+    vi.spyOn(client, 'requestBinary').mockResolvedValueOnce({
+      body: bytes, contentType: 'image/png;charset=UTF-8', suggestedFileName: 'kid.png',
+    });
+    const hosted = setupHosted(client);
+
+    // Caller asks for disk explicitly; the connector has none, so inline is forced
+    // rather than erroring — the request must not be a dead end.
+    const result = await hosted.get('ofw_download_attachment')!({ fileId: 600, inline: false, saveTo: '/tmp/x.png' });
+    const meta = JSON.parse(result.content[0].text);
+    expect(meta.mode).toBe('inline');
+    expect(meta.forcedInline).toBe(true);
+    expect(meta.mimeType).toBe('image/png');
+    const img = result.content[1];
+    expect(img.type).toBe('image');
+    expect(Buffer.from(img.data, 'base64').equals(bytes)).toBe(true);
+  });
+
+  it('hosted (no disk): default inline is not marked forcedInline', async () => {
+    const prev = process.env.OFW_INLINE_ATTACHMENTS;
+    process.env.OFW_INLINE_ATTACHMENTS = 'true';
+    try {
+      const client = new OFWClient();
+      const bytes = pngFixture('default');
+      vi.spyOn(client, 'request').mockResolvedValueOnce({
+        fileId: 601, fileName: 'kid.png', label: 'kid.png',
+        fileType: 'image/png', fileSize: bytes.length,
+      });
+      vi.spyOn(client, 'requestBinary').mockResolvedValueOnce({
+        body: bytes, contentType: 'image/png', suggestedFileName: 'kid.png',
+      });
+      const hosted = setupHosted(client);
+
+      const result = await hosted.get('ofw_download_attachment')!({ fileId: 601 });
+      const meta = JSON.parse(result.content[0].text);
+      expect(meta.mode).toBe('inline');
+      expect(meta.forcedInline).toBeUndefined();
+    } finally {
+      if (prev === undefined) delete process.env.OFW_INLINE_ATTACHMENTS;
+      else process.env.OFW_INLINE_ATTACHMENTS = prev;
+    }
+  });
+
+  it('byte integrity: inline base64 round-trips a large image unchanged', async () => {
+    const client = new OFWClient();
+    // A body large enough to exercise base64 chunking; deterministic contents.
+    const big = Buffer.concat([PNG_SIG, Buffer.alloc(525245 - PNG_SIG.length, 0xab)]);
+    vi.spyOn(client, 'request').mockResolvedValueOnce({
+      fileId: 57291220, fileName: 'IMG_9905.png', label: 'IMG_9905.png',
+      fileType: 'image/png', fileSize: big.length,
+    });
+    vi.spyOn(client, 'requestBinary').mockResolvedValueOnce({
+      body: big, contentType: 'image/png;charset=UTF-8', suggestedFileName: 'IMG_9905.png',
+    });
+    setup(client);
+
+    const result = await handlers.get('ofw_download_attachment')!({ fileId: 57291220, inline: true });
+    const meta = JSON.parse(result.content[0].text);
+    expect(meta.sizeBytes).toBe(525245);
+    const decoded = Buffer.from(result.content[1].data, 'base64');
+    expect(decoded.length).toBe(525245);
+    expect(decoded.equals(big)).toBe(true);
+  });
+
+  it('disk mode normalizes the returned mime (bytes sniffed) and the no-op mime too', async () => {
+    const client = new OFWClient();
+    const bytes = pngFixture('disk');
+    vi.spyOn(client, 'request').mockResolvedValueOnce({
+      fileId: 700, fileName: 'shot.png', label: 'shot.png',
+      fileType: 'image/png', fileSize: bytes.length,
+    });
+    vi.spyOn(client, 'requestBinary').mockResolvedValueOnce({
+      body: bytes, contentType: 'image/png;charset=UTF-8', suggestedFileName: 'shot.png',
+    });
+    setup(client);
+    const dir = mkdtempSync(join(tmpdir(), 'ofw-dl-'));
+    try {
+      const first = await handlers.get('ofw_download_attachment')!({ fileId: 700, saveTo: dir + '/' });
+      const parsed = JSON.parse(first.content[0].text);
+      expect(parsed.mimeType).toBe('image/png');
+      expect(parsed.mimeType).not.toContain(';');
+      // No-op path also reports a bare mime (sourced from cached metadata).
+      const second = await handlers.get('ofw_download_attachment')!({ fileId: 700, saveTo: dir + '/' });
+      const parsed2 = JSON.parse(second.content[0].text);
+      expect(parsed2.note).toBe('already downloaded');
+      expect(parsed2.mimeType).toBe('image/png');
+      expect(parsed2.mimeType).not.toContain(';');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });
