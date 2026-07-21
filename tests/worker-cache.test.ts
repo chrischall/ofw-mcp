@@ -22,6 +22,7 @@ import type { AttachmentIO, ResolvedUpload } from '../src/tools/attachments.js';
 const CACHE = (env as unknown as { CACHE_DO: DurableObjectNamespace<OFWCacheDO> }).CACHE_DO;
 
 const stubAttachmentIO: AttachmentIO = {
+  supportsDisk: false,
   resolveUpload(): Promise<ResolvedUpload> {
     return Promise.reject(new Error('not used'));
   },
