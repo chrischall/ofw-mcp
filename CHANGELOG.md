@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.7.0](https://github.com/chrischall/ofw-mcp/compare/v2.6.7...v2.7.0) (2026-07-21)
+
+
+### Features
+
+* **messages:** make every read declare how fresh its data is ([#169](https://github.com/chrischall/ofw-mcp/issues/169)) ([d42bb8d](https://github.com/chrischall/ofw-mcp/commit/d42bb8d1bf92ea57308c312c958e1b29ca3738a6))
+
+
+### Bug Fixes
+
+* normalize attachment MIME and guarantee a hosted retrieval path ([#172](https://github.com/chrischall/ofw-mcp/issues/172)) ([59952fc](https://github.com/chrischall/ofw-mcp/commit/59952fceebd341ad00af41e21f17c03c55cabe25))
+
 ## [2.6.7](https://github.com/chrischall/ofw-mcp/compare/v2.6.6...v2.6.7) (2026-07-19)
 
 
