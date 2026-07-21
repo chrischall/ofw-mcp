@@ -32,6 +32,7 @@ const cacheContext = new WeakMap<
 // from a local file path are simply unavailable. Every disk method therefore
 // throws an actionable error rather than reaching for node:fs.
 const workerAttachmentIO: AttachmentIO = {
+  supportsDisk: false,
   resolveUpload(_path: string): Promise<ResolvedUpload> {
     return Promise.reject(
       createHelpfulError('Uploading a local file path is not available on the hosted OFW connector.', {

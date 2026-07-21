@@ -12,6 +12,7 @@ import type { DraftContent } from './draft-freshness.js';
 import type { CacheStore, MessageRow, DraftRow, FolderName } from '../cache/store.js';
 import { getFolderVerifiedAt } from '../sync.js';
 import type { AttachmentIO } from './attachments.js';
+import { isHostRenderableImage, resolveDownloadMime } from './attachments.js';
 import { getAttachmentsDir, getDefaultInlineAttachments, getSyncMaxRequests, getWriteMode } from '../config.js';
 import { basename, join } from 'node:path';
 import { ApiRecipientSchema, expandPath, hasRealView, jsonErrorResponse, jsonResponse, mapRecipients, postMessageAndRefetch, textResponse, verifyWriteLanded, withReadState } from './_shared.js';
@@ -870,18 +871,24 @@ export function registerMessageTools(
   });
 
   server.registerTool('ofw_download_attachment', {
-    description: 'Download an OFW message attachment by fileId. By default, bytes are saved to disk (~/Downloads/ofw-mcp/) and the response carries the absolute path, mime type, and size for the caller to read back. Pass inline:true to skip disk entirely and return the bytes as MCP content blocks — images come back as ImageContent (the model sees them directly); other files come back as an EmbeddedResource blob. Use inline for small files where you want the model to read content immediately and the host is sandboxed; use disk for large files or when you want a persistent local copy. The default for `inline` can be flipped server-side via the OFW_INLINE_ATTACHMENTS env var (set to "true" to make inline the default). fileId comes from attachments[].fileId on ofw_get_message. Override disk destination with OFW_ATTACHMENTS_DIR or saveTo. Re-downloading to the same path is a no-op (disk mode only).',
+    description: 'Download an OFW message attachment by fileId. By default, bytes are saved to disk (~/Downloads/ofw-mcp/) and the response carries the absolute path, mime type, and size for the caller to read back. Pass inline:true to skip disk entirely and return the bytes as MCP content blocks — host-renderable images (PNG/JPEG/GIF/WEBP) come back as ImageContent (the model sees them directly); every other file comes back as an EmbeddedResource blob carrying the bytes. Reported mime types are always normalized to a bare media type (no charset/name parameters). Use inline for small files where you want the model to read content immediately and the host is sandboxed; use disk for large files or when you want a persistent local copy. The default for `inline` can be flipped server-side via the OFW_INLINE_ATTACHMENTS env var (set to "true" to make inline the default). On a hosted deployment with no filesystem, disk mode is unavailable, so inline is forced (the response is marked forcedInline:true) rather than failing. fileId comes from attachments[].fileId on ofw_get_message. Override disk destination with OFW_ATTACHMENTS_DIR or saveTo. Re-downloading to the same path is a no-op (disk mode only).',
     annotations: { readOnlyHint: false },
     inputSchema: {
       fileId: z.number().describe('Attachment file id (from ofw_get_message → attachments[].fileId)'),
-      inline: z.boolean().describe('If true, return bytes inline as MCP content (image for image/*, embedded resource blob otherwise) and skip the disk write. If false, write to disk and return the path. If omitted, falls back to the OFW_INLINE_ATTACHMENTS env var (default: false = disk).').optional(),
-      saveTo: z.string().describe('Absolute path or directory to write to. If a directory, the OFW filename is used. Default: ~/Downloads/ofw-mcp/<fileId>-<filename>. Ignored when inline:true.').optional(),
+      inline: z.boolean().describe('If true, return bytes inline as MCP content (ImageContent for host-renderable images, embedded resource blob otherwise) and skip the disk write. If false, write to disk and return the path — except on a hosted deployment with no filesystem, where inline is forced (forcedInline:true) so the bytes are still returned. If omitted, falls back to the OFW_INLINE_ATTACHMENTS env var (default: false = disk).').optional(),
+      saveTo: z.string().describe('Absolute path or directory to write to. If a directory, the OFW filename is used. Default: ~/Downloads/ofw-mcp/<fileId>-<filename>. Ignored when inline is in effect.').optional(),
       force: z.boolean().describe('Re-download even if already on disk. Default false. Ignored when inline:true (inline always fetches fresh bytes, or reuses an on-disk copy if present).').optional(),
     },
   }, async (args) => {
     const fileId = args.fileId;
     const cache = cacheProvider();
-    const inline = args.inline ?? getDefaultInlineAttachments();
+    const requestedInline = args.inline ?? getDefaultInlineAttachments();
+    // When the deployment has no filesystem (hosted connector), inline is the
+    // ONLY path to the bytes — force it rather than erroring on a disk write.
+    // `forcedInline` records that we overrode an explicit `inline:false` so the
+    // response is honest about it instead of silently ignoring the argument.
+    const inline = requestedInline || !attachmentIO.supportsDisk;
+    const forcedInline = inline && !requestedInline;
     let cached = await cache.getAttachment(fileId);
     if (!cached) {
       // Not in cache. Fetch metadata and store under the messageId=0
@@ -895,7 +902,7 @@ export function registerMessageTools(
     if (inline) {
       // Reuse on-disk bytes if we already have them; otherwise fetch fresh.
       let bytes: Buffer | null = null;
-      let mimeType = cached.mimeType;
+      let headerMime: string | null = cached.mimeType;
       let fileName = cached.fileName;
       if (cached.downloadedPath) {
         bytes = attachmentIO.readDownloaded(cached.downloadedPath);
@@ -903,14 +910,24 @@ export function registerMessageTools(
       if (bytes === null) {
         const response = await client.requestBinary('GET', `/pub/v1/myfiles/${fileId}/data`);
         bytes = response.body;
-        mimeType = response.contentType ?? cached.mimeType;
+        headerMime = response.contentType ?? cached.mimeType;
         fileName = response.suggestedFileName ?? cached.fileName;
       }
+      // Normalize to a bare media type: sniff the bytes first (OFW tacks a bogus
+      // charset onto binaries), then fall back to the stripped header, then the
+      // extension. A parameter suffix would make the host reject an image.
+      const mimeType = resolveDownloadMime(bytes, headerMime, fileName);
       const base64 = bytes.toString('base64');
-      const metaBlock = { type: 'text' as const, text: JSON.stringify({
+      const meta: Record<string, unknown> = {
         fileId, fileName, mimeType, sizeBytes: bytes.length, mode: 'inline',
-      }, null, 2) };
-      if (mimeType.startsWith('image/')) {
+      };
+      if (forcedInline) meta.forcedInline = true;
+      const metaBlock = { type: 'text' as const, text: JSON.stringify(meta, null, 2) };
+      // Only host-renderable image types go back as ImageContent (with the bare
+      // media type the renderer accepts); everything else — non-renderable
+      // images included — goes back as an EmbeddedResource so the caller always
+      // gets the bytes.
+      if (isHostRenderableImage(mimeType)) {
         return { content: [metaBlock, { type: 'image' as const, data: base64, mimeType }] };
       }
       return { content: [metaBlock, { type: 'resource' as const, resource: {
@@ -937,8 +954,11 @@ export function registerMessageTools(
 
     if (!args.force && cached.downloadedPath === dest) {
       return jsonResponse({
-        fileId, path: dest, mimeType: cached.mimeType, sizeBytes: cached.sizeBytes,
-        fileName: cached.fileName, note: 'already downloaded',
+        // No bytes on hand for the no-op case: normalize the cached/extension
+        // MIME (empty buffer sniffs nothing) so a stored `image/png;charset=…`
+        // still reports bare.
+        fileId, path: dest, mimeType: resolveDownloadMime(Buffer.alloc(0), cached.mimeType, cached.fileName),
+        sizeBytes: cached.sizeBytes, fileName: cached.fileName, note: 'already downloaded',
       });
     }
 
@@ -946,12 +966,13 @@ export function registerMessageTools(
     attachmentIO.writeDownload(dest, response.body);
     await cache.markAttachmentDownloaded(fileId, dest);
 
+    const fileName = response.suggestedFileName ?? cached.fileName;
     return jsonResponse({
       fileId,
       path: dest,
-      mimeType: response.contentType ?? cached.mimeType,
+      mimeType: resolveDownloadMime(response.body, response.contentType ?? cached.mimeType, fileName),
       sizeBytes: response.body.length,
-      fileName: response.suggestedFileName ?? cached.fileName,
+      fileName,
     });
   });
 

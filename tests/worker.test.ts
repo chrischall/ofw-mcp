@@ -33,6 +33,7 @@ const CACHE = (env as unknown as { CACHE_DO: DurableObjectNamespace<OFWCacheDO> 
 
 // Registration never touches disk, so a throwing stub is sufficient here.
 const stubAttachmentIO: AttachmentIO = {
+  supportsDisk: false,
   resolveUpload(): Promise<ResolvedUpload> {
     return Promise.reject(new Error('not used during registration'));
   },
