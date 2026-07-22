@@ -3,7 +3,7 @@ import { TokenManager } from '@chrischall/mcp-utils/session';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import { resolveAuth, type ResolvedAuth } from './auth.js';
-import { BASE_URL, OFW_PROTOCOL_HEADERS, OFW_TOKEN_TTL_MS, OFW_TOKEN_EXPIRY_SKEW_MS } from './protocol.js';
+import { BASE_URL, OFW_PROTOCOL_HEADERS, OFW_TOKEN_TTL_MS, OFW_TOKEN_EXPIRY_SKEW_MS, assertOfwUrl } from './protocol.js';
 
 // Load .env for local dev; silently skip if dotenv is unavailable (e.g. mcpb
 // bundle). loadDotenvSafely applies override:false + quiet:true and swallows a
@@ -179,6 +179,8 @@ export class OFWClient {
     if (body !== undefined && !isFormData) headers['Content-Type'] = 'application/json';
 
     const url = `${BASE_URL}${path}`;
+    // Enforced egress allowlist — the resolved URL must resolve to the OFW host.
+    assertOfwUrl(url);
     if (debugLogEnabled()) {
       const bodyPreview = body === undefined
         ? '<none>'

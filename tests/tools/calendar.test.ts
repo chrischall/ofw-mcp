@@ -46,6 +46,18 @@ function setup(client: OFWClient) {
 
 afterEach(() => vi.restoreAllMocks());
 
+// Default write mode is now fail-safe 'none'; these tests exercise the write
+// tools, so opt into 'all'. The OFW_WRITE_MODE gating describe overrides.
+let originalWriteMode: string | undefined;
+beforeEach(() => {
+  originalWriteMode = process.env.OFW_WRITE_MODE;
+  process.env.OFW_WRITE_MODE = 'all';
+});
+afterEach(() => {
+  if (originalWriteMode === undefined) delete process.env.OFW_WRITE_MODE;
+  else process.env.OFW_WRITE_MODE = originalWriteMode;
+});
+
 describe('ofw_list_events', () => {
   it('calls calendar/basic by default', async () => {
     const events = [{ id: 1, title: 'School pickup' }];

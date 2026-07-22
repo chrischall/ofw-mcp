@@ -48,7 +48,13 @@ export type WriteMode = 'none' | 'drafts' | 'all';
  *           ofw_upload_attachment). Nothing that lands on the court-visible
  *           record (send, calendar/expense/journal writes) is registered —
  *           the only way to send remains a human in the OFW web UI.
- *   all     Every tool registers (the default; fully backward compatible).
+ *   all     Every tool registers.
+ *
+ * Default is 'none' (fail-safe). OFW is a court-of-record platform, so an
+ * unconfigured install must not be able to send a message or mutate the record
+ * until the operator deliberately opts up (OFW_WRITE_MODE=drafts|all).
+ * BREAKING vs pre-flip releases, which defaulted to 'all': existing installs
+ * that rely on write tools must now set OFW_WRITE_MODE explicitly.
  *
  * Unregistered tools cannot be invoked by any host permission setting or
  * injected instruction — the gate is structural, not behavioral. An
@@ -57,7 +63,7 @@ export type WriteMode = 'none' | 'drafts' | 'all';
  */
 export function getWriteMode(): WriteMode {
   const raw = process.env.OFW_WRITE_MODE;
-  if (typeof raw !== 'string' || raw.trim().length === 0) return 'all';
+  if (typeof raw !== 'string' || raw.trim().length === 0) return 'none';
   const mode = raw.trim().toLowerCase();
   if (mode === 'none' || mode === 'drafts' || mode === 'all') return mode;
   // stdio transport: stderr only — stdout is reserved for JSON-RPC.
