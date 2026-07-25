@@ -15,9 +15,13 @@
 #       ref: ${{ needs.release-please.outputs.tag_name }}
 #     secrets:
 #       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+#       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
 #
-# Requires a `CLOUDFLARE_API_TOKEN` repo secret (`set-fleet-secrets` adds it to
-# repos carrying a wrangler config).
+# Requires a `CLOUDFLARE_API_TOKEN` repo secret, and `CLOUDFLARE_ACCOUNT_ID` when
+# the token can reach more than one Cloudflare account (wrangler cannot
+# disambiguate on its own). `set-fleet-secrets` adds the token to repos carrying
+# a wrangler config. Both are passed through below; an absent one is not fatal —
+# the reusable workflow warns and skips rather than failing the release.
 #
 # NOTE: workflow_dispatch only appears in the Actions UI once this file is on the
 # repo's DEFAULT branch — you cannot trigger it from a PR branch.
