@@ -39,6 +39,8 @@ const SavedDraftDetailSchema = z.looseObject({
   date: DateSchema.optional(),
   replyToId: z.number().nullable().optional(),
   recipients: z.array(ApiRecipientSchema).optional(),
+  // Read to audit whether requested myFileIDs actually attached (Defect 3).
+  files: z.array(z.number()).optional(),
 });
 
 // ofw_get_message's uncached detail fetch — lenient: a mismatch warns to
@@ -573,7 +575,15 @@ export function registerMessageTools(
     }
 
     const verdict = checkDraftFreshness({ server, cached, expectedRevision });
-    if (verdict.verdict === 'FRESH') return { ok: true, note: null };
+    if (verdict.verdict === 'FRESH') {
+      // A metadata-only "conflict" is the connector's own post-save replyToId
+      // normalization catching up — safe to proceed, but say so rather than
+      // pretending nothing moved.
+      const note = verdict.metadataOnly
+        ? `NOTE: draft ${draftId} was treated as current for this ${action}. Since you read it, OurFamilyWizard normalized connector-authored metadata (${verdict.changedFields.join(', ')}); the subject, body and recipients are unchanged, so this is not a conflict.`
+        : null;
+      return { ok: true, note };
+    }
 
     if (force) {
       // Loud, and the overwritten content rides along in the response so it is
@@ -643,7 +653,7 @@ export function registerMessageTools(
   });
 
   if (allowDrafts) server.registerTool('ofw_save_draft', {
-    description: 'Save a message as a draft in OurFamilyWizard. Recipients are optional. Pass messageId to replace an existing draft — note that under the hood this creates a NEW draft and deletes the old one (OFW\'s update-in-place endpoint silently no-ops while echoing the posted body, so we don\'t use it); the response.id will be the NEW id, not the messageId you passed, and the change is documented in a transparency NOTE in the response. If replyToId is provided, the cache may rewrite it to the latest reply in the thread (note included in response). Attach files by passing their fileIds (from ofw_upload_attachment) in myFileIDs. After saving, the tool re-fetches the draft from OFW to populate the local cache from authoritative server state. SAFETY: because replacing DESTROYS the old draft rather than merging, passing messageId first re-reads that draft from OFW and REFUSES the write if it changed since you read it (drafts edited in the OFW web app do not bump any timestamp, so the local cache can be silently behind). The refusal returns the current server body under serverBody — merge your edit into it and retry with expectedRevision.',
+    description: 'Save a message as a draft in OurFamilyWizard. Recipients are optional. Pass messageId to replace an existing draft — note that under the hood this creates a NEW draft and deletes the old one (OFW\'s update-in-place endpoint silently no-ops while echoing the posted body, so we don\'t use it); the response.id will be the NEW id, not the messageId you passed, and the change is documented in a transparency NOTE in the response that also lists which fields (subject/body/recipients/replyToId/attachments) were carried over. If replyToId is provided, the cache may rewrite it to the latest reply in the thread (note included in response). Attach files by passing their fileIds (from ofw_upload_attachment) in myFileIDs. After saving, the tool re-fetches the draft from OFW to populate the local cache from authoritative server state, and the returned `revision` reflects that authoritative state (so it will match on your next edit). FIELD PRESERVATION: the response echoes the effective threading (replyToId/inReplyTo) and, whenever OFW did not carry over a requested replyToId, recipient or attachment, a `warnings[]` entry naming what was dropped — never a silent null. SAFETY: because replacing DESTROYS the old draft rather than merging, passing messageId first re-reads that draft from OFW and REFUSES the write if its subject/body/recipients changed since you read it (drafts edited in the OFW web app do not bump any timestamp, so the local cache can be silently behind). A pure replyToId normalization by OFW is NOT treated as a conflict. The refusal returns the current server body under serverBody — merge your edit into it and retry with expectedRevision.',
     annotations: { readOnlyHint: false },
     inputSchema: {
       subject: z.string().describe('Message subject'),
@@ -708,20 +718,64 @@ export function registerMessageTools(
     let replaceNote: string | null = null;
     let verifyNote: string | null = null;
     let newRevision: string | null = null;
+    // Fields accepted on the write that the saved draft must carry — or their
+    // loss must be reported. Never a silent drop (Defect 3).
+    const warnings: string[] = [];
 
     if (newId !== null) {
       verifyNote = verifyWriteLanded('draft', { subject: args.subject, body: args.body }, detail);
+      // Trust the re-fetched server detail as the source of truth for the stored
+      // replyToId — NOT `resolvedReplyTo` (what we intended to post). OFW
+      // normalizes/drops threading after a save, and masking that with our own
+      // intent (the old `detail.replyToId ?? resolvedReplyTo`) both returned a
+      // revision that was stale on arrival (Defect 1) and hid a dropped reply
+      // link (Defect 3). `?? null` keeps a genuinely-echoed value and reflects a
+      // null/absent one honestly.
+      const effectiveReplyTo = detail.replyToId ?? null;
+      const storedRecipients = mapRecipients(detail.recipients);
       persisted = {
         id: newId,
         subject: detail.subject ?? args.subject,
         body: detail.body ?? '',
-        recipients: mapRecipients(detail.recipients),
-        replyToId: detail.replyToId ?? resolvedReplyTo,
+        recipients: storedRecipients,
+        replyToId: effectiveReplyTo,
         modifiedAt: detail.date?.dateTime ?? new Date().toISOString(),
         listData: detail,
       };
       await cache.upsertDraft(persisted);
+      // The revision is now computed from the server-authoritative detail, so it
+      // is the value a subsequent read/verify will observe (Defect 1).
       newRevision = draftRevision(persisted);
+
+      // Audit every field the caller supplied against what actually landed, so a
+      // silent normalization becomes a visible warning rather than a surprise.
+      if (resolvedReplyTo !== null && effectiveReplyTo !== resolvedReplyTo) {
+        const rewrittenFrom = requestedReplyTo !== resolvedReplyTo ? ` (rewritten from ${requestedReplyTo})` : '';
+        warnings.push(
+          `replyToId was requested as ${resolvedReplyTo}${rewrittenFrom} but the saved draft came back with replyToId ${effectiveReplyTo === null ? 'null' : effectiveReplyTo} — OurFamilyWizard did not thread this draft (its inReplyTo/showContext will be empty). The subject and body were saved; only the reply linkage was dropped. If threading matters, verify on ourfamilywizard.com.`,
+        );
+      }
+      // Only warn on recipients/attachments when the detail actually reported
+      // them — an omitted array is "not echoed", not "dropped", and crying wolf
+      // there would desensitize the caller to the real drops.
+      if (args.recipientIds !== undefined && Array.isArray(detail.recipients)) {
+        const requested = [...new Set(args.recipientIds)].sort((a, b) => a - b);
+        const stored = [...new Set(storedRecipients.map((r) => r.userId))].sort((a, b) => a - b);
+        if (requested.join(',') !== stored.join(',')) {
+          warnings.push(
+            `recipientIds were requested as [${requested.join(', ')}] but the saved draft has [${stored.join(', ')}]. Verify the recipients on ourfamilywizard.com.`,
+          );
+        }
+      }
+      if (myFileIDs.length > 0 && Array.isArray(detail.files)) {
+        const storedFiles = new Set(detail.files);
+        const missing = myFileIDs.filter((id) => !storedFiles.has(id));
+        if (missing.length > 0) {
+          warnings.push(
+            `Attachment fileId(s) ${missing.join(', ')} were requested in myFileIDs but are not attached to the saved draft. Re-upload or re-attach if needed.`,
+          );
+        }
+      }
 
       // Replace-path: caller passed messageId, so they want the old draft
       // gone. Delete it after the new one is safely created+cached.
@@ -729,7 +783,7 @@ export function registerMessageTools(
         try {
           await deleteOFWMessages(client, [args.messageId]);
           await cache.deleteDraft(args.messageId);
-          replaceNote = `NOTE: ofw_save_draft replaced draft ${args.messageId} via create-then-delete. The new draft id is ${newId}; the old draft has been deleted. (OFW's update-in-place endpoint silently no-ops on subsequent updates, so we never use it. If you cached the old id anywhere, replace it with the new one.)`;
+          replaceNote = `NOTE: ofw_save_draft replaced draft ${args.messageId} via create-then-delete. The new draft id is ${newId}; the old draft has been deleted. (OFW's update-in-place endpoint silently no-ops on subsequent updates, so we never use it. If you cached the old id anywhere, replace it with the new one.) Fields carried over to the new draft: subject, body, recipients (${persisted.recipients.length}), replyToId (${persisted.replyToId === null ? 'none' : persisted.replyToId}), attachments (${myFileIDs.length}).${warnings.length > 0 ? ' See warnings above for any field OurFamilyWizard did not carry over.' : ''}`;
         } catch (e) {
           // Partial-failure safety: the new draft is already created and
           // cached, so BOTH drafts now exist. That is the correct end state —
@@ -741,12 +795,24 @@ export function registerMessageTools(
 
     // The draft was just re-fetched from OFW by postMessageAndRefetch, so this
     // one row IS server-confirmed regardless of the drafts folder's overall
-    // cache freshness.
+    // cache freshness. `inReplyTo` echoes the effective threading alongside the
+    // volatile `id`, and `warnings` names any requested field that did not land.
     const responseObj = persisted !== null
-      ? { ...persisted, revision: newRevision, cacheStatus: 'fresh', serverConfirmed: true }
+      ? {
+        ...persisted,
+        inReplyTo: persisted.replyToId,
+        revision: newRevision,
+        cacheStatus: 'fresh',
+        serverConfirmed: true,
+        ...(warnings.length > 0 ? { warnings } : {}),
+      }
       : raw;
     const text = responseObj ? JSON.stringify(responseObj, null, 2) : 'Draft saved.';
-    const notes = [forceNote, rewriteNote, verifyNote, replaceNote].filter((n): n is string => n !== null).join('\n\n');
+    const warnNote = warnings.length > 0
+      ? `WARNING: ${warnings.join('\n\n')}`
+      : null;
+    const notes = [forceNote, rewriteNote, verifyNote, warnNote, replaceNote]
+      .filter((n): n is string => n !== null).join('\n\n');
     return textResponse(notes ? `${notes}\n\n${text}` : text);
   });
 

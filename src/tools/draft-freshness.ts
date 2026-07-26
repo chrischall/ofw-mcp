@@ -110,8 +110,34 @@ export type FreshnessVerdict = 'FRESH' | 'STALE' | 'MISSING';
 export interface FreshnessResult {
   verdict: FreshnessVerdict;
   reason: string;
-  /** Which fields diverged between server and cached base (STALE only). */
+  /** Which fields diverged between server and cached base. */
   changedFields: string[];
+  /**
+   * FRESH verdicts only. True when the sole divergence was
+   * connector/server-authored metadata (`replyToId` normalized after the save)
+   * with the substantive content (subject/body/recipients) intact — so a caller
+   * can note the normalization rather than mistaking it for a conflict. See
+   * SUBSTANTIVE_FIELDS.
+   */
+  metadataOnly?: boolean;
+}
+
+/**
+ * The fields whose divergence constitutes a REAL conflict — the actual message
+ * content a caller would lose if we overwrote a copy edited elsewhere. Anything
+ * NOT listed here (currently only `replyToId`) is connector/server-authored
+ * metadata: OFW normalizes `replyToId` after a draft is saved (dropping it, or
+ * re-targeting it to the thread tip), which is the connector's own mutation
+ * surfacing later — not third-party interference. A divergence in metadata
+ * alone must never refuse the write, or the guard manufactures a false STALE
+ * for a change the caller did not make. See issue thread on save/edit round
+ * trips.
+ */
+const SUBSTANTIVE_FIELDS = ['subject', 'body', 'recipients'] as const;
+
+/** The substantive subset of a changed-field list (drops metadata like replyToId). */
+function substantiveChanges(changed: string[]): string[] {
+  return changed.filter((f) => (SUBSTANTIVE_FIELDS as readonly string[]).includes(f));
 }
 
 function diffFields(a: DraftContent, b: DraftContent): string[] {
@@ -137,8 +163,17 @@ function diffFields(a: DraftContent, b: DraftContent): string[] {
  *  2. No token supplied → the cached base must match the server EXACTLY. This
  *     is the safe default: "no token" never means "force".
  *
- * Everything else — server ahead of cache, no cached base to compare, draft
- * gone from the server — refuses.
+ * In BOTH modes the conflict decision turns on the SUBSTANTIVE fields
+ * (subject/body/recipients), not on any revision delta. When the only thing
+ * that moved is connector/server-authored metadata — `replyToId` normalized
+ * after the save — the content is intact, so it is FRESH (with `metadataOnly`
+ * set) rather than STALE. That is the connector's own mutation resurfacing, not
+ * a third party editing the draft; refusing it would be a false positive that
+ * trains callers to distrust the guard. The fail-safe direction is untouched:
+ * the moment subject, body or recipients differ, it still refuses.
+ *
+ * Everything else — server ahead of cache on real content, no cached base to
+ * compare, draft gone from the server — refuses.
  */
 export function checkDraftFreshness(input: {
   server: DraftContent | null;
@@ -160,6 +195,20 @@ export function checkDraftFreshness(input: {
     if (expectedRevision === actual) {
       return { verdict: 'FRESH', reason: 'expectedRevision matches the live server draft.', changedFields: [] };
     }
+    // Token mismatch. When the caller's token is the one WE cached, we can name
+    // exactly what drifted — and if that is metadata alone, it is our own
+    // post-save normalization, not a conflict.
+    if (cached !== null && draftRevision(cached) === expectedRevision) {
+      const changedFields = diffFields(server, cached);
+      if (substantiveChanges(changedFields).length === 0) {
+        return {
+          verdict: 'FRESH',
+          reason: `Only connector-authored metadata (${changedFields.join(', ')}) changed since you read the draft; its subject, body and recipients are unchanged, so this is not a conflict.`,
+          changedFields,
+          metadataOnly: true,
+        };
+      }
+    }
     return {
       verdict: 'STALE',
       reason: `expectedRevision ${expectedRevision} does not match the live server draft (${actual}) — it changed after you read it.`,
@@ -178,6 +227,14 @@ export function checkDraftFreshness(input: {
   const changedFields = diffFields(server, cached);
   if (changedFields.length === 0) {
     return { verdict: 'FRESH', reason: 'The cached draft matches the live server draft.', changedFields: [] };
+  }
+  if (substantiveChanges(changedFields).length === 0) {
+    return {
+      verdict: 'FRESH',
+      reason: `Only connector-authored metadata (${changedFields.join(', ')}) differs from the cached copy; subject, body and recipients match, so this is not a conflict.`,
+      changedFields,
+      metadataOnly: true,
+    };
   }
   return {
     verdict: 'STALE',
