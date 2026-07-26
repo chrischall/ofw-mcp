@@ -1405,6 +1405,306 @@ describe('ofw_save_draft — stale-overwrite guard', () => {
   });
 });
 
+describe('ofw_save_draft — threading & field preservation (Defects 1 & 3)', () => {
+  // ofw_save_draft returns human-readable notes prepended to the JSON payload,
+  // so parse from the first `{` (notes never contain one) to reach the object.
+  const trailingJson = (text: string): Record<string, unknown> =>
+    JSON.parse(text.slice(text.indexOf('{')));
+
+  it('save-then-edit round trip is not refused when OFW normalized replyToId in between', async () => {
+    // 1. Create a reply-draft; capture the revision it returns.
+    // 2. Immediately edit it using THAT revision — even though OFW dropped the
+    //    reply link server-side, the body/subject/recipients are unchanged, so
+    //    the guard must treat it as current, not STALE.
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request')
+      .mockResolvedValueOnce({ entityId: 700 })                       // create POST
+      .mockResolvedValueOnce({                                        // create detail (echoes replyToId)
+        id: 700, subject: 'S', body: 'B',
+        date: { dateTime: '2026-07-20T00:00:00Z' }, replyToId: 100,
+      })
+      .mockResolvedValueOnce({                                        // guard fetch: OFW normalized replyToId → null
+        subject: 'S', body: 'B', replyToId: null, recipients: [],
+      })
+      .mockResolvedValueOnce({ entityId: 701 })                       // replace POST
+      .mockResolvedValueOnce({                                        // replace detail
+        id: 701, subject: 'S', body: 'B edited',
+        date: { dateTime: '2026-07-20T00:05:00Z' }, replyToId: 100,
+      })
+      .mockResolvedValueOnce({});                                     // DELETE old 700
+    setup(client);
+
+    const created = JSON.parse((await handlers.get('ofw_save_draft')!({
+      subject: 'S', body: 'B', replyToId: 100,
+    })).content[0].text);
+    expect(created.revision).toBeDefined();
+
+    const result = await handlers.get('ofw_save_draft')!({
+      subject: 'S', body: 'B edited', messageId: 700,
+      expectedRevision: created.revision,
+    });
+
+    // Not refused — the only server-side change was connector-authored metadata.
+    expect(result.isError).toBeFalsy();
+    expect(result.content[0].text).not.toMatch(/STALE_DRAFT/);
+    expect(result.content[0].text).toMatch(/normalized connector-authored metadata/);
+    expect(getDraft(701)?.body).toBe('B edited');
+    expect(getDraft(700)).toBeNull();
+    // The replacement actually went out (POST + DELETE both happened).
+    expect(spy.mock.calls.some((c) => c[0] === 'DELETE')).toBe(true);
+  });
+
+  it('a genuinely stale server body still refuses even with a matching-for-metadata token', async () => {
+    // Regression guard: the metadata relaxation must not let a real edit slip
+    // through. Server body diverges → STALE, nothing destroyed.
+    upsertDraft({
+      id: 500, subject: 'Pickup', body: 'cached body', recipients: [],
+      replyToId: 100, modifiedAt: '2026-07-19T12:42:00Z', listData: {},
+    });
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request').mockResolvedValueOnce({
+      subject: 'Pickup', body: 'edited in the web app', replyToId: null, recipients: [],
+    });
+    setup(client);
+
+    const result = await handlers.get('ofw_save_draft')!({
+      subject: 'Pickup', body: 'my new body', messageId: 500,
+      expectedRevision: draftRevision({
+        subject: 'Pickup', body: 'cached body', replyToId: 100, recipients: [],
+      }),
+    });
+
+    expect(result.isError).toBe(true);
+    const payload = JSON.parse(result.content[0].text);
+    expect(payload.error).toBe('STALE_DRAFT');
+    expect(payload.serverBody).toBe('edited in the web app');
+    expect(spy.mock.calls.some((c) => c[0] === 'POST')).toBe(false);
+    expect(spy.mock.calls.some((c) => c[0] === 'DELETE')).toBe(false);
+  });
+
+  it('warns loudly (no silent null) when OFW drops the requested replyToId', async () => {
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce({ entityId: 800 })
+      .mockResolvedValueOnce({                                        // OFW came back with replyToId: null
+        id: 800, subject: 'Re: pickup', body: 'reply',
+        date: { dateTime: '2026-07-20T00:00:00Z' }, replyToId: null,
+      });
+    setup(client);
+
+    const result = await handlers.get('ofw_save_draft')!({
+      subject: 'Re: pickup', body: 'reply', replyToId: 100,
+    });
+
+    expect(result.content[0].text).toMatch(/WARNING/);
+    expect(result.content[0].text).toMatch(/did not thread this draft/);
+    const parsed = trailingJson(result.content[0].text);
+    // The dropped link is surfaced honestly, not masked with the posted intent.
+    expect(parsed.replyToId).toBeNull();
+    expect(parsed.inReplyTo).toBeNull();
+    expect(parsed.warnings).toEqual(expect.arrayContaining([expect.stringMatching(/replyToId was requested as 100/)]));
+    // And the cache reflects the truth, not the intent.
+    expect(getDraft(800)?.replyToId).toBeNull();
+  });
+
+  it('does not warn when OFW honors the requested replyToId', async () => {
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce({ entityId: 801 })
+      .mockResolvedValueOnce({
+        id: 801, subject: 'Re: pickup', body: 'reply',
+        date: { dateTime: '2026-07-20T00:00:00Z' }, replyToId: 100,
+      });
+    setup(client);
+
+    const result = await handlers.get('ofw_save_draft')!({
+      subject: 'Re: pickup', body: 'reply', replyToId: 100,
+    });
+
+    expect(result.content[0].text).not.toMatch(/WARNING/);
+    const parsed = trailingJson(result.content[0].text);
+    expect(parsed.replyToId).toBe(100);
+    expect(parsed.inReplyTo).toBe(100);
+    expect(parsed.warnings).toBeUndefined();
+  });
+
+  it('the returned revision matches what ofw_check_freshness reports immediately after', async () => {
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce({ entityId: 900 })
+      .mockResolvedValueOnce({                                        // save detail
+        id: 900, subject: 'S', body: 'B',
+        date: { dateTime: '2026-07-20T00:00:00Z' }, replyToId: 100,
+      })
+      .mockResolvedValueOnce({                                        // check_freshness live fetch (same state)
+        subject: 'S', body: 'B', replyToId: 100, recipients: [],
+      });
+    setup(client);
+
+    const saved = JSON.parse((await handlers.get('ofw_save_draft')!({
+      subject: 'S', body: 'B', replyToId: 100,
+    })).content[0].text);
+
+    const checked = JSON.parse((await handlers.get('ofw_check_freshness')!({
+      messageIds: [900],
+    })).content[0].text);
+
+    expect(checked.items[0].serverRevision).toBe(saved.revision);
+    expect(checked.items[0].cacheRevision).toBe(saved.revision);
+    expect(checked.items[0].inSync).toBe(true);
+  });
+
+  it('warns when requested recipientIds are not all carried onto the saved draft', async () => {
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce({ entityId: 810 })
+      .mockResolvedValueOnce({
+        id: 810, subject: 'S', body: 'B',
+        date: { dateTime: '2026-07-20T00:00:00Z' },
+        recipients: [{ user: { userId: 1, name: 'A' } }],       // only 1 of the two requested
+      });
+    setup(client);
+
+    const result = await handlers.get('ofw_save_draft')!({
+      subject: 'S', body: 'B', recipientIds: [1, 2],
+    });
+
+    expect(result.content[0].text).toMatch(/WARNING/);
+    const parsed = trailingJson(result.content[0].text);
+    expect(parsed.warnings).toEqual(expect.arrayContaining([expect.stringMatching(/recipientIds were requested as \[1, 2\]/)]));
+  });
+
+  it('warns when a requested attachment did not attach to the saved draft', async () => {
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce({ entityId: 820 })
+      .mockResolvedValueOnce({
+        id: 820, subject: 'S', body: 'B',
+        date: { dateTime: '2026-07-20T00:00:00Z' },
+        files: [5],                                              // 6 was requested but missing
+      });
+    setup(client);
+
+    const result = await handlers.get('ofw_save_draft')!({
+      subject: 'S', body: 'B', myFileIDs: [5, 6],
+    });
+
+    expect(result.content[0].text).toMatch(/WARNING/);
+    const parsed = trailingJson(result.content[0].text);
+    expect(parsed.warnings).toEqual(expect.arrayContaining([expect.stringMatching(/fileId\(s\) 6 .*not attached/)]));
+  });
+
+  it('names the rewritten thread tip in the warning when a rewritten replyToId is then dropped', async () => {
+    // The connector re-targets replyToId to the chain tip (100 → 142), then OFW
+    // drops it entirely. The warning must name both the effective request and
+    // where it was rewritten from.
+    upsertMessage({
+      id: 100, folder: 'inbox', subject: 'Original', fromUser: 'Alice',
+      sentAt: '2026-05-01T00:00:00Z', recipients: [], body: 'orig',
+      fetchedBodyAt: null, replyToId: null, chainRootId: null, listData: {},
+    });
+    upsertMessage({
+      id: 142, folder: 'sent', subject: 'Re: Original', fromUser: 'Me',
+      sentAt: '2026-05-02T00:00:00Z', recipients: [], body: 'first',
+      fetchedBodyAt: null, replyToId: 100, chainRootId: 100, listData: {},
+    });
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce({ entityId: 830 })
+      .mockResolvedValueOnce({
+        id: 830, subject: 'Re: Original', body: 'reply',
+        date: { dateTime: '2026-07-20T00:00:00Z' }, replyToId: null,
+      });
+    setup(client);
+
+    const result = await handlers.get('ofw_save_draft')!({
+      subject: 'Re: Original', body: 'reply', replyToId: 100,
+    });
+
+    expect(result.content[0].text).toMatch(/replyToId was requested as 142 \(rewritten from 100\)/);
+  });
+
+  it('warns when OFW re-targets replyToId to a different (non-null) message', async () => {
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce({ entityId: 840 })
+      .mockResolvedValueOnce({
+        id: 840, subject: 'Re', body: 'reply',
+        date: { dateTime: '2026-07-20T00:00:00Z' }, replyToId: 200,   // not the requested 100
+      });
+    setup(client);
+
+    const result = await handlers.get('ofw_save_draft')!({
+      subject: 'Re', body: 'reply', replyToId: 100,
+    });
+
+    expect(result.content[0].text).toMatch(/came back with replyToId 200/);
+    expect(trailingJson(result.content[0].text).replyToId).toBe(200);
+  });
+
+  it('does not warn when every requested recipient is carried over', async () => {
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce({ entityId: 860 })
+      .mockResolvedValueOnce({
+        id: 860, subject: 'S', body: 'B',
+        date: { dateTime: '2026-07-20T00:00:00Z' },
+        recipients: [{ user: { userId: 2, name: 'B' } }, { user: { userId: 1, name: 'A' } }],
+      });
+    setup(client);
+
+    const result = await handlers.get('ofw_save_draft')!({
+      subject: 'S', body: 'B', recipientIds: [1, 2],
+    });
+
+    expect(result.content[0].text).not.toMatch(/WARNING/);
+    expect(trailingJson(result.content[0].text).warnings).toBeUndefined();
+  });
+
+  it('does not warn when every requested attachment is present', async () => {
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce({ entityId: 870 })
+      .mockResolvedValueOnce({
+        id: 870, subject: 'S', body: 'B',
+        date: { dateTime: '2026-07-20T00:00:00Z' }, files: [5, 6],
+      });
+    setup(client);
+
+    const result = await handlers.get('ofw_save_draft')!({
+      subject: 'S', body: 'B', myFileIDs: [5, 6],
+    });
+
+    expect(result.content[0].text).not.toMatch(/WARNING/);
+  });
+
+  it('the replace NOTE points at the warnings when a carried-over field was dropped', async () => {
+    upsertDraft({
+      id: 850, subject: 'S', body: 'B', recipients: [], replyToId: 100,
+      modifiedAt: '2026-07-19T12:42:00Z', listData: {},
+    });
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce({ subject: 'S', body: 'B', replyToId: 100, recipients: [] }) // guard FRESH
+      .mockResolvedValueOnce({ entityId: 851 })
+      .mockResolvedValueOnce({
+        id: 851, subject: 'S', body: 'B',
+        date: { dateTime: '2026-07-20T00:00:00Z' }, replyToId: null,   // OFW dropped the reply link
+      })
+      .mockResolvedValueOnce({});                                       // DELETE old 850
+    setup(client);
+
+    const result = await handlers.get('ofw_save_draft')!({
+      subject: 'S', body: 'B', messageId: 850, replyToId: 100,
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.content[0].text).toMatch(/replaced draft 850 via create-then-delete/);
+    expect(result.content[0].text).toMatch(/See warnings above/);
+    expect(result.content[0].text).toMatch(/did not thread this draft/);
+  });
+});
+
 describe('draft reads expose revision + cacheStatus', () => {
   const row = {
     id: 500, subject: 'Pickup', body: 'cached body', recipients: [],
