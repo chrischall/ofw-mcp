@@ -11,6 +11,8 @@ import type { AttachmentIO, ResolvedUpload } from '../../src/tools/attachments.j
 import { draftRevision } from '../../src/tools/draft-freshness.js';
 import { OFWCache } from '../../src/cache/node.js';
 import { sampleMessageRow } from '../_fixtures.js';
+import { makeXlsx, xlsxSheetData, makeDocx, makePptx } from '../extract/_ooxml.js';
+import { makePdf, showText } from '../extract/_pdf.js';
 import type {
   CacheStore, MessageRow, DraftRow, UpsertAttachmentInput, AttachmentRow,
 } from '../../src/cache/store.js';
@@ -2207,12 +2209,11 @@ describe('ofw_download_attachment', () => {
 
       // No inline arg — should default to inline because of the env var.
       const result = await handlers.get('ofw_download_attachment')!({ fileId: 11 });
-      expect(result.content).toHaveLength(2);
       const meta = JSON.parse(result.content[0].text);
       expect(meta.mode).toBe('inline');
-      const res = result.content[1];
-      expect(res.type).toBe('resource');
-      expect(Buffer.from(res.resource.blob, 'base64').equals(bytes)).toBe(true);
+      // A text file is delivered as its content, not as bytes the host may refuse.
+      expect(meta.deliveredVia).toBe('extracted');
+      expect(meta.extracted).toEqual({ kind: 'text', text: bytes.toString('utf8') });
     } finally {
       if (prev === undefined) delete process.env.OFW_INLINE_ATTACHMENTS;
       else process.env.OFW_INLINE_ATTACHMENTS = prev;
@@ -2266,9 +2267,8 @@ describe('ofw_download_attachment', () => {
       // Second: inline mode should read from disk, not hit the network.
       const result = await handlers.get('ofw_download_attachment')!({ fileId: 99, inline: true });
       expect(binSpy).toHaveBeenCalledTimes(1);
-      const res = result.content[1];
-      expect(res.type).toBe('resource');
-      expect(Buffer.from(res.resource.blob, 'base64').equals(bytes)).toBe(true);
+      const meta = JSON.parse(result.content[0].text);
+      expect(meta.extracted).toEqual({ kind: 'text', text: 'local-copy' });
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -2296,9 +2296,8 @@ describe('ofw_download_attachment', () => {
       // Inline mode should detect the missing file and re-fetch from the network.
       const result = await handlers.get('ofw_download_attachment')!({ fileId: 77, inline: true });
       expect(binSpy).toHaveBeenCalledTimes(2);
-      const res = result.content[1];
-      expect(res.type).toBe('resource');
-      expect(Buffer.from(res.resource.blob, 'base64').equals(bytes)).toBe(true);
+      const meta = JSON.parse(result.content[0].text);
+      expect(meta.extracted).toEqual({ kind: 'text', text: 'fresh-bytes' });
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -2606,6 +2605,302 @@ describe('ofw_download_attachment', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  // ------------------------------------------------------------------
+  // Delivery ladder: a successful fetch must always produce readable content.
+  // ------------------------------------------------------------------
+
+  /** Wire up one attachment fetch with the given bytes and metadata. */
+  function stubAttachment(
+    client: OFWClient, fileId: number, fileName: string, mimeType: string, bytes: Buffer,
+  ): void {
+    vi.spyOn(client, 'request').mockResolvedValueOnce({
+      fileId, fileName, label: fileName, fileType: mimeType, fileSize: bytes.length,
+    });
+    vi.spyOn(client, 'requestBinary').mockResolvedValueOnce({
+      body: bytes, contentType: mimeType, suggestedFileName: fileName,
+    });
+  }
+
+  const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+
+  it('repro (fileId 50015547): an .xlsx comes back as extracted sheet contents', async () => {
+    const client = new OFWClient();
+    const bytes = makeXlsx({
+      sharedStrings: ['Holiday', '2026 Parent', '2027 Parent', 'Thanksgiving', 'Mother', 'Father', 'Christmas'],
+      sheets: [{
+        name: '2026',
+        rows: xlsxSheetData([
+          [{ ref: 'A1', t: 's', v: '0' }, { ref: 'B1', t: 's', v: '1' }, { ref: 'C1', t: 's', v: '2' }],
+          [{ ref: 'A2', t: 's', v: '3' }, { ref: 'B2', t: 's', v: '4' }, { ref: 'C2', t: 's', v: '5' }],
+          [{ ref: 'A3', t: 's', v: '6' }, { ref: 'B3', t: 's', v: '5' }, { ref: 'C3', t: 's', v: '4' }],
+        ]),
+      }],
+    });
+    stubAttachment(client, 50015547, 'Hall_Holiday_Schedules_2026_-_2027.xlsx', XLSX_MIME, bytes);
+    setup(client);
+
+    const result = await handlers.get('ofw_download_attachment')!({ fileId: 50015547, inline: true });
+    const meta = JSON.parse(result.content[0].text);
+    expect(meta.mimeType).toBe(XLSX_MIME);
+    expect(meta.deliveredVia).toBe('extracted');
+    expect(meta.truncated).toBe(false);
+    expect(meta.extracted.kind).toBe('spreadsheet');
+    expect(meta.extracted.sheets).toHaveLength(1);
+    const [sheet] = meta.extracted.sheets;
+    expect(sheet.name).toBe('2026');
+    expect(sheet.rows).toBe(3);
+    expect(sheet.cols).toBe(3);
+    expect(sheet.csv).toContain('Thanksgiving,Mother,Father');
+    // The old failure mode: bytes delivered, nothing readable.
+    expect(JSON.stringify(result.content)).not.toContain('not currently supported');
+  });
+
+  it('a PDF comes back as extracted page text', async () => {
+    const client = new OFWClient();
+    const bytes = makePdf({ pages: [showText('Proposed parenting time 2026')], compress: true });
+    stubAttachment(client, 900, 'proposal.pdf', 'application/pdf', bytes);
+    setup(client);
+
+    const meta = JSON.parse(
+      (await handlers.get('ofw_download_attachment')!({ fileId: 900, inline: true })).content[0].text,
+    );
+    expect(meta.deliveredVia).toBe('extracted');
+    expect(meta.extracted).toMatchObject({
+      kind: 'pdf', textLayer: true, pages: [{ number: 1, text: 'Proposed parenting time 2026' }],
+    });
+  });
+
+  it('a scanned PDF says so instead of returning a silently empty document', async () => {
+    const client = new OFWClient();
+    stubAttachment(client, 901, 'scan.pdf', 'application/pdf',
+      makePdf({ pages: ['q 612 0 0 792 0 0 cm /Im0 Do Q'] }));
+    setup(client);
+
+    const meta = JSON.parse(
+      (await handlers.get('ofw_download_attachment')!({ fileId: 901, inline: true })).content[0].text,
+    );
+    expect(meta.extracted.textLayer).toBe(false);
+    expect(meta.extracted.note).toMatch(/OCR/);
+  });
+
+  it('a .docx comes back as text with its heading and table structure', async () => {
+    const client = new OFWClient();
+    const body = '<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Holidays</w:t></w:r></w:p>'
+      + '<w:tbl><w:tr><w:tc><w:p><w:r><w:t>Thanksgiving</w:t></w:r></w:p></w:tc>'
+      + '<w:tc><w:p><w:r><w:t>Mother</w:t></w:r></w:p></w:tc></w:tr></w:tbl>';
+    stubAttachment(client, 902, 'schedule.docx',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document', makeDocx(body));
+    setup(client);
+
+    const meta = JSON.parse(
+      (await handlers.get('ofw_download_attachment')!({ fileId: 902, inline: true })).content[0].text,
+    );
+    expect(meta.extracted).toEqual({
+      kind: 'document', text: '# Holidays\n\n| Thanksgiving | Mother |',
+    });
+  });
+
+  it('a .pptx comes back as per-slide text plus speaker notes', async () => {
+    const client = new OFWClient();
+    stubAttachment(client, 903, 'deck.pptx',
+      'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+      makePptx([{ paragraphs: ['Parenting plan'], notes: ['Mention pickup times'] }]));
+    setup(client);
+
+    const meta = JSON.parse(
+      (await handlers.get('ofw_download_attachment')!({ fileId: 903, inline: true })).content[0].text,
+    );
+    expect(meta.extracted.slides).toEqual([
+      { number: 1, text: 'Parenting plan', notes: 'Mention pickup times' },
+    ]);
+  });
+
+  it('honours a sheet range and reports what the character budget dropped', async () => {
+    const client = new OFWClient();
+    const bigRows = Array.from({ length: 200 }, (_, i) => [{ ref: `A${i + 1}`, v: String(100000 + i) }]);
+    const bytes = makeXlsx({
+      sheets: [
+        { name: '2026', rows: xlsxSheetData(bigRows) },
+        { name: '2027', rows: xlsxSheetData(bigRows) },
+        { name: 'Notes', rows: xlsxSheetData([[{ ref: 'A1', v: '1' }]]) },
+      ],
+    });
+    stubAttachment(client, 904, 'big.xlsx', XLSX_MIME, bytes);
+    setup(client);
+
+    const meta = JSON.parse((await handlers.get('ofw_download_attachment')!({
+      fileId: 904, inline: true, parts: '1-2', maxChars: 500,
+    })).content[0].text);
+
+    expect(meta.truncated).toBe(true);
+    // Sheet 3 was never selected; sheet 2 fell off the character budget.
+    expect(meta.extracted.omitted).toEqual([
+      'Notes',
+      '2027 (omitted: response character budget)',
+    ]);
+    const [first] = meta.extracted.sheets;
+    expect(first.name).toBe('2026');
+    expect(first.truncated).toBe(true);
+    expect(first.csv.length).toBeLessThanOrEqual(500);
+    // The row count reports what actually came back, not the sheet's real size.
+    expect(first.rows).toBe(first.csv.split('\n').length);
+    expect(first.rows).toBeLessThan(200);
+  });
+
+  it('falls through to raw bytes for a type with no extractor, naming what it tried', async () => {
+    const client = new OFWClient();
+    const bytes = Buffer.from([0x50, 0x4b, 0x05, 0x06, 0xff, 0x00, 0x13, 0x37]);
+    stubAttachment(client, 905, 'archive.zip', 'application/zip', bytes);
+    setup(client);
+
+    const result = await handlers.get('ofw_download_attachment')!({ fileId: 905, inline: true });
+    const meta = JSON.parse(result.content[0].text);
+    expect(meta.deliveredVia).toBe('blob');
+    expect(meta.sizeBytes).toBe(bytes.length);
+    expect(meta.deliveryAttempts).toEqual(['no text extractor for application/zip (archive.zip)']);
+    const res = result.content[1];
+    expect(res.type).toBe('resource');
+    // Byte-for-byte intact.
+    expect(Buffer.from(res.resource.blob, 'base64').equals(bytes)).toBe(true);
+  });
+
+  it('reports why a malformed file of an extractable type fell back to bytes', async () => {
+    const client = new OFWClient();
+    const bytes = Buffer.from('this is not really a workbook', 'utf8');
+    stubAttachment(client, 906, 'broken.xlsx', XLSX_MIME, bytes);
+    setup(client);
+
+    const result = await handlers.get('ofw_download_attachment')!({ fileId: 906, inline: true });
+    const meta = JSON.parse(result.content[0].text);
+    expect(meta.deliveredVia).toBe('blob');
+    expect(meta.deliveryAttempts[0]).toMatch(/extraction failed: .*ZIP/i);
+    expect(Buffer.from(result.content[1].resource.blob, 'base64').equals(bytes)).toBe(true);
+  });
+
+  it('extract:false returns the raw bytes for an extractable type', async () => {
+    const client = new OFWClient();
+    const bytes = makeXlsx({ sheets: [{ name: 'S', rows: xlsxSheetData([[{ ref: 'A1', v: '1' }]]) }] });
+    stubAttachment(client, 907, 'sheet.xlsx', XLSX_MIME, bytes);
+    setup(client);
+
+    const result = await handlers.get('ofw_download_attachment')!({ fileId: 907, inline: true, extract: false });
+    const meta = JSON.parse(result.content[0].text);
+    expect(meta.deliveredVia).toBe('blob');
+    expect(meta.deliveryAttempts).toEqual(['extraction skipped (extract:false)']);
+    expect(Buffer.from(result.content[1].resource.blob, 'base64').equals(bytes)).toBe(true);
+  });
+
+  it('hosted (no disk): a saveTo request still returns extracted content', async () => {
+    const client = new OFWClient();
+    const bytes = makeXlsx({
+      sharedStrings: ['Spring Break'],
+      sheets: [{ name: '2026', rows: xlsxSheetData([[{ ref: 'A1', t: 's', v: '0' }]]) }],
+    });
+    stubAttachment(client, 908, 'schedule.xlsx', XLSX_MIME, bytes);
+    const hosted = setupHosted(client);
+
+    const result = await hosted.get('ofw_download_attachment')!({
+      fileId: 908, inline: false, saveTo: '/tmp/nope.xlsx',
+    });
+    const meta = JSON.parse(result.content[0].text);
+    // The disk path could not be honoured, and that is stated — but the content
+    // still arrives, which is the whole point.
+    expect(meta.forcedInline).toBe(true);
+    expect(meta.deliveredVia).toBe('extracted');
+    expect(meta.extracted.sheets[0].csv).toBe('Spring Break');
+  });
+
+  it('disk mode with extract:true returns both the saved path and the content', async () => {
+    const client = new OFWClient();
+    const bytes = makeXlsx({
+      sharedStrings: ['Winter Break'],
+      sheets: [{ name: '2027', rows: xlsxSheetData([[{ ref: 'A1', t: 's', v: '0' }]]) }],
+    });
+    stubAttachment(client, 909, 'winter.xlsx', XLSX_MIME, bytes);
+    setup(client);
+
+    const dir = mkdtempSync(join(tmpdir(), 'ofw-dl-'));
+    try {
+      const parsed = JSON.parse((await handlers.get('ofw_download_attachment')!({
+        fileId: 909, saveTo: dir + '/', extract: true,
+      })).content[0].text);
+      expect(parsed.path).toMatch(/winter\.xlsx$/);
+      expect(readFileSync(parsed.path).equals(bytes)).toBe(true);
+      expect(parsed.extracted.sheets[0].csv).toBe('Winter Break');
+      expect(parsed.truncated).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('disk mode extracts from the existing copy on a repeat call, without re-fetching', async () => {
+    const client = new OFWClient();
+    const bytes = Buffer.from('cached note', 'utf8');
+    stubAttachment(client, 910, 'note.txt', 'text/plain', bytes);
+    setup(client);
+
+    const dir = mkdtempSync(join(tmpdir(), 'ofw-dl-'));
+    try {
+      await handlers.get('ofw_download_attachment')!({ fileId: 910, saveTo: dir + '/' });
+      const second = JSON.parse((await handlers.get('ofw_download_attachment')!({
+        fileId: 910, saveTo: dir + '/', extract: true,
+      })).content[0].text);
+      expect(second.note).toBe('already downloaded');
+      expect(second.extracted).toEqual({ kind: 'text', text: 'cached note' });
+      // Only the first call hit the network.
+      expect(client.requestBinary).toHaveBeenCalledTimes(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('re-downloads rather than answering "already downloaded" with no content', async () => {
+    const client = new OFWClient();
+    const bytes = Buffer.from('vanished note', 'utf8');
+    vi.spyOn(client, 'request').mockResolvedValueOnce({
+      fileId: 911, fileName: 'gone.txt', label: 'gone.txt', fileType: 'text/plain', fileSize: bytes.length,
+    });
+    const binSpy = vi.spyOn(client, 'requestBinary')
+      .mockResolvedValue({ body: bytes, contentType: 'text/plain', suggestedFileName: 'gone.txt' });
+    setup(client);
+
+    const dir = mkdtempSync(join(tmpdir(), 'ofw-dl-'));
+    try {
+      const first = JSON.parse((await handlers.get('ofw_download_attachment')!({
+        fileId: 911, saveTo: dir + '/',
+      })).content[0].text);
+      rmSync(first.path); // the local copy disappears behind our back
+
+      const second = JSON.parse((await handlers.get('ofw_download_attachment')!({
+        fileId: 911, saveTo: dir + '/', extract: true,
+      })).content[0].text);
+      expect(binSpy).toHaveBeenCalledTimes(2);
+      expect(second.note).toBeUndefined();
+      expect(second.extracted).toEqual({ kind: 'text', text: 'vanished note' });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('disk mode reports why an unextractable file yielded no content', async () => {
+    const client = new OFWClient();
+    const bytes = Buffer.from([0x00, 0x01, 0x02]);
+    stubAttachment(client, 912, 'blob.bin', 'application/octet-stream', bytes);
+    setup(client);
+
+    const dir = mkdtempSync(join(tmpdir(), 'ofw-dl-'));
+    try {
+      const parsed = JSON.parse((await handlers.get('ofw_download_attachment')!({
+        fileId: 912, saveTo: dir + '/', extract: true,
+      })).content[0].text);
+      expect(parsed.extracted).toBeUndefined();
+      expect(parsed.reason).toMatch(/no text extractor/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
 });
 
 describe('ofw_get_message attachments backfill', () => {
