@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { deflateSync } from 'node:zlib';
 import { extractPdf, textFromContentStream } from '../../src/extract/pdf.js';
 import { makePdf, showText } from './_pdf.js';
 
@@ -51,6 +52,19 @@ describe('extractPdf', () => {
     const out = await extractPdf(makePdf({ pages: [showText('unreadable')], corrupt: true }));
     expect(out.pages).toHaveLength(1);
     expect(out.pages[0].text).toBe('');
+  });
+
+  it('refuses a content stream that inflates past the decompression cap', async () => {
+    // A ~33 MiB stream of zeros compresses to a few KB — exactly the shape a
+    // crafted PDF would use to exhaust the Worker's memory budget.
+    const bomb = deflateSync(Buffer.alloc(33 * 1024 * 1024));
+    const pdf = Buffer.concat([
+      Buffer.from('%PDF-1.7\n3 0 obj\n<< /Type /Page /Contents 4 0 R >>\nendobj\n'
+        + `4 0 obj\n<< /Length ${bomb.length} /Filter /FlateDecode >>\nstream\n`, 'latin1'),
+      bomb,
+      Buffer.from('\nendstream\nendobj\n', 'latin1'),
+    ]);
+    await expect(extractPdf(pdf)).rejects.toThrow(/expands past the .* decompression cap/);
   });
 
   it('skips a /Contents reference that points at a missing object', async () => {

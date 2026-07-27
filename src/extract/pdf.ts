@@ -10,17 +10,13 @@
 // all, and the honest answer for one is `textLayer: false` plus a note saying
 // it needs OCR — not an empty string that reads like an empty document.
 
+import {
+  inflateBounded, DecompressionLimitError, MAX_DECOMPRESSED_BYTES,
+} from './inflate.js';
 import type { PdfExtract, PageExtract, PartSelector } from './types.js';
 
 export interface PdfOptions {
   select?: PartSelector;
-}
-
-/** Inflate a zlib (FlateDecode) stream. PDF uses the wrapped format, not raw. */
-async function inflate(data: Buffer): Promise<Buffer> {
-  const stream = new Blob([data as unknown as BlobPart]).stream()
-    .pipeThrough(new DecompressionStream('deflate'));
-  return Buffer.from(await new Response(stream).arrayBuffer());
 }
 
 interface PdfObject {
@@ -104,10 +100,15 @@ async function decodeStream(bytes: Buffer, obj: PdfObject): Promise<Buffer | nul
   if (filter === '') return raw;
   if (!filter.includes('FlateDecode')) return null; // LZW/DCT/JPX: not text anyway
   try {
-    return await inflate(raw);
-  } catch {
+    // PDF stream dictionaries say nothing about inflated length, so the cap is
+    // the only thing standing between a crafted stream and the memory budget.
+    return await inflateBounded(raw, 'deflate', MAX_DECOMPRESSED_BYTES, 'PDF stream');
+  } catch (err) {
     // A truncated or mis-bounded stream must not take the whole document down;
-    // the page simply contributes no text.
+    // the page simply contributes no text. A cap breach is different in kind —
+    // that is a hostile or absurd file, and silently returning a document with
+    // pages quietly missing would be the worse answer.
+    if (err instanceof DecompressionLimitError) throw err;
     return null;
   }
 }

@@ -16,12 +16,18 @@ const ZIP64_SENTINEL = 0xffffffff;
 
 /**
  * Hard ceiling on a single decompressed member (32 MiB). An attachment is a
- * co-parent-supplied file, so a zip bomb is a real (if unlikely) input; the
- * Worker's memory budget is the thing being protected. The declared
- * uncompressed size is checked BEFORE inflating, so a malicious member is
- * refused rather than expanded and then rejected.
+ * co-parent-supplied file, so a zip bomb is a real (if unlikely) input, and the
+ * Worker's memory budget is what is being protected.
+ *
+ * The cap is enforced on the bytes as they arrive ({@link inflateBounded}), NOT
+ * on the size the archive declares for itself. The declared size is checked too
+ * — it rejects an HONEST oversized member without inflating anything — but it
+ * is an optimization, not the guarantee: a central directory is free to claim
+ * 1 KB in front of a member that expands to a gigabyte.
  */
-export const ZIP_MAX_UNCOMPRESSED_BYTES = 32 * 1024 * 1024;
+export const ZIP_MAX_UNCOMPRESSED_BYTES = MAX_DECOMPRESSED_BYTES;
+
+import { inflateBounded, MAX_DECOMPRESSED_BYTES } from './inflate.js';
 
 interface ZipEntry {
   name: string;
@@ -42,13 +48,6 @@ export interface ZipArchive {
   readText(name: string): Promise<string | null>;
 }
 
-/** Inflate a raw DEFLATE member. Portable across Node and workerd. */
-async function inflateRaw(data: Buffer): Promise<Buffer> {
-  const stream = new Blob([data as unknown as BlobPart]).stream()
-    .pipeThrough(new DecompressionStream('deflate-raw'));
-  return Buffer.from(await new Response(stream).arrayBuffer());
-}
-
 /** Locate the end-of-central-directory record, scanning back past any comment. */
 function findEocd(bytes: Buffer): number {
   // The comment field is a uint16, so the record starts at most 22+65535 bytes
@@ -60,7 +59,13 @@ function findEocd(bytes: Buffer): number {
   throw new Error('not a ZIP archive (no end-of-central-directory record)');
 }
 
-export async function readZip(bytes: Buffer): Promise<ZipArchive> {
+export interface ZipOptions {
+  /** Per-member decompression cap. Defaults to {@link ZIP_MAX_UNCOMPRESSED_BYTES}. */
+  maxUncompressedBytes?: number;
+}
+
+export async function readZip(bytes: Buffer, opts: ZipOptions = {}): Promise<ZipArchive> {
+  const limit = opts.maxUncompressedBytes ?? ZIP_MAX_UNCOMPRESSED_BYTES;
   const eocd = findEocd(bytes);
   const count = bytes.readUInt16LE(eocd + 10);
   const cdOffset = bytes.readUInt32LE(eocd + 16);
@@ -95,7 +100,9 @@ export async function readZip(bytes: Buffer): Promise<ZipArchive> {
     if (cached) return cached;
     const entry = entries.get(name);
     if (!entry) return null;
-    if (entry.uncompressedSize > ZIP_MAX_UNCOMPRESSED_BYTES) {
+    // Cheap pre-check for an honest oversized member. A lying header falls
+    // through to the streaming cap below, which is the real guarantee.
+    if (entry.uncompressedSize > limit) {
       throw new Error(
         `ZIP member ${name} is too large to extract (${entry.uncompressedSize} bytes)`,
       );
@@ -111,7 +118,7 @@ export async function readZip(bytes: Buffer): Promise<ZipArchive> {
     const raw = bytes.subarray(start, start + entry.compressedSize);
     let out: Buffer;
     if (entry.method === 0) out = Buffer.from(raw);
-    else if (entry.method === 8) out = await inflateRaw(raw);
+    else if (entry.method === 8) out = await inflateBounded(raw, 'deflate-raw', limit, `ZIP member ${name}`);
     else throw new Error(`unsupported ZIP compression method ${entry.method} for ${name}`);
     cache.set(name, out);
     return out;
