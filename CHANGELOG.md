@@ -1,5 +1,24 @@
 # Changelog
 
+## [2.8.0](https://github.com/chrischall/ofw-mcp/compare/v2.7.1...v2.8.0) (2026-07-27)
+
+
+### Features
+
+* **attachments:** deliver readable content for every file type ([#185](https://github.com/chrischall/ofw-mcp/issues/185)) ([1d8dffc](https://github.com/chrischall/ofw-mcp/commit/1d8dffc588f14afa8fe93f0670c879d03b2628f4))
+* **messages:** let callers and operators refuse reads that stamp the record ([#194](https://github.com/chrischall/ofw-mcp/issues/194)) ([48c514e](https://github.com/chrischall/ofw-mcp/commit/48c514e1c0ff3636e7732d6c3e8afdfe46beaa7b))
+
+
+### Bug Fixes
+
+* correct three misleading messages and skip an empty cache RPC ([#190](https://github.com/chrischall/ofw-mcp/issues/190)) ([546fd06](https://github.com/chrischall/ofw-mcp/commit/546fd063eca4295fa2185f5486b969a1e9765f03))
+* **extract:** cap decompression by actual output, not the declared size ([#188](https://github.com/chrischall/ofw-mcp/issues/188)) ([23a2dd5](https://github.com/chrischall/ofw-mcp/commit/23a2dd5f1dc05967cfeb202f1a47ba42f337c041))
+
+
+### Refactor
+
+* hoist an import and stop a docstring overstating what it throws ([#193](https://github.com/chrischall/ofw-mcp/issues/193)) ([9d4cb1e](https://github.com/chrischall/ofw-mcp/commit/9d4cb1e662cad21beb538b6e68d537973047d612))
+
 ## [2.7.1](https://github.com/chrischall/ofw-mcp/compare/v2.7.0...v2.7.1) (2026-07-27)
 
 
