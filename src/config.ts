@@ -88,6 +88,49 @@ export function getCalendarWritesAllowed(): boolean {
   return mode === 'drafts' && parseBoolEnv('OFW_CALENDAR_WRITES');
 }
 
+/**
+ * Deployment-wide ceiling on reads that STAMP the record.
+ *
+ * Fetching a message body from OFW marks it read and stamps a "First Viewed"
+ * timestamp the co-parent can see. That is part of the court-visible record and
+ * it cannot be undone — and unlike a send, it happens as a side effect of an
+ * ordinary read, so nothing about the caller's intent signals it.
+ *
+ * Default TRUE: unset means exactly the behaviour that shipped before this flag
+ * existed. Set OFW_ALLOW_MARK_READ=false and it becomes a hard ceiling rather
+ * than a default — `ofw_get_message` refuses a fetch that would stamp,
+ * `ofw_check_freshness` ignores `allowMarkRead:true`, and `ofw_sync_messages`
+ * ignores `fetchUnreadBodies:true`. A per-call argument (or an instruction
+ * injected into one) cannot raise it, which is the same structural posture
+ * OFW_WRITE_MODE takes for writes.
+ *
+ * An unrecognized value fails CLOSED, with a warning: someone who wrote
+ * "flase" meant to disable this, and honouring the typo as the permissive
+ * default would keep stamping the record while looking configured.
+ */
+export function getAllowMarkRead(): boolean {
+  const raw = process.env.OFW_ALLOW_MARK_READ;
+  if (typeof raw !== 'string' || raw.trim().length === 0) return true;
+  const value = raw.trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(value)) return true;
+  if (['0', 'false', 'no', 'off'].includes(value)) return false;
+  // stdio transport: stderr only — stdout is reserved for JSON-RPC.
+  console.error(
+    `[ofw-mcp] Unrecognized OFW_ALLOW_MARK_READ "${raw.trim()}" — failing closed to "false" (no tool may mark a message read on OFW). Valid values: true, false.`,
+  );
+  return false;
+}
+
+/**
+ * Default for ofw_sync_messages' `fetchUnreadBodies` arg. False (the shipped
+ * default) so an ordinary sync never stamps unread inbox messages; set
+ * OFW_FETCH_UNREAD_BODIES=true on a deployment where read receipts are routine
+ * and you would rather have the bodies cached. Capped by getAllowMarkRead().
+ */
+export function getFetchUnreadBodies(): boolean {
+  return parseBoolEnv('OFW_FETCH_UNREAD_BODIES');
+}
+
 // Default for ofw_download_attachment's `inline` arg when the caller doesn't
 // pass one. Set OFW_INLINE_ATTACHMENTS=true to have attachments returned as
 // MCP content blocks by default (skipping disk) — useful on sandboxed MCP

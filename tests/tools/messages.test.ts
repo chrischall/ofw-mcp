@@ -6,6 +6,7 @@ import { dirname, join, resolve } from 'node:path';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { OFWClient } from '../../src/client.js';
 import { registerMessageTools } from '../../src/tools/messages.js';
+import * as syncModule from '../../src/sync.js';
 import { NodeAttachmentIO } from '../../src/tools/attachments.js';
 import type { AttachmentIO, ResolvedUpload } from '../../src/tools/attachments.js';
 import { draftRevision } from '../../src/tools/draft-freshness.js';
@@ -2116,6 +2117,180 @@ describe('ofw_send_message with attachments', () => {
     const atts = listAttachmentsForMessage(200);
     expect(atts).toHaveLength(1);
     expect(atts[0].fileId).toBe(50015547);
+  });
+});
+
+describe('mark-read gate (issue #192)', () => {
+  const KEY = 'OFW_ALLOW_MARK_READ';
+  let prevAllow: string | undefined;
+  beforeEach(() => { prevAllow = process.env[KEY]; delete process.env[KEY]; });
+  afterEach(() => {
+    if (prevAllow === undefined) delete process.env[KEY];
+    else process.env[KEY] = prevAllow;
+  });
+
+  /** An inbox row scraped by a list sync: no body yet, never viewed. */
+  const unreadInbox = (id: number) => sampleMessageRow({
+    id, folder: 'inbox', body: null, fetchedBodyAt: null,
+    recipients: [{ userId: 1, name: 'Me', viewedAt: null }],
+    listData: { id, showNeverViewed: true },
+  });
+
+  it('fetches an unread body by default — unchanged behaviour', async () => {
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request').mockResolvedValue({
+      id: 700, subject: 'S', body: 'live body', from: { name: 'Alice' },
+      date: { dateTime: '2026-05-04T12:00:00Z' }, recipients: [],
+    });
+    upsertMessage(unreadInbox(700));
+    setup(client);
+
+    const parsed = JSON.parse((await handlers.get('ofw_get_message')!({ messageId: '700' })).content[0].text);
+    expect(parsed.body).toBe('live body');
+    expect(spy).toHaveBeenCalled();
+  });
+
+  it('refuses the fetch when the caller opts out, without contacting OFW', async () => {
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request');
+    upsertMessage(unreadInbox(701));
+    setup(client);
+
+    const result = await handlers.get('ofw_get_message')!({ messageId: '701', allowMarkRead: false });
+    expect(result.isError).toBe(true);
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.error).toBe('MARK_READ_BLOCKED');
+    expect(parsed.messageId).toBe(701);
+    expect(parsed.note).toMatch(/First Viewed/);
+    // The refusal must not be the thing that stamps the record.
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('still serves a cached body when the caller opts out — nothing to stamp', async () => {
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request');
+    upsertMessage(sampleMessageRow({ id: 702, folder: 'inbox', body: 'already here' }));
+    setup(client);
+
+    const parsed = JSON.parse(
+      (await handlers.get('ofw_get_message')!({ messageId: '702', allowMarkRead: false })).content[0].text,
+    );
+    expect(parsed.body).toBe('already here');
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('allows a SENT body fetch when the caller opts out — our own message stamps nothing', async () => {
+    const client = new OFWClient();
+    vi.spyOn(client, 'request').mockResolvedValue({
+      id: 703, subject: 'S', body: 'sent body', from: { name: 'Me' },
+      date: { dateTime: '2026-05-04T12:00:00Z' }, recipients: [],
+    });
+    upsertMessage(sampleMessageRow({ id: 703, folder: 'sent', body: null, fetchedBodyAt: null }));
+    setup(client);
+
+    const parsed = JSON.parse(
+      (await handlers.get('ofw_get_message')!({ messageId: '703', allowMarkRead: false })).content[0].text,
+    );
+    expect(parsed.body).toBe('sent body');
+  });
+
+  it('allows an ALREADY-READ inbox body fetch when the caller opts out — the stamp exists', async () => {
+    const client = new OFWClient();
+    vi.spyOn(client, 'request').mockResolvedValue({
+      id: 704, subject: 'S', body: 'refetched', from: { name: 'Alice' },
+      date: { dateTime: '2026-05-04T12:00:00Z' }, recipients: [],
+    });
+    // Body dropped from the cache, but a recipient view time proves it was
+    // already opened: re-fetching cannot stamp a First Viewed that exists.
+    upsertMessage(sampleMessageRow({
+      id: 704, folder: 'inbox', body: null, fetchedBodyAt: null,
+      recipients: [{ userId: 1, name: 'Me', viewedAt: '2026-05-04T13:00:00Z' }],
+    }));
+    setup(client);
+
+    const parsed = JSON.parse(
+      (await handlers.get('ofw_get_message')!({ messageId: '704', allowMarkRead: false })).content[0].text,
+    );
+    expect(parsed.body).toBe('refetched');
+  });
+
+  it('refuses an id it has never seen — it cannot know whether that would stamp', async () => {
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request');
+    setup(client);
+
+    const result = await handlers.get('ofw_get_message')!({ messageId: '705', allowMarkRead: false });
+    expect(result.isError).toBe(true);
+    expect(JSON.parse(result.content[0].text).reason).toMatch(/not in the cache/i);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('OFW_ALLOW_MARK_READ=false blocks it with no argument at all', async () => {
+    process.env[KEY] = 'false';
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request');
+    upsertMessage(unreadInbox(706));
+    setup(client);
+
+    const result = await handlers.get('ofw_get_message')!({ messageId: '706' });
+    expect(result.isError).toBe(true);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('OFW_ALLOW_MARK_READ=false is a ceiling: allowMarkRead:true cannot raise it', async () => {
+    process.env[KEY] = 'false';
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request');
+    upsertMessage(unreadInbox(707));
+    setup(client);
+
+    const result = await handlers.get('ofw_get_message')!({ messageId: '707', allowMarkRead: true });
+    expect(result.isError).toBe(true);
+    expect(JSON.parse(result.content[0].text).note).toMatch(/OFW_ALLOW_MARK_READ/);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('OFW_FETCH_UNREAD_BODIES=true flips the sync default; the ceiling still overrides it', async () => {
+    const prevFetch = process.env.OFW_FETCH_UNREAD_BODIES;
+    process.env.OFW_FETCH_UNREAD_BODIES = 'true';
+    try {
+      const client = new OFWClient();
+      vi.spyOn(client, 'request').mockResolvedValue({ systemFolders: [] });
+      const syncSpy = vi.spyOn(syncModule, 'syncAll').mockResolvedValue({
+        synced: {}, refreshed: [], notRefreshed: [], syncComplete: true, unreadWithoutBodies: [],
+      } as never);
+      setup(client);
+
+      await handlers.get('ofw_sync_messages')!({});
+      expect(syncSpy.mock.calls[0][1]).toMatchObject({ fetchUnreadBodies: true });
+
+      // The ceiling is not a default — it overrides the env default too.
+      process.env.OFW_ALLOW_MARK_READ = 'false';
+      await handlers.get('ofw_sync_messages')!({});
+      expect(syncSpy.mock.calls[1][1]).toMatchObject({ fetchUnreadBodies: false });
+
+      // …and an explicit argument cannot raise it either.
+      await handlers.get('ofw_sync_messages')!({ fetchUnreadBodies: true });
+      expect(syncSpy.mock.calls[2][1]).toMatchObject({ fetchUnreadBodies: false });
+    } finally {
+      if (prevFetch === undefined) delete process.env.OFW_FETCH_UNREAD_BODIES;
+      else process.env.OFW_FETCH_UNREAD_BODIES = prevFetch;
+    }
+  });
+
+  it('caps ofw_check_freshness: allowMarkRead:true is ignored under the ceiling', async () => {
+    process.env[KEY] = 'false';
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request').mockResolvedValue({ systemFolders: [] });
+    setup(client);
+
+    const parsed = JSON.parse((await handlers.get('ofw_check_freshness')!({
+      messageIds: [708], allowMarkRead: true,
+    })).content[0].text);
+
+    expect(parsed.items[0]).toMatchObject({ id: 708, skipped: true, reason: 'NOT_A_CACHED_DRAFT' });
+    // Folder counts are free; the id probe is what would have stamped.
+    expect(spy).not.toHaveBeenCalled();
   });
 });
 

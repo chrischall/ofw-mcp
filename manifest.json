@@ -40,7 +40,9 @@
         "OFW_INLINE_ATTACHMENTS": "${user_config.ofw_inline_attachments}",
         "OFW_ATTACHMENTS_DIR": "${user_config.ofw_attachments_dir}",
         "OFW_WRITE_MODE": "${user_config.ofw_write_mode}",
-        "OFW_CALENDAR_WRITES": "${user_config.ofw_calendar_writes}"
+        "OFW_CALENDAR_WRITES": "${user_config.ofw_calendar_writes}",
+        "OFW_ALLOW_MARK_READ": "${user_config.ofw_allow_mark_read}",
+        "OFW_FETCH_UNREAD_BODIES": "${user_config.ofw_fetch_unread_bodies}"
       }
     }
   },
@@ -82,6 +84,20 @@
       "type": "boolean",
       "title": "Calendar writes in drafts mode",
       "description": "When Write mode is \"drafts\", also register the calendar write tools (create/update/delete event). Calendar events have no draft stage but are reversible (editable/deletable), unlike a sent message. Redundant in \"all\"; never overrides \"none\".",
+      "required": false,
+      "default": false
+    },
+    "ofw_allow_mark_read": {
+      "type": "boolean",
+      "title": "Allow marking messages read",
+      "description": "Reading a message body for the first time marks it READ on OurFamilyWizard and stamps a \"First Viewed\" time your co-parent can see - part of the record, and irreversible. Leave on for the long-standing behaviour; turn off to forbid it entirely (no per-call argument can override).",
+      "required": false,
+      "default": true
+    },
+    "ofw_fetch_unread_bodies": {
+      "type": "boolean",
+      "title": "Sync unread message bodies",
+      "description": "Whether a sync also downloads unread inbox bodies by default. Each one stamps a \"First Viewed\" time. Off by default; ignored when \"Allow marking messages read\" is off.",
       "required": false,
       "default": false
     }

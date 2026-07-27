@@ -204,6 +204,19 @@ The "Confirm" permission above is a *hint* to the MCP host — a host configured
 
 Unrecognized values fail closed to `none`, with a warning on stderr — a typo never silently grants write access.
 
+### Reading is a write, too (`OFW_ALLOW_MARK_READ`)
+
+Fetching a message body for the first time marks it read on OurFamilyWizard and stamps a **"First Viewed" timestamp your co-parent can see**. That is part of the record and cannot be undone — and it happens as a side effect of an ordinary read, so `OFW_WRITE_MODE` does not govern it.
+
+By default nothing changes: reads behave exactly as they always have. Two controls exist if you want them:
+
+| Setting | Effect |
+|---|---|
+| `ofw_get_message(allowMarkRead: false)` | Refuses a fetch that would stamp an unread inbox message, returning a structured `MARK_READ_BLOCKED` payload instead. Cached bodies, sent messages and already-read messages still return normally — none of them can stamp anything. |
+| `OFW_ALLOW_MARK_READ=false` | Deployment-wide ceiling. No tool may stamp: `ofw_get_message` refuses, `ofw_check_freshness` ignores `allowMarkRead:true`, `ofw_sync_messages` ignores `fetchUnreadBodies:true`. A per-call argument cannot raise it. |
+
+`OFW_FETCH_UNREAD_BODIES=true` flips `ofw_sync_messages` to fetch unread bodies by default (off unless set) — useful where read receipts are routine. It is capped by `OFW_ALLOW_MARK_READ`.
+
 #### Calendar opt-in (`OFW_CALENDAR_WRITES`)
 
 Calendar events sit between the two message tiers: they have no draft stage (a created event is immediately visible on the shared record), but unlike a sent message they are reversible — an event can be edited or deleted afterward. If you run in `drafts` mode but are comfortable with direct calendar writes, set `OFW_CALENDAR_WRITES=true` to additionally register `ofw_create_event`, `ofw_update_event`, and `ofw_delete_event`. The flag is redundant in `all` mode and never overrides `none`.
