@@ -72,6 +72,22 @@ describe('readZip', () => {
     await expect(archive.read('bomb.txt')).rejects.toThrow(/too large/i);
   });
 
+  it('refuses a member that LIES about its size and expands past the cap', async () => {
+    // The declared-size pre-check is an optimization, not the guarantee: this
+    // entry claims 10 bytes and actually inflates to 200 KB.
+    const zip = makeZip([{ name: 'liar.txt', data: 'A'.repeat(200_000), method: 8 }]);
+    const cdStart = zip.indexOf(Buffer.from([0x50, 0x4b, 0x01, 0x02]));
+    zip.writeUInt32LE(10, cdStart + 24); // uncompressed size: a lie
+    const archive = await readZip(zip, { maxUncompressedBytes: 4096 });
+    await expect(archive.read('liar.txt')).rejects.toThrow(/expands past the 4096-byte decompression cap/);
+  });
+
+  it('honours an explicit decompression cap for an honest member too', async () => {
+    const zip = makeZip([{ name: 'big.txt', data: 'B'.repeat(50_000) }]);
+    const archive = await readZip(zip, { maxUncompressedBytes: 1000 });
+    await expect(archive.read('big.txt')).rejects.toThrow(/too large to extract/);
+  });
+
   it('rejects a central directory whose entry header signature is wrong', async () => {
     const zip = makeZip([{ name: 'a.txt', data: 'ok' }]);
     const cdStart = zip.indexOf(Buffer.from([0x50, 0x4b, 0x01, 0x02]));
