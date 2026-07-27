@@ -556,10 +556,13 @@ export function registerMessageTools(
     try {
       server = await fetchServerDraft(client, draftId);
     } catch (e) {
-      // fetchServerDraft funnels every non-404 failure into DraftFreshnessError,
-      // so anything landing here means the check could not RUN. That is not
-      // permission to proceed: a transient 5xx must not degrade into a blind
-      // overwrite.
+      // Anything landing here means the check could not RUN. Most failures
+      // arrive as DraftFreshnessError from fetchServerDraft, but not all of
+      // them: a strict parseLenient mismatch on the server draft throws
+      // McpToolError instead. Both are caught, and both abort — which is the
+      // point. A failed check is not permission to proceed: a transient 5xx
+      // must not degrade into a blind overwrite. (The cast below only reads
+      // `.message`, which every Error carries.)
       const reason = (e as DraftFreshnessError).message;
       if (force) {
         return { ok: true, note: `WARNING: force:true — proceeded with ${action} on draft ${draftId} even though its current state could not be read from OurFamilyWizard (${reason}). Any newer server-side version was destroyed and is NOT recoverable from this response.` };
@@ -752,8 +755,17 @@ export function registerMessageTools(
       // silent normalization becomes a visible warning rather than a surprise.
       if (resolvedReplyTo !== null && effectiveReplyTo !== resolvedReplyTo) {
         const rewrittenFrom = requestedReplyTo !== resolvedReplyTo ? ` (rewritten from ${requestedReplyTo})` : '';
+        // Two different outcomes reach this branch, and they need different
+        // warnings. OFW either DROPPED the link (null) or RE-TARGETED it to
+        // another message in the thread. Describing both as "did not thread
+        // this draft (its inReplyTo/showContext will be empty)" contradicted
+        // the non-null inReplyTo the same response echoes — and a warning the
+        // caller can see is false is a warning it learns to skip.
+        const outcome = effectiveReplyTo === null
+          ? 'OurFamilyWizard did not thread this draft (its inReplyTo/showContext will be empty). The subject and body were saved; only the reply linkage was dropped.'
+          : `OurFamilyWizard re-targeted the reply to message ${effectiveReplyTo} instead. The draft IS threaded — to that message, not the one requested — and the inReplyTo in this response reflects where it actually landed.`;
         warnings.push(
-          `replyToId was requested as ${resolvedReplyTo}${rewrittenFrom} but the saved draft came back with replyToId ${effectiveReplyTo === null ? 'null' : effectiveReplyTo} — OurFamilyWizard did not thread this draft (its inReplyTo/showContext will be empty). The subject and body were saved; only the reply linkage was dropped. If threading matters, verify on ourfamilywizard.com.`,
+          `replyToId was requested as ${resolvedReplyTo}${rewrittenFrom} but the saved draft came back with replyToId ${effectiveReplyTo === null ? 'null' : effectiveReplyTo} — ${outcome} If threading matters, verify on ourfamilywizard.com.`,
         );
       }
       // Only warn on recipients/attachments when the detail actually reported
@@ -1111,7 +1123,13 @@ export function registerMessageTools(
           ? (await cache.listDraftIds()).length
           : await cache.countMessages({ folder });
         const state = await cache.getSyncState(folder);
-        const historyComplete = state !== null && state.resumePage === null;
+        // Never synced at all is a DIFFERENT state from "backfill in progress",
+        // and both leave historyComplete false. Conflating them told the caller
+        // that older history was still being backfilled for a folder whose
+        // backfill had never started — advice that reads as "wait it out" when
+        // the real answer is "run a sync".
+        const neverSynced = state === null;
+        const historyComplete = !neverSynced && state.resumePage === null;
         // A partially backfilled folder legitimately holds fewer messages than
         // the server, so a count mismatch there proves nothing. Report both
         // numbers and leave the verdict null rather than crying wolf for the
@@ -1130,7 +1148,9 @@ export function registerMessageTools(
           ...(inSync === null
             ? { note: serverCount === null
               ? 'OFW did not report a count for this folder, so cached-vs-server cannot be compared. Use the per-id check instead.'
-              : 'Older history is still being backfilled, so a lower cachedCount is expected and does not indicate drift.' }
+              : neverSynced
+                ? 'This folder has never been synced, so the cache holds nothing to compare. Run ofw_sync_messages.'
+                : 'Older history is still being backfilled, so a lower cachedCount is expected and does not indicate drift.' }
             : {}),
         });
       }

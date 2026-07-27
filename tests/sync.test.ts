@@ -825,6 +825,30 @@ describe('syncMessageFolder — bounded + resumable (budget)', () => {
     expect(listPages).toEqual(['1', '2', '3']);
   });
 
+  it('writes nothing for an all-cached page, so a deep re-walk spends no cache RPC', async () => {
+    // On the Worker every store call is a Durable-Object RPC, counted against
+    // the same subrequest budget as an OFW fetch. A deep re-walk crosses page
+    // after page of already-cached messages; an unconditional "empty array is a
+    // no-op" write spends that budget to store nothing.
+    seedCachedSent(1);
+    seedCachedSent(2);
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce(listResponse([{ id: 1 }, { id: 2 }])) // page 1: all cached
+      .mockResolvedValueOnce(listResponse([]));                    // page 2: empty
+    const upsertSpy = vi.spyOn(cache, 'upsertMessages');
+
+    const result = await syncMessageFolder(
+      client, 'sent', '222',
+      { fetchUnreadBodies: false, deep: true, budget: makeBudget(Number.POSITIVE_INFINITY) },
+      store(),
+    );
+
+    expect(result.done).toBe(true);
+    expect(result.synced).toBe(0);
+    expect(upsertSpy).not.toHaveBeenCalled();
+  });
+
   it('pauses MID-page and resumes the same page, skipping the rows it already cached', async () => {
     // Budget funds list page 1 + one detail, then runs out on the second item.
     const c1 = new OFWClient();

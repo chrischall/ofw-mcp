@@ -1705,6 +1705,40 @@ describe('ofw_save_draft — threading & field preservation (Defects 1 & 3)', ()
     expect(result.content[0].text).toMatch(/See warnings above/);
     expect(result.content[0].text).toMatch(/did not thread this draft/);
   });
+
+  it('says the reply was RE-TARGETED, not dropped, when OFW threads it elsewhere', async () => {
+    // OFW normalizes a reply to the thread tip rather than dropping it. The
+    // old warning called that "did not thread this draft (its inReplyTo will
+    // be empty)" while the same response echoed inReplyTo: 205 — a warning the
+    // caller can see is false is a warning it learns to skip.
+    upsertDraft({
+      id: 860, subject: 'S', body: 'B', recipients: [], replyToId: 200,
+      modifiedAt: '2026-07-19T12:42:00Z', listData: {},
+    });
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce({ subject: 'S', body: 'B', replyToId: 200, recipients: [] }) // guard FRESH
+      .mockResolvedValueOnce({ entityId: 861 })
+      .mockResolvedValueOnce({
+        id: 861, subject: 'S', body: 'B',
+        date: { dateTime: '2026-07-20T00:00:00Z' },
+        replyToId: 205, // re-targeted to the thread tip, NOT dropped
+      })
+      .mockResolvedValueOnce({});
+    setup(client);
+
+    const result = await handlers.get('ofw_save_draft')!({
+      subject: 'S', body: 'B', messageId: 860, replyToId: 200,
+    });
+    const text = result.content[0].text;
+
+    expect(text).toMatch(/re-targeted the reply to message 205/);
+    expect(text).toMatch(/The draft IS threaded/);
+    expect(text).not.toMatch(/did not thread this draft/);
+    expect(text).not.toMatch(/inReplyTo\/showContext will be empty/);
+    // …and the response's own echo agrees with the warning.
+    expect(JSON.parse(text.slice(text.indexOf('{'))).inReplyTo).toBe(205);
+  });
 });
 
 describe('draft reads expose revision + cacheStatus', () => {
@@ -3607,6 +3641,22 @@ describe('ofw_check_freshness', () => {
     expect(parsed.folders[0].historyComplete).toBe(false);
     expect(parsed.folders[0].inSync).toBeNull();
     expect(parsed.folders[0].note).toMatch(/backfilled/);
+  });
+
+  it('tells a never-synced folder to sync instead of calling it mid-backfill', async () => {
+    // No sync state at all. That leaves historyComplete false for the same
+    // reason a parked backfill does, but the advice is the opposite: waiting
+    // out a backfill that never started gets the caller nowhere.
+    setup(makeClient(foldersPayload()));
+
+    const parsed = JSON.parse(
+      (await handlers.get('ofw_check_freshness')!({ folders: ['inbox'] })).content[0].text,
+    );
+
+    expect(parsed.folders[0].historyComplete).toBe(false);
+    expect(parsed.folders[0].inSync).toBeNull();
+    expect(parsed.folders[0].note).toMatch(/never been synced/);
+    expect(parsed.folders[0].note).not.toMatch(/backfilled/);
   });
 
   it('withholds a verdict when OFW reports no count for the folder', async () => {
