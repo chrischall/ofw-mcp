@@ -101,7 +101,7 @@ Always pass `--config ~/.mcporter/mcporter.json` unless a local `config/mcporter
 | `ofw_save_draft(subject, body, recipientIds?, messageId?, replyToId?, myFileIDs?)` | Create a new draft. Pass `messageId` to **replace** an existing draft: the tool creates a fresh draft and deletes the old one (OFW's update-in-place endpoint silently no-ops). The returned `id` is the NEW id; the response includes a `NOTE` documenting the swap. |
 | `ofw_delete_draft(messageId)` | Delete a draft. |
 | `ofw_upload_attachment(path, shareClass?, label?, description?)` | Upload a local file to My Files; returns a fileId to pass into `myFileIDs`. |
-| `ofw_download_attachment(fileId, inline?, saveTo?, force?)` | Download an attachment. `inline:true` returns bytes as MCP content; default writes to `~/Downloads/ofw-mcp/`. |
+| `ofw_download_attachment(fileId, inline?, saveTo?, force?, extract?, maxChars?, parts?)` | Download an attachment. Inline delivery returns the first rung that works: image → `ImageContent`; .xlsx/.csv/.pdf/.docx/.pptx/text → **extracted content** under `extracted` (per-sheet CSV, per-page/slide text); anything else → raw bytes. Default writes to `~/Downloads/ofw-mcp/` (add `extract:true` for content too). Use `parts:"1-2"` / a sheet name and `maxChars` on large files. |
 | `ofw_check_freshness(folders?, messageIds?, allowMarkRead?)` | Cheap live check that the cache still matches OFW — one request for folder counts plus one per id, no bodies, no sync. Use before asserting current state. Only probes ids in the drafts cache unless `allowMarkRead:true` (probing others marks inbox messages read). |
 
 ### Calendar

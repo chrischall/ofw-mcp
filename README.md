@@ -129,7 +129,7 @@ OFW_USERNAME=you@example.com OFW_PASSWORD=yourpass node dist/index.js
 Instead of running `ofw-mcp` locally, you can add it to [claude.ai](https://claude.ai) as a **remote MCP connector** — a hosted Cloudflare Worker you reach from Settings → Connectors on Claude web, desktop, or mobile (connectors sync across all three). The same tool registrars back both targets, so the tools and behaviour are identical to the local stdio install; the Worker just wraps them with [`@chrischall/mcp-connector`](https://www.npmjs.com/package/@chrischall/mcp-connector) (the shared OAuth + streamable-HTTP harness) and a per-user [Durable Object](src/cache/durable.ts) cache in place of the local SQLite file.
 
 - **How you connect.** Each person you share the connector URL with logs in through the connector's own OAuth page with their **own** OurFamilyWizard email and password. Those credentials are stored (encrypted at rest) per user because OFW bearer tokens expire after ~6h with no refresh token, so the connector must be able to re-login on its own. One user can never see another's account or cache.
-- **Attachments are inline-only.** The Worker has no local filesystem, so `ofw_download_attachment` always returns bytes as MCP content blocks (`OFW_INLINE_ATTACHMENTS=true`) rather than writing to disk.
+- **Attachments are inline-only.** The Worker has no local filesystem, so `ofw_download_attachment` always returns content as MCP content blocks (`OFW_INLINE_ATTACHMENTS=true`) rather than writing to disk. Spreadsheets, PDFs and Office documents come back as extracted text/CSV, so they are readable even though the host cannot render the file itself.
 - **Write mode defaults to `all`.** The hosted connector registers every tool by default, configurable per deployment via `OFW_WRITE_MODE` / `OFW_CALENDAR_WRITES` in `wrangler.jsonc` — see [Write protection](#write-protection-ofw_write_mode).
 - **Message sync is bounded and resumable.** To stay under Cloudflare's per-request subrequest cap, `ofw_sync_messages` on the hosted connector caps how many OFW requests one call makes (`OFW_SYNC_MAX_REQUESTS` in `wrangler.jsonc`, default `40`) and resumes across calls, so a large mailbox backfills over multiple `ofw_sync_messages` calls rather than one; the local stdio server is unbounded. See [`docs/DEPLOY-CONNECTOR.md`](docs/DEPLOY-CONNECTOR.md#sync--the-subrequest-limit).
 
@@ -149,7 +149,7 @@ Read-only tools run automatically. Write tools ask for your confirmation first. 
 | `ofw_sync_messages` | Sync messages into the local cache (unread bodies left unfetched to avoid read receipts) | Auto | any |
 | `ofw_get_unread_sent` | Sent messages a recipient hasn't read yet (from local cache) | Auto | any |
 | `ofw_check_freshness` | Cheap live check that the cache still matches OFW — confirm a draft still exists unsent, without a full sync | Auto | any |
-| `ofw_download_attachment` | Download a message attachment to disk (or inline as MCP content) | Auto | any |
+| `ofw_download_attachment` | Download a message attachment to disk, or inline as extracted content / bytes | Auto | any |
 | `ofw_send_message` | Send a message | Confirm | `all` |
 | `ofw_list_drafts` | Draft messages | Auto | any |
 | `ofw_save_draft` | Create or update a draft | Confirm | `drafts` |
