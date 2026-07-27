@@ -359,8 +359,12 @@ async function walkPages(
       }
     }
 
-    // Flush the page's rows in one transaction/RPC. Empty array is a no-op.
-    await store.upsertMessages(toUpsert);
+    // Flush the page's rows in one transaction/RPC. Skipped entirely when the
+    // page held nothing new: on the Worker this call is a Durable-Object RPC,
+    // and a DO RPC counts against the same subrequest budget as an OFW fetch.
+    // A deep re-walk crosses page after page of already-cached messages, so an
+    // unconditional "no-op" write spends the caller's budget to store nothing.
+    if (toUpsert.length > 0) await store.upsertMessages(toUpsert);
 
     if (pageBudgetHit) {
       // Paused mid-page. Resume at THIS page: the partial rows are cached, so
