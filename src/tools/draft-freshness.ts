@@ -75,8 +75,13 @@ function isNotFound(e: unknown): boolean {
  * Read a draft's AUTHORITATIVE state straight from OFW, bypassing the cache.
  *
  * Returns `null` when the draft no longer exists (404). Any other failure
- * throws `DraftFreshnessError`: a freshness check that could not run must
- * abort the write, never wave it through — see the callers in messages.ts.
+ * throws, and the callers in messages.ts abort on ALL of them: a freshness
+ * check that could not run must never wave the write through.
+ *
+ * Most failures throw `DraftFreshnessError` from this function, but not all —
+ * a strict `parseLenient` mismatch on the response throws `McpToolError`
+ * instead. Callers must not assume the narrower type (the catch blocks read
+ * only `.message`, which every Error carries).
  */
 export async function fetchServerDraft(client: OFWClient, id: number): Promise<DraftContent | null> {
   let raw: unknown;
