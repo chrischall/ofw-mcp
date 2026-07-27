@@ -9,6 +9,8 @@
 // `node:zlib` here would break the Worker build; adding a userland inflate
 // dependency would bloat it. Neither is necessary.
 
+import { inflateBounded, MAX_DECOMPRESSED_BYTES } from './inflate.js';
+
 const EOCD_SIG = 0x06054b50;
 const CENTRAL_SIG = 0x02014b50;
 const LOCAL_SIG = 0x04034b50;
@@ -26,8 +28,6 @@ const ZIP64_SENTINEL = 0xffffffff;
  * 1 KB in front of a member that expands to a gigabyte.
  */
 export const ZIP_MAX_UNCOMPRESSED_BYTES = MAX_DECOMPRESSED_BYTES;
-
-import { inflateBounded, MAX_DECOMPRESSED_BYTES } from './inflate.js';
 
 interface ZipEntry {
   name: string;
