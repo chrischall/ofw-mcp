@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.7.1](https://github.com/chrischall/ofw-mcp/compare/v2.7.0...v2.7.1) (2026-07-27)
+
+
+### Bug Fixes
+
+* **deps:** require @chrischall/mcp-connector &gt;=1.1.1 ([#184](https://github.com/chrischall/ofw-mcp/issues/184)) ([32a284e](https://github.com/chrischall/ofw-mcp/commit/32a284e889911cb52ae7f129866d32e782cfd47b))
+* stop ofw_save_draft self-inflicting STALE_DRAFT and silently dropping replyToId ([#179](https://github.com/chrischall/ofw-mcp/issues/179)) ([4f57fbb](https://github.com/chrischall/ofw-mcp/commit/4f57fbb733caf3fee0fc0ca7359fd550357a31c7))
+
 ## [2.7.0](https://github.com/chrischall/ofw-mcp/compare/v2.6.7...v2.7.0) (2026-07-21)
 
 
