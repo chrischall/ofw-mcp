@@ -198,15 +198,19 @@ The "Confirm" permission above is a *hint* to the MCP host — a host configured
 
 | `OFW_WRITE_MODE` | What's available |
 |------------------|------------------|
-| `none` | Read/sync/search only. No write tools exist. |
+| `none` | **Default.** Read/sync/search only. No write tools exist. |
 | `drafts` | Adds draft-level writes: `ofw_save_draft`, `ofw_delete_draft`, `ofw_upload_attachment`. Nothing that lands on the court-visible record — the AI prepares, only a human signed into the OFW web UI can send. |
-| `all` | Everything (the default — fully backward compatible). |
+| `all` | Everything (send, calendar/expense/journal writes). Opt in deliberately — on a court-of-record account, prefer `drafts`. |
 
 Unrecognized values fail closed to `none`, with a warning on stderr — a typo never silently grants write access.
 
 #### Calendar opt-in (`OFW_CALENDAR_WRITES`)
 
 Calendar events sit between the two message tiers: they have no draft stage (a created event is immediately visible on the shared record), but unlike a sent message they are reversible — an event can be edited or deleted afterward. If you run in `drafts` mode but are comfortable with direct calendar writes, set `OFW_CALENDAR_WRITES=true` to additionally register `ofw_create_event`, `ofw_update_event`, and `ofw_delete_event`. The flag is redundant in `all` mode and never overrides `none`.
+
+### Egress allowlist
+
+Every outbound request is passed through a hard host check before `fetch` — the server refuses to contact any host other than `ofw.ourfamilywizard.com` (including URL userinfo-splice tricks). It's a structural backstop: a future code change or a compromised dependency that tried to reach another host throws instead of exfiltrating your bearer token or messages.
 
 ## Troubleshooting
 
@@ -228,6 +232,7 @@ Calendar events sit between the two message tiers: they have no draft stage (a c
 - They are passed to the server as environment variables and never logged
 - The server authenticates with OFW using the same login flow as the web app
 - Use a strong, unique OFW password
+- Outbound requests are host-allowlisted to `ofw.ourfamilywizard.com` (see [Egress allowlist](#egress-allowlist))
 
 ## Development
 

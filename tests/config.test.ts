@@ -182,11 +182,11 @@ describe('getWriteMode', () => {
     vi.restoreAllMocks();
   });
 
-  it('defaults to "all" when unset or blank', () => {
+  it('defaults to "none" (fail-safe) when unset or blank', () => {
     delete process.env.OFW_WRITE_MODE;
-    expect(getWriteMode()).toBe('all');
+    expect(getWriteMode()).toBe('none');
     process.env.OFW_WRITE_MODE = '   ';
-    expect(getWriteMode()).toBe('all');
+    expect(getWriteMode()).toBe('none');
   });
 
   it('accepts none/drafts/all, case-insensitive and trimmed', () => {
