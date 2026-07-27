@@ -14,9 +14,12 @@ import { getFolderVerifiedAt } from '../sync.js';
 import type { AttachmentIO } from './attachments.js';
 import { buildInlineDelivery, tryExtract } from './delivery.js';
 import { resolveDownloadMime } from './attachments.js';
-import { getAttachmentsDir, getDefaultInlineAttachments, getSyncMaxRequests, getWriteMode } from '../config.js';
+import {
+  getAllowMarkRead, getAttachmentsDir, getDefaultInlineAttachments, getFetchUnreadBodies,
+  getSyncMaxRequests, getWriteMode,
+} from '../config.js';
 import { basename, join } from 'node:path';
-import { ApiRecipientSchema, expandPath, hasRealView, jsonErrorResponse, jsonResponse, mapRecipients, postMessageAndRefetch, textResponse, verifyWriteLanded, withReadState } from './_shared.js';
+import { ApiRecipientSchema, deriveRead, expandPath, hasRealView, jsonErrorResponse, jsonResponse, mapRecipients, postMessageAndRefetch, textResponse, verifyWriteLanded, withReadState } from './_shared.js';
 import { parseLenient } from '@chrischall/mcp-utils';
 
 // Schemas for the load-bearing fields of each /pub/v3 response this file
@@ -145,6 +148,52 @@ async function draftsFreshness(
   return { freshness, serverConfirmed: cacheStatus === 'fresh', cacheStatus };
 }
 
+/**
+ * Decide whether fetching this message's body from OFW would stamp the record,
+ * and refuse when the caller (or the deployment) has opted out of that.
+ *
+ * Returns null to proceed, or a structured refusal to return as-is.
+ *
+ * Only ONE case actually stamps: fetching the body of an UNREAD INBOX message.
+ * Everything else is waved through, because refusing a read that changes
+ * nothing would be friction with no safety to show for it:
+ *   - a SENT message — the "First Viewed" times on it belong to the recipient,
+ *     and our own fetch never writes one;
+ *   - an already-read inbox message — the stamp exists; re-reading cannot add
+ *     a second one (`deriveRead` is monotonic, so this cannot flip back);
+ *   - a cached body — this function is never reached, the cache served it.
+ *
+ * An id with NO cached row is refused: whether it would stamp is exactly what
+ * we cannot know without making the request that stamps it. Syncing first
+ * (which reads list pages, not bodies) resolves it.
+ */
+export function markReadVerdict(
+  cached: MessageRow | null,
+  requested: boolean | undefined,
+): ReturnType<typeof jsonErrorResponse> | null {
+  const ceiling = getAllowMarkRead();
+  if (ceiling && (requested ?? true)) return null;
+
+  const wouldStamp = cached === null
+    || (cached.folder === 'inbox' && !deriveRead(cached));
+  if (!wouldStamp) return null;
+
+  const because = ceiling
+    ? 'you passed allowMarkRead:false'
+    : 'this server runs with OFW_ALLOW_MARK_READ=false';
+  return jsonErrorResponse({
+    error: 'MARK_READ_BLOCKED',
+    messageId: cached?.id ?? null,
+    reason: cached === null
+      ? 'This id is not in the cache, so whether reading it would mark it read is unknowable without making the request that would.'
+      : 'This is an unread inbox message; fetching its body would mark it read on OurFamilyWizard.',
+    note: `Refused because ${because}. Reading a message for the first time stamps a "First Viewed" timestamp that your co-parent can see and that forms part of the record — it cannot be undone. To read it anyway, call again with allowMarkRead:true${ceiling ? '' : ' (which this deployment does not permit — clear OFW_ALLOW_MARK_READ to re-enable)'}.`,
+    ...(cached === null
+      ? { hint: 'Run ofw_sync_messages first: it walks list pages, not bodies, so it can tell you what this id is without stamping anything.' }
+      : { subject: cached.subject, fromUser: cached.fromUser, sentAt: cached.sentAt }),
+  });
+}
+
 export function registerMessageTools(
   server: McpServer,
   client: OFWClient,
@@ -230,10 +279,11 @@ export function registerMessageTools(
   });
 
   server.registerTool('ofw_get_message', {
-    description: 'Get a single OurFamilyWizard message OR draft by ID. Reads from local cache when available; otherwise fetches from OFW (which will mark unread inbox messages as read on OFW). For ids that match a draft (in the drafts cache), the response carries folder="drafts" and the body/subject/recipients reflect the drafts cache (which ofw_sync_messages keeps fresh) — drafts have no `fromUser`, and `sentAt`/`fetchedBodyAt` mirror the draft\'s `modifiedAt`. For inbox/sent messages, folder is "inbox" or "sent" as before.',
+    description: 'Get a single OurFamilyWizard message OR draft by ID. Reads from local cache when available; otherwise fetches from OFW — and for an UNREAD INBOX message that fetch marks it read and stamps a "First Viewed" time the co-parent can see, which is part of the record and cannot be undone. Pass allowMarkRead:false to refuse such a fetch instead (cached bodies, sent messages and already-read messages are unaffected, because none of them stamp anything). For ids that match a draft (in the drafts cache), the response carries folder="drafts" and the body/subject/recipients reflect the drafts cache (which ofw_sync_messages keeps fresh) — drafts have no `fromUser`, and `sentAt`/`fetchedBodyAt` mirror the draft\'s `modifiedAt`. For inbox/sent messages, folder is "inbox" or "sent" as before.',
     annotations: { readOnlyHint: false },
     inputSchema: {
       messageId: z.string().describe('Message ID (also accepts draft IDs — drafts are routed via the drafts cache)'),
+      allowMarkRead: z.boolean().describe('Default true (the long-standing behaviour). Set false to refuse a fetch that would mark an unread INBOX message as READ on OurFamilyWizard — an irreversible, co-parent-visible change to the record. Reads that cannot stamp anything (a cached body, a sent message, an already-read message) still succeed. The server-wide OFW_ALLOW_MARK_READ=false is a ceiling this argument cannot raise.').optional(),
     },
   }, async (args) => {
     const id = Number(args.messageId);
@@ -336,6 +386,14 @@ export function registerMessageTools(
       const freshness = await buildFreshness(cache, { source: 'cache', folders: [row.folder] });
       return jsonResponse({ ...withReadState(row), attachments, freshness });
     }
+
+    // Everything above this line was served without asking OFW for a body.
+    // This is the one path that fetches one — and fetching the body of an
+    // unread INBOX message marks it read on OFW, stamping a "First Viewed"
+    // time the co-parent can see. That is a court-visible, irreversible change
+    // made as a side effect of an ordinary read, so it gets an explicit gate.
+    const markReadCheck = markReadVerdict(cached, args.allowMarkRead);
+    if (markReadCheck !== null) return markReadCheck;
 
     const detail = parseLenient(
       MessageDetailSchema,
@@ -1066,7 +1124,7 @@ export function registerMessageTools(
     annotations: { readOnlyHint: false },
     inputSchema: {
       folders: z.array(z.enum(['inbox', 'sent', 'drafts'])).min(1).describe('Folders to sync (default: all three). Must be non-empty if given — an empty list would sync nothing while reporting success.').optional(),
-      fetchUnreadBodies: z.boolean().describe('If true, also fetch bodies for unread inbox messages (will mark them as read on OFW). Default false.').optional(),
+      fetchUnreadBodies: z.boolean().describe('If true, also fetch bodies for unread inbox messages — which marks each one READ on OurFamilyWizard and stamps a co-parent-visible "First Viewed" time that cannot be undone. Defaults to the OFW_FETCH_UNREAD_BODIES env var (false unless set), and is forced off entirely when OFW_ALLOW_MARK_READ=false.').optional(),
       deep: z.boolean().describe('If true, walk every OFW page until empty regardless of cache state. Use to backfill gaps. Default false.').optional(),
       maxRequests: z.number().int().min(1).describe('Maximum OFW requests this single call may make before pausing. When hit, the response reports done:false — call again with the same arguments to continue. Omit to use the server default (OFW_SYNC_MAX_REQUESTS, or unbounded on local installs).').optional(),
     },
@@ -1074,7 +1132,10 @@ export function registerMessageTools(
     const cache = cacheProvider();
     const result = await syncAll(client, {
       folders: args.folders,
-      fetchUnreadBodies: args.fetchUnreadBodies,
+      // Default from OFW_FETCH_UNREAD_BODIES (false unless set), and capped by
+      // the OFW_ALLOW_MARK_READ ceiling — fetching those bodies is exactly what
+      // stamps a First Viewed time on every unread message it touches.
+      fetchUnreadBodies: getAllowMarkRead() && (args.fetchUnreadBodies ?? getFetchUnreadBodies()),
       deep: args.deep,
       maxRequests: args.maxRequests ?? getSyncMaxRequests(),
     }, cache);
@@ -1097,7 +1158,10 @@ export function registerMessageTools(
     },
   }, async (args) => {
     const cache = cacheProvider();
-    const allowMarkRead = args.allowMarkRead ?? false;
+    // The server-wide ceiling wins: a per-call allowMarkRead:true (or an
+    // instruction injected into one) must not be able to stamp the record on a
+    // deployment configured to never do so.
+    const allowMarkRead = getAllowMarkRead() && (args.allowMarkRead ?? false);
     const requestedIds = args.messageIds ?? [];
     const ids = requestedIds.slice(0, MAX_FRESHNESS_IDS);
     // Folders default to "all three" only when the caller asked about nothing

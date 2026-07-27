@@ -94,7 +94,7 @@ Always pass `--config ~/.mcporter/mcporter.json` unless a local `config/mcporter
 | `ofw_sync_messages(folders?, deep?, fetchUnreadBodies?)` | Sync OFW → local cache. **Call first if the cache might be stale.** Returns unread inbox hints (bodies not fetched, to avoid mark-as-read). |
 | `ofw_list_message_folders` | List OFW folders with unread counts. Most reads use the cache; this is mainly for folder IDs and live unread counts. |
 | `ofw_list_messages(folderId?, since?, until?, q?, page?, size?)` | Cache-backed list. Supports folder ("inbox"/"sent"/"both"), date range, and substring search. |
-| `ofw_get_message(messageId)` | Read a message OR draft body. Cache-first. Ids in the drafts cache return `folder: "drafts"`. ⚠️ Falls through to OFW for unread inbox messages, which marks them as read. |
+| `ofw_get_message(messageId, allowMarkRead?)` | Read a message OR draft body. Cache-first. Ids in the drafts cache return `folder: "drafts"`. ⚠️ Falls through to OFW for unread inbox messages, which marks them read AND stamps a "First Viewed" time the co-parent can see — irreversible. Pass `allowMarkRead:false` to refuse that fetch instead; cached, sent and already-read messages are unaffected. |
 | `ofw_send_message(subject, body, recipientIds[], replyToId?, draftId?, myFileIDs?)` | Send a message. Pass `replyToId` to thread original history. Pass `draftId` to auto-delete the draft after sending. Pass `myFileIDs` (from `ofw_upload_attachment`) to attach files. |
 | `ofw_get_unread_sent` | Sent messages your co-parent hasn't read yet (from cache). |
 | `ofw_list_drafts` | List saved drafts (cache-backed). Each draft carries `serverConfirmed` — see [Freshness](#freshness). |

@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DEFAULT_FRESHNESS_TTL_SECONDS, getAttachmentsDir, getCacheDbPath, getCalendarWritesAllowed, getDefaultInlineAttachments, getCacheDir, getFreshnessTtlSeconds, getSyncMaxRequests, getWriteMode } from '../src/config.js';
+import { DEFAULT_FRESHNESS_TTL_SECONDS, getAllowMarkRead, getAttachmentsDir, getCacheDbPath, getCalendarWritesAllowed, getDefaultInlineAttachments, getCacheDir, getFetchUnreadBodies, getFreshnessTtlSeconds, getSyncMaxRequests, getWriteMode } from '../src/config.js';
 
 describe('getCacheDbPath', () => {
   let tmp: string;
@@ -168,6 +168,68 @@ describe('getSyncMaxRequests', () => {
   it.each(['0', '-5', '12.5', 'abc', 'NaN'])('falls back to unbounded for invalid value %j', (val) => {
     process.env.OFW_SYNC_MAX_REQUESTS = val;
     expect(getSyncMaxRequests()).toBe(Number.POSITIVE_INFINITY);
+  });
+});
+
+describe('getAllowMarkRead', () => {
+  const KEY = 'OFW_ALLOW_MARK_READ';
+  let prev: string | undefined;
+  beforeEach(() => { prev = process.env[KEY]; delete process.env[KEY]; });
+  afterEach(() => {
+    if (prev === undefined) delete process.env[KEY];
+    else process.env[KEY] = prev;
+    vi.restoreAllMocks();
+  });
+
+  it('defaults to true when unset or blank — the pre-existing behaviour', () => {
+    expect(getAllowMarkRead()).toBe(true);
+    process.env[KEY] = '   ';
+    expect(getAllowMarkRead()).toBe(true);
+  });
+
+  it('accepts the affirmative spellings', () => {
+    for (const v of ['1', 'true', 'TRUE', 'yes', 'on', ' true ']) {
+      process.env[KEY] = v;
+      expect(getAllowMarkRead()).toBe(true);
+    }
+  });
+
+  it('accepts the negative spellings', () => {
+    for (const v of ['0', 'false', 'FALSE', 'no', 'off', ' false ']) {
+      process.env[KEY] = v;
+      expect(getAllowMarkRead()).toBe(false);
+    }
+  });
+
+  it('fails closed with a warning on an unrecognized value', () => {
+    // A typo is a deliberate attempt to set something. Honouring it as the
+    // permissive default would silently keep stamping the record; refusing is
+    // both safer and loud (every refusal names its reason).
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    process.env[KEY] = 'flase';
+    expect(getAllowMarkRead()).toBe(false);
+    expect(err).toHaveBeenCalledWith(expect.stringContaining('OFW_ALLOW_MARK_READ'));
+  });
+});
+
+describe('getFetchUnreadBodies', () => {
+  const KEY = 'OFW_FETCH_UNREAD_BODIES';
+  let prev: string | undefined;
+  beforeEach(() => { prev = process.env[KEY]; delete process.env[KEY]; });
+  afterEach(() => {
+    if (prev === undefined) delete process.env[KEY];
+    else process.env[KEY] = prev;
+  });
+
+  it('defaults to false — the pre-existing sync behaviour', () => {
+    expect(getFetchUnreadBodies()).toBe(false);
+  });
+
+  it('is true only for an affirmative value', () => {
+    process.env[KEY] = 'true';
+    expect(getFetchUnreadBodies()).toBe(true);
+    process.env[KEY] = 'nonsense';
+    expect(getFetchUnreadBodies()).toBe(false);
   });
 });
 

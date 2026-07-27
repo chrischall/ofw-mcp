@@ -40,6 +40,18 @@
           "description": "Set to \"true\" to register calendar write tools (create/update/delete event) in \"drafts\" write mode. Events have no draft stage but are reversible. Never overrides \"none\".",
           "isRequired": false,
           "format": "string"
+        },
+        {
+          "name": "OFW_ALLOW_MARK_READ",
+          "description": "Default \"true\". Set \"false\" to forbid any tool from marking a message read on OurFamilyWizard - reading a body for the first time stamps a co-parent-visible \"First Viewed\" time that cannot be undone. A ceiling: no per-call argument can raise it.",
+          "isRequired": false,
+          "format": "string"
+        },
+        {
+          "name": "OFW_FETCH_UNREAD_BODIES",
+          "description": "Default \"false\". Whether ofw_sync_messages fetches unread inbox bodies by default (each fetch stamps a First Viewed time). Capped by OFW_ALLOW_MARK_READ.",
+          "isRequired": false,
+          "format": "string"
         }
       ]
     }
