@@ -84,6 +84,23 @@ describe('parseTimestampValue', () => {
   it('rejects a well-shaped but impossible date', () => {
     expect(parseTimestampValue('sentAt', '2026-99-01T00:00:00Z', ET)).toBeNull();
   });
+
+  // Date.UTC rolls impossible components over instead of rejecting them, so
+  // '2026-99-01T00:00:00' would silently become 2034 and '2026-02-30T10:00:00'
+  // would become Mar 2 — a typo surfacing as a confident wrong date.
+  it('rejects impossible naive dates rather than rolling them over', () => {
+    for (const bad of ['2026-99-01T00:00:00', '2026-13-05T10:00:00', '2026-02-30T10:00:00', '2026-01-01T25:00:00']) {
+      expect(parseTimestampValue('sentAt', bad, ET)).toBeNull();
+    }
+  });
+
+  // A non-existent spring-forward wall time is shifted forward, not dropped:
+  // we can still place it to within an hour, which is what the date needs.
+  it('keeps a non-existent spring-forward wall time on its own date', () => {
+    const instant = parseTimestampValue('sentAt', '2026-03-08T02:30:00', ET);
+    expect(instant).not.toBeNull();
+    expect(formatInstant(instant as Date, ET).iso.startsWith('2026-03-08')).toBe(true);
+  });
 });
 
 describe('normalizeTimestampsInValue', () => {

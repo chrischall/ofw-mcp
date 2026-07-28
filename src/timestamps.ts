@@ -62,8 +62,31 @@ function offsetAt(instant: Date, tz: string): string {
 
 // Wall-clock fields of `instant` as seen in `tz`, via Intl so the IANA rules
 // (including DST) apply.
+// Intl.DateTimeFormat construction dominates the cost here, and a 50-message
+// listing formats hundreds of timestamps. Cache one formatter per zone.
+const wallPartsFormatters = new Map<string, Intl.DateTimeFormat>();
+const displayFormatters = new Map<string, Intl.DateTimeFormat>();
+
+function wallPartsFormatter(tz: string): Intl.DateTimeFormat {
+  let fmt = wallPartsFormatters.get(tz);
+  if (!fmt) {
+    fmt = buildWallPartsFormatter(tz);
+    wallPartsFormatters.set(tz, fmt);
+  }
+  return fmt;
+}
+
 function wallPartsIn(instant: Date, tz: string): Record<string, number> {
-  const parts = new Intl.DateTimeFormat('en-US', {
+  const parts = wallPartsFormatter(tz).formatToParts(instant);
+  const out: Record<string, number> = {};
+  for (const p of parts) {
+    if (p.type !== 'literal') out[p.type] = Number(p.value);
+  }
+  return out;
+}
+
+function buildWallPartsFormatter(tz: string): Intl.DateTimeFormat {
+  return new Intl.DateTimeFormat('en-US', {
     timeZone: tz,
     year: 'numeric',
     month: '2-digit',
@@ -73,12 +96,7 @@ function wallPartsIn(instant: Date, tz: string): Record<string, number> {
     second: '2-digit',
     // h23 pins midnight to hour 00; without it some ICU builds render hour 24.
     hourCycle: 'h23',
-  }).formatToParts(instant);
-  const out: Record<string, number> = {};
-  for (const p of parts) {
-    if (p.type !== 'literal') out[p.type] = Number(p.value);
-  }
-  return out;
+  });
 }
 
 // Interpret naive wall-clock fields as an instant in `tz`. There is no direct
@@ -122,17 +140,21 @@ function isoWithOffset(instant: Date, tz: string, offset: string): string {
 // goes through here, so no call site can reintroduce a naive value.
 export function formatInstant(instant: Date, tz = displayTimeZone()): CanonicalTimestamp {
   const offset = offsetAt(instant, tz);
-  const display = new Intl.DateTimeFormat('en-US', {
-    timeZone: tz,
-    weekday: 'short',
-    month: 'short',
-    day: 'numeric',
-    year: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit',
-    timeZoneName: 'short',
-  }).format(instant);
-  return { iso: isoWithOffset(instant, tz, offset), display };
+  let fmt = displayFormatters.get(tz);
+  if (!fmt) {
+    fmt = new Intl.DateTimeFormat('en-US', {
+      timeZone: tz,
+      weekday: 'short',
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+      timeZoneName: 'short',
+    });
+    displayFormatters.set(tz, fmt);
+  }
+  return { iso: isoWithOffset(instant, tz, offset), display: fmt.format(instant) };
 }
 
 // Keys whose STRING values are timestamps. Deliberately an allowlist rather
@@ -152,7 +174,20 @@ const TIMESTAMP_KEYS = new Set([
   'fetchedBodyAt',
   'fetchedAt',
   'syncedAt',
+  'downloadedAt',
+  'recordedAt',
+  'expiresAt',
+  // Freshness/sync bookkeeping. These sit in the SAME object as `asOf`, so
+  // omitting them left the freshness block emitting two zones at once — the
+  // exact defect this module exists to remove. Enumerated from a sweep of
+  // emitted field names rather than from the ones a bug report happened to
+  // mention.
   'asOf',
+  'checkedAt',
+  'lastVerifiedAt',
+  'oldestVerifiedAt',
+  'lastServerSyncAt',
+  'lastSyncAt',
   // OFW API inner shape: `date: { dateTime }`, `viewed: { dateTime }`.
   'dateTime',
   // Generic.
@@ -161,6 +196,11 @@ const TIMESTAMP_KEYS = new Set([
   'lastModified',
   'expirationTime',
 ]);
+
+// Deliberately NOT timestamps: `startDate`/`endDate` are YYYY-MM-DD and
+// `startTime`/`endTime` are HH:mm — a calendar date and a wall time, neither of
+// which denotes an instant. Attaching an offset would invent information. The
+// shape guards below would reject them anyway; this records the intent.
 
 // Keys that hold a zone NAME rather than an instant. They cannot match a
 // timestamp shape anyway, but naming them documents the hazard.
@@ -171,6 +211,20 @@ const NAIVE_DATE_TIME = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))
 // A bare YYYY-MM-DD is a DATE, not an instant — Calendar uses it for all-day
 // events. Converting one would invent a time that the source never asserted.
 const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
+
+// True when the components describe a real calendar instant. Guards against
+// Date.UTC's silent rollover of out-of-range values.
+function isRealCalendarDate(p: {
+  year: number; month: number; day: number; hour: number; minute: number; second: number;
+}): boolean {
+  const utc = new Date(Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second));
+  return utc.getUTCFullYear() === p.year
+    && utc.getUTCMonth() === p.month - 1
+    && utc.getUTCDate() === p.day
+    && utc.getUTCHours() === p.hour
+    && utc.getUTCMinutes() === p.minute
+    && utc.getUTCSeconds() === p.second;
+}
 
 // Resolve a raw field value to an instant, or null when it is not a timestamp.
 // `assumeNaiveIn` is the zone a naive (offset-less) value is wall-clock in.
@@ -193,8 +247,22 @@ export function parseTimestampValue(
   if (naive) {
     const [, y, mo, d, h, mi, s, frac] = naive;
     const ms = frac ? Number(frac.padEnd(3, '0').slice(0, 3)) : 0;
+    const parts = {
+      year: Number(y), month: Number(mo), day: Number(d),
+      hour: Number(h), minute: Number(mi), second: Number(s ?? '0'),
+    };
+    // Date.UTC silently rolls impossible components over — month 99 becomes
+    // 2034, Feb 30 becomes Mar 2 — so a typo would surface as a confident wrong
+    // date rather than a rejection. The offset branch above already returns
+    // null for the same input; match it.
+    //
+    // Checked in UTC space, deliberately: validating against the ZONE's wall
+    // clock would also reject a non-existent spring-forward time like
+    // 2026-03-08 02:30 ET, and shifting such a value forward (as zone libraries
+    // do) is better than dropping a timestamp we can place to within an hour.
+    if (!isRealCalendarDate(parts)) return null;
     return wallTimeToInstant(
-      Number(y), Number(mo), Number(d), Number(h), Number(mi), Number(s ?? '0'), ms, assumeNaiveIn,
+      parts.year, parts.month, parts.day, parts.hour, parts.minute, parts.second, ms, assumeNaiveIn,
     );
   }
   return null;

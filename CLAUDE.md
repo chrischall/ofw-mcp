@@ -109,6 +109,12 @@ Why: `sentAt`/`viewedAt`/`modifiedAt` arrived from OFW as naive local while `fet
 
 A field is rewritten only when the key is allowlisted **and** the value matches a timestamp shape, so user content (a message body quoting a date) is never touched. The payload is cloned first: responses carry live cache rows, and rewriting them in place would corrupt the cache.
 
+The allowlist covers the freshness/sync bookkeeping fields (`lastServerSyncAt`, `checkedAt`, `lastVerifiedAt`, `oldestVerifiedAt`, `lastSyncAt`) as well as the message fields — they share an object with `asOf`, so omitting them put two zones back in one payload. Derive additions from a sweep of emitted field names, not from whichever field a bug report happens to name. `startDate`/`endDate` (YYYY-MM-DD) and `startTime`/`endTime` (HH:mm) are deliberately excluded: a date and a wall time are not instants.
+
+`jsonErrorResponse` routes through `jsonResponse`, so a refusal payload carries the same normalized freshness block as the success path.
+
+**`DISPLAY_TZ` is deployment-wide, not per-tenant.** OFW reports naive times in the *account's* zone, so a tenant outside `DISPLAY_TZ` gets the wrong offset on those values. See [`docs/DEPLOY-CONNECTOR.md`](docs/DEPLOY-CONNECTOR.md) for the fix if this ever serves multiple zones.
+
 `auth.ts` ignores blank values, the strings `"undefined"`/`"null"`, and unsubstituted `${VAR}` placeholders — defensive against MCP hosts passing the env block through unexpanded.
 
 `.env` (project root) is loaded by `client.ts` via dynamic `dotenv` import (silently skipped if unavailable, e.g. inside the mcpb bundle). Real env vars take precedence (`override: false`).

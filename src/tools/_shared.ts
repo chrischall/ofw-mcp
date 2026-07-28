@@ -26,7 +26,11 @@ export const textResponse = rawTextResult;
 // we declined to overwrite) without being mistaken for a successful write.
 // mcp-utils' `errorResult` only carries a string.
 export function jsonErrorResponse(data: unknown): ReturnType<typeof textResult> {
-  return { ...textResult(data), isError: true };
+  // Routed through jsonResponse, not textResult: a refusal payload carries the
+  // same freshness block as the success path, and emitting it unnormalized made
+  // an UNVERIFIED_EMPTY response report `asOf` in UTC while every successful
+  // response reported it with an offset.
+  return { ...jsonResponse(data), isError: true };
 }
 
 // OFW API shape for `recipients[]` on message/draft list and detail
