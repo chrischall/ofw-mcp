@@ -4,6 +4,7 @@ import {
   OFWCacheCore,
   type AttachmentRow,
   type CacheStore,
+  type DraftLineageRow,
   type DraftRow,
   type FolderName,
   type ListMessagesOptions,
@@ -96,11 +97,26 @@ export class OFWCacheDO extends DurableObject {
   async listDrafts(opts: { page: number; size: number }): Promise<DraftRow[]> {
     return this.core.listDrafts(opts);
   }
+  async countDrafts(): Promise<number> {
+    return this.core.countDrafts();
+  }
   async deleteDraft(id: number): Promise<void> {
     this.core.deleteDraft(id);
   }
   async listDraftIds(): Promise<number[]> {
     return this.core.listDraftIds();
+  }
+  async recordDraftLineage(row: DraftLineageRow): Promise<void> {
+    this.core.recordDraftLineage(row);
+  }
+  async getDraftLineageById(id: number): Promise<DraftLineageRow | null> {
+    return this.core.getDraftLineageById(id);
+  }
+  async getDraftLineageByIds(ids: number[]): Promise<DraftLineageRow[]> {
+    return this.core.getDraftLineageByIds(ids);
+  }
+  async getDraftLineage(draftKey: string): Promise<DraftLineageRow[]> {
+    return this.core.getDraftLineage(draftKey);
   }
   async getSyncState(folder: FolderName): Promise<SyncState | null> {
     return this.core.getSyncState(folder);
@@ -170,11 +186,26 @@ class DurableCacheStore implements CacheStore {
   listDrafts(opts: { page: number; size: number }): Promise<DraftRow[]> {
     return this.stub.listDrafts(opts);
   }
+  countDrafts(): Promise<number> {
+    return this.stub.countDrafts();
+  }
   deleteDraft(id: number): Promise<void> {
     return this.stub.deleteDraft(id);
   }
   listDraftIds(): Promise<number[]> {
     return this.stub.listDraftIds();
+  }
+  recordDraftLineage(row: DraftLineageRow): Promise<void> {
+    return this.stub.recordDraftLineage(row);
+  }
+  getDraftLineageById(id: number): Promise<DraftLineageRow | null> {
+    return this.stub.getDraftLineageById(id);
+  }
+  getDraftLineageByIds(ids: number[]): Promise<DraftLineageRow[]> {
+    return this.stub.getDraftLineageByIds(ids);
+  }
+  getDraftLineage(draftKey: string): Promise<DraftLineageRow[]> {
+    return this.stub.getDraftLineage(draftKey);
   }
   getSyncState(folder: FolderName): Promise<SyncState | null> {
     return this.stub.getSyncState(folder);

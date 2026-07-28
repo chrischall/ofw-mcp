@@ -9,6 +9,7 @@ import {
 } from '../src/cache/durable.js';
 import { registerMessageTools } from '../src/tools/messages.js';
 import { OFWClient } from '../src/client.js';
+import { newDraftKey, resolveDraftKey } from '../src/tools/lifecycle.js';
 import type { AttachmentIO, ResolvedUpload } from '../src/tools/attachments.js';
 
 // Exercises the OFW message-cache Durable Object backend inside the REAL
@@ -108,6 +109,37 @@ describe('OFWCacheDO (Durable Object SQLite backend)', () => {
     // meta: set → get
     await store.setMeta('drafts_folder_id', '4242');
     expect(await store.getMeta('drafts_folder_id')).toBe('4242');
+  });
+
+  it('round-trips draft lineage + countDrafts, and mints keys, inside the Workers runtime', async () => {
+    // Proven HERE and not only in the node pool for the reason worker-extract
+    // exists: the hosted connector is a different runtime. `newDraftKey` uses
+    // the Web Crypto global (a `node:crypto` import would not bundle), and the
+    // lineage RPCs are new surface on OFWCacheDO.
+    const store = makeDurableCacheStore(CACHE, 'operator_lineage');
+
+    expect(await store.countDrafts()).toBe(0);
+    await store.upsertDrafts([draft(700), draft(701)]);
+    expect(await store.countDrafts()).toBe(2);
+
+    const key = newDraftKey();
+    expect(key).toMatch(/^dk_[0-9a-f-]{36}$/);
+    expect(newDraftKey()).not.toBe(key);
+
+    await store.recordDraftLineage({ id: 700, draftKey: key, previousId: null, recordedAt: '2026-07-01T00:00:00.000Z' });
+    await store.recordDraftLineage({ id: 701, draftKey: key, previousId: 700, recordedAt: '2026-07-02T00:00:00.000Z' });
+
+    expect((await store.getDraftLineage(key)).map((r) => r.id)).toEqual([700, 701]);
+    expect(await store.getDraftLineage('dk_absent')).toEqual([]);
+    expect(await store.getDraftLineageById(701)).toMatchObject({ draftKey: key, previousId: 700 });
+    expect(await store.getDraftLineageById(9999)).toBeNull();
+    expect(await store.getDraftLineageByIds([])).toEqual([]);
+    expect((await store.getDraftLineageByIds([700, 9999, 701])).map((r) => r.id).sort())
+      .toEqual([700, 701]);
+
+    // The key resolves to the chain tip through the same helper the tools use.
+    expect(await resolveDraftKey(store, key)).toEqual({ currentId: 701, ids: [700, 701] });
+    expect(await resolveDraftKey(store, 'dk_absent')).toBeNull();
   });
 
   it('round-trips batch message + draft upserts and reads through the DO', async () => {

@@ -65,6 +65,11 @@ const ServerDraftSchema = z.looseObject({
   body: z.string().optional(),
   replyToId: z.number().nullable().optional(),
   recipients: z.array(ApiRecipientSchema).optional(),
+  // Read for the LIFECYCLE answer (see tools/lifecycle.ts): which folder OFW
+  // itself says this id lives in right now. `existsOnServer` alone cannot
+  // distinguish "still a draft" from "was sent" — a sent draft still exists.
+  folder: z.looseObject({ id: z.number().optional(), name: z.string().optional() }).nullable().optional(),
+  date: z.looseObject({ dateTime: z.string().optional() }).nullable().optional(),
 });
 
 function isNotFound(e: unknown): boolean {
@@ -72,18 +77,36 @@ function isNotFound(e: unknown): boolean {
 }
 
 /**
- * Read a draft's AUTHORITATIVE state straight from OFW, bypassing the cache.
+ * One live read of a message/draft, carrying both its comparable CONTENT and
+ * the metadata needed to say what it has BECOME.
  *
- * Returns `null` when the draft no longer exists (404). Any other failure
- * throws, and the callers in messages.ts abort on ALL of them: a freshness
- * check that could not run must never wave the write through.
- *
- * Most failures throw `DraftFreshnessError` from this function, but not all —
- * a strict `parseLenient` mismatch on the response throws `McpToolError`
- * instead. Callers must not assume the narrower type (the catch blocks read
- * only `.message`, which every Error carries).
+ * Deliberately one object from one request: asking "did this change?" and
+ * "is this still a draft?" separately would double the cost of the cheap
+ * verification primitive that exists precisely so verification stays cheaper
+ * than recollection.
  */
-export async function fetchServerDraft(client: OFWClient, id: number): Promise<DraftContent | null> {
+export interface MessageSnapshot {
+  content: DraftContent;
+  /** OFW's own folder id for this message right now, or null when unreported. */
+  folderId: string | null;
+  /** OFW's display name for that folder, echoed for the caller. */
+  folderName: string | null;
+  /** `date.dateTime` — the sent time for a sent message. */
+  dateTime: string | null;
+}
+
+/**
+ * Read a message's AUTHORITATIVE state straight from OFW, bypassing the cache.
+ *
+ * Returns `null` when it no longer exists (404, or an empty body — OFW's other
+ * way of saying "no such message"). Any other failure throws.
+ *
+ * Most failures throw `DraftFreshnessError`, but not all — a strict
+ * `parseLenient` mismatch throws `McpToolError` instead. Callers must not assume
+ * the narrower type (the catch blocks read only `.message`, which every Error
+ * carries).
+ */
+export async function fetchMessageSnapshot(client: OFWClient, id: number): Promise<MessageSnapshot | null> {
   let raw: unknown;
   try {
     raw = await client.request('GET', `/pub/v3/messages/${id}`);
@@ -103,11 +126,28 @@ export async function fetchServerDraft(client: OFWClient, id: number): Promise<D
     mode: 'strict',
   });
   return {
-    subject: detail.subject ?? '',
-    body: detail.body ?? '',
-    replyToId: detail.replyToId ?? null,
-    recipients: mapRecipients(detail.recipients),
+    content: {
+      subject: detail.subject ?? '',
+      body: detail.body ?? '',
+      replyToId: detail.replyToId ?? null,
+      recipients: mapRecipients(detail.recipients),
+    },
+    folderId: detail.folder?.id === undefined ? null : String(detail.folder.id),
+    folderName: detail.folder?.name ?? null,
+    dateTime: detail.date?.dateTime ?? null,
   };
+}
+
+/**
+ * The content-only view of {@link fetchMessageSnapshot}, used by the
+ * destructive-draft guard, which cares what the draft SAYS, not where it lives.
+ *
+ * Returns `null` when the draft no longer exists. Any other failure throws, and
+ * the callers in messages.ts abort on ALL of them: a freshness check that could
+ * not run must never wave the write through.
+ */
+export async function fetchServerDraft(client: OFWClient, id: number): Promise<DraftContent | null> {
+  return (await fetchMessageSnapshot(client, id))?.content ?? null;
 }
 
 export type FreshnessVerdict = 'FRESH' | 'STALE' | 'MISSING';

@@ -9,14 +9,16 @@ import {
   DraftFreshnessError, checkDraftFreshness, draftRevision, fetchServerDraft, staleDraftPayload,
 } from './draft-freshness.js';
 import type { DraftContent } from './draft-freshness.js';
+import { newDraftKey, probeIds, resolveDraftKey } from './lifecycle.js';
+import type { LifecycleItem } from './lifecycle.js';
 import type { CacheStore, MessageRow, DraftRow, FolderName } from '../cache/store.js';
 import { getFolderVerifiedAt } from '../sync.js';
 import type { AttachmentIO } from './attachments.js';
 import { buildInlineDelivery, tryExtract } from './delivery.js';
 import { resolveDownloadMime } from './attachments.js';
 import {
-  getAllowMarkRead, getAttachmentsDir, getDefaultInlineAttachments, getFetchUnreadBodies,
-  getSyncMaxRequests, getWriteMode,
+  getAllowMarkRead, getAttachmentsDir, getAutoRefreshStaleReads, getDefaultInlineAttachments,
+  getFetchUnreadBodies, getSyncMaxRequests, getWriteMode,
 } from '../config.js';
 import { basename, join } from 'node:path';
 import { ApiRecipientSchema, deriveRead, expandPath, hasRealView, jsonErrorResponse, jsonResponse, mapRecipients, postMessageAndRefetch, textResponse, verifyWriteLanded, withReadState } from './_shared.js';
@@ -149,6 +151,88 @@ async function draftsFreshness(
 }
 
 /**
+ * Description shared by every read tool's `autoRefresh` argument, so the escape
+ * hatch from an UNVERIFIED_EMPTY refusal reads identically wherever it appears.
+ */
+const AUTO_REFRESH_DESC = 'If the result comes back EMPTY from a cache that is not verified-fresh, sync the backing folders first and answer from the refreshed cache instead of refusing. Defaults to the OFW_AUTO_REFRESH env var (false unless set), in which case the call refuses with result:"UNVERIFIED_EMPTY" and names the remedy. Costs OFW requests when it fires.';
+
+/**
+ * Run a cached read, and never let it answer "nothing there" on the strength of
+ * a cache that cannot vouch for itself.
+ *
+ * The failure this closes: an empty result set carrying a 207-minute-old
+ * `freshness` block is shaped IDENTICALLY to a verified "nothing matched". Skim
+ * past the warning and the natural next sentence is "no, that message was never
+ * sent" — a false negative stated as fact about a court-visible record. A false
+ * negative is more dangerous than a refusal precisely because it reads as a
+ * definitive answer, so the bias is: refuse, and say how to get a real one.
+ *
+ * `autoRefresh` turns the refusal into a sync-then-retry. If that still cannot
+ * make the read verifiable (the budget paused, OFW was unreachable), the refusal
+ * fires anyway — a refresh that did not work must not be treated as one that did.
+ *
+ * Non-empty results are never touched: a stale cache that DID find something is
+ * evidence of presence, and its `freshness` block already labels its age.
+ */
+async function guardedCacheRead<T extends { freshness: FreshnessBlock }>(o: {
+  client: OFWClient;
+  cache: CacheStore;
+  folders: FolderName[];
+  autoRefresh: boolean;
+  read: () => Promise<T>;
+  /**
+   * Whether this read found NOTHING AT ALL — a claim of absence. Deliberately
+   * the total, not the returned slice: page 9 of a 2-page result is an empty
+   * array, but "there are no drafts" would be a lie about it. That case is
+   * covered by `complete`, not by a refusal.
+   */
+  isEmpty: (value: T) => boolean;
+}): Promise<{ value: T; refreshed: boolean; unverifiedEmpty: boolean }> {
+  let value = await o.read();
+  let refreshed = false;
+  const unverifiable = (v: T): boolean => o.isEmpty(v) && v.freshness.staleness !== 'fresh';
+
+  if (unverifiable(value) && o.autoRefresh) {
+    await syncAll(o.client, {
+      folders: o.folders,
+      // Same ceiling ofw_sync_messages applies: an automatic refresh must never
+      // stamp unread inbox messages as a side effect of a list read.
+      fetchUnreadBodies: getAllowMarkRead() && getFetchUnreadBodies(),
+      maxRequests: getSyncMaxRequests(),
+    }, o.cache);
+    refreshed = true;
+    value = await o.read();
+  }
+
+  return { value, refreshed, unverifiedEmpty: unverifiable(value) };
+}
+
+/** The structured non-result returned instead of an unverifiable empty list. */
+function unverifiedEmptyResponse(input: {
+  what: string;
+  freshness: FreshnessBlock;
+  remedy: string;
+  refreshed: boolean;
+  extra?: Record<string, unknown>;
+}): ReturnType<typeof jsonErrorResponse> {
+  const { freshness } = input;
+  const age = freshness.ageSeconds === null
+    ? 'it has never been checked against OurFamilyWizard'
+    : `it was last verified ${freshness.ageSeconds < 60 ? `${freshness.ageSeconds} sec` : `${Math.round(freshness.ageSeconds / 60)} min`} ago`;
+  const refreshClause = input.refreshed
+    ? ' An automatic refresh ran on this call and did NOT make the result verifiable (the sync paused or skipped this folder), so the refusal stands.'
+    : '';
+  return jsonErrorResponse({
+    result: 'UNVERIFIED_EMPTY',
+    reason: `No ${input.what} were found, but the backing cache is "${freshness.staleness}" — ${age}. Refusing to report absence from unverified data: an empty result from a stale cache is indistinguishable from a verified "nothing there", and repeating it as one asserts a false negative about a legal record.${refreshClause}`,
+    remedy: input.remedy,
+    complete: false,
+    freshness,
+    ...input.extra,
+  });
+}
+
+/**
  * Decide whether fetching this message's body from OFW would stamp the record,
  * and refuse when the caller (or the deployment) has opted out of that.
  *
@@ -218,8 +302,8 @@ export function registerMessageTools(
   });
 
   server.registerTool('ofw_list_messages', {
-    description: 'List messages from the local OurFamilyWizard cache. Supports filtering by folder, date range, and a substring query on subject+body. Pagination is offset-based but if you know what you want (a date range, a topic), prefer the filters over walking pages — the cache may have 1000+ messages. Call ofw_sync_messages first if the cache is empty or stale.',
-    annotations: { readOnlyHint: true },
+    description: 'List messages from the local OurFamilyWizard cache. Supports filtering by folder, date range, and a substring query on subject+body. Pagination is offset-based but if you know what you want (a date range, a topic), prefer the filters over walking pages — the cache may have 1000+ messages. Returns an explicit `complete` boolean describing the RESULT SET: true means "this is every message on OurFamilyWizard matching these filters as of freshness.asOf" — check it before asserting a count. An empty result from a cache that is not verified-fresh is REFUSED (result:"UNVERIFIED_EMPTY") rather than reported as an absence; pass autoRefresh:true to sync and answer instead.',
+    annotations: { readOnlyHint: false },
     inputSchema: {
       folderId: z.string().describe('Folder name: "inbox", "sent", or "both" (default "both")').optional(),
       page: z.number().int().min(1).describe('Page number (default 1)').optional(),
@@ -227,6 +311,7 @@ export function registerMessageTools(
       since: z.string().describe('ISO date or datetime — only messages with sent_at >= since (inclusive)').optional(),
       until: z.string().describe('ISO date or datetime — only messages with sent_at < until (exclusive)').optional(),
       q: z.string().describe('Substring match on subject AND body (case-insensitive). Use to find messages on a specific topic.').optional(),
+      autoRefresh: z.boolean().describe(AUTO_REFRESH_DESC).optional(),
     },
   }, async (args) => {
     const page = args.page ?? 1;
@@ -238,41 +323,79 @@ export function registerMessageTools(
     else if (folderArg === 'sent') folder = 'sent';
     else if (folderArg === 'both') folder = undefined;
     else {
-      // Still carries freshness: `messages: []` with no age label is exactly
-      // the shape this mechanism exists to eliminate, even when the emptiness
-      // is caused by a bad argument rather than an empty cache.
-      return jsonResponse({
-        messages: [],
-        freshness: await buildFreshness(cacheProvider(), {
-          source: 'cache',
-          folders: ['inbox', 'sent'],
-        }),
-        note: 'folderId must be "inbox", "sent", or "both". Numeric OFW folder IDs are not supported by the cache. No lookup was performed — this empty result says nothing about what is in the cache.',
+      // A rejected argument is an ERROR, not a result. Returning `messages: []`
+      // here — even with a note attached — hands back the one shape this whole
+      // mechanism exists to eliminate: an empty list that looks like an answer.
+      return jsonErrorResponse({
+        result: 'INVALID_FOLDER',
+        reason: `folderId must be "inbox", "sent", or "both" (got ${JSON.stringify(folderArg)}). Numeric OFW folder IDs are not supported by the cache.`,
+        remedy: 'Re-call with folderId omitted (searches both) or set to one of the three accepted names.',
+        complete: false,
+        note: 'No lookup was performed. This says NOTHING about what is in the cache — do not read it as "no messages".',
       });
     }
 
     const cache = cacheProvider();
+    const folders: FolderName[] = folder === undefined ? ['inbox', 'sent'] : [folder];
     const filter = { folder, since: args.since, until: args.until, q: args.q };
-    const total = await cache.countMessages(filter);
-    // Reconcile each row's read state at read time: the cached list flags can be
-    // stale (a message read after it was first scraped), so `read` is derived
-    // from the record's own `viewedAt`/`fetchedBodyAt` and `listData` is forced
-    // to agree — see withReadState.
-    const messages = (await cache.listMessages({ ...filter, page, size })).map((m) => withReadState(m));
 
-    // Served from the local cache, so the result must say how old it is and
-    // whether anything vouches for it — a caller cannot state current state
-    // from this payload without either re-reading or surfacing the caveat.
-    const freshness = await buildFreshness(cache, {
-      source: 'cache',
-      folders: folder === undefined ? ['inbox', 'sent'] : [folder],
+    const { value, refreshed, unverifiedEmpty } = await guardedCacheRead({
+      client,
+      cache,
+      folders,
+      autoRefresh: args.autoRefresh ?? getAutoRefreshStaleReads(),
+      isEmpty: (v) => v.total === 0,
+      read: async () => {
+        const total = await cache.countMessages(filter);
+        // Reconcile each row's read state at read time: the cached list flags
+        // can be stale (a message read after it was first scraped), so `read`
+        // is derived from the record's own `viewedAt`/`fetchedBodyAt` and
+        // `listData` is forced to agree — see withReadState.
+        const messages = (await cache.listMessages({ ...filter, page, size })).map((m) => withReadState(m));
+        // Served from the local cache, so the result must say how old it is and
+        // whether anything vouches for it — a caller cannot state current state
+        // from this payload without either re-reading or surfacing the caveat.
+        const freshness = await buildFreshness(cache, { source: 'cache', folders });
+        return { messages, total, freshness };
+      },
     });
 
-    const payload: Record<string, unknown> = { messages, total, page, size, freshness };
+    if (unverifiedEmpty) {
+      return unverifiedEmptyResponse({
+        what: 'messages matching these filters',
+        freshness: value.freshness,
+        refreshed,
+        remedy: `Call ofw_sync_messages(folders:${JSON.stringify(folders)}) and retry, or re-call this tool with autoRefresh:true. ofw_check_freshness is the cheap live alternative when you only need to confirm a specific message.`,
+        extra: { page, size, filters: { folderId: folderArg, since: args.since, until: args.until, q: args.q } },
+      });
+    }
+
+    const { messages, total, freshness } = value;
+    // `complete` describes the RESULT SET, not the sync: true only when this
+    // payload holds every matching message the server has. `syncComplete` /
+    // `historyComplete` in `freshness` describe the walk that filled the cache
+    // and cannot answer "have I now seen all of them?" on their own — a caller
+    // needs one boolean to check before saying "you have N messages".
+    const fullSlice = page === 1 && messages.length === total;
+    const complete = fullSlice && freshness.staleness === 'fresh' && freshness.historyComplete;
+
+    const payload: Record<string, unknown> = { messages, total, page, size, complete, freshness };
+    if (!complete) {
+      payload.completeNote = [
+        !fullSlice ? `this page holds ${messages.length} of ${total} matching cached messages` : null,
+        freshness.staleness !== 'fresh' ? `the cache is "${freshness.staleness}", so newer messages may exist on OurFamilyWizard` : null,
+        !freshness.historyComplete ? 'older history is still being backfilled, so the cache does not yet hold every message' : null,
+      ].filter((r): r is string => r !== null)
+        .join('; ')
+        .concat('. Do not state a total or an absence from this result without resolving that first.');
+    }
     if (total === 0) {
-      payload.note = 'No messages match these filters. If you expected results, check ofw_sync_messages was run, or relax the filters.';
+      payload.note = 'No messages match these filters, and the cache IS verified-fresh for these folders — so this is a real "nothing matched", not a stale-cache artefact. If you expected results, relax the filters.';
     } else if (page * size < total) {
       payload.note = `Showing ${(page - 1) * size + 1}–${(page - 1) * size + messages.length} of ${total}. Increase 'page' to see more, or narrow with since/until/q.`;
+    }
+    if (refreshed) {
+      payload.autoRefreshed = true;
     }
 
     return jsonResponse(payload);
@@ -317,6 +440,11 @@ export function registerMessageTools(
         // Concurrency token — pass as expectedRevision to ofw_save_draft /
         // ofw_delete_draft to assert you are editing THIS version.
         revision: draftRevision(draftRow),
+        // Stable logical identity. Survives the create-then-delete id churn of
+        // editing AND the transition to sent — pass it to ofw_status to ask
+        // "what happened to the thing I was working on?". Null when this draft
+        // was never written through this tool (e.g. authored in the web app).
+        draftKey: (await cache.getDraftLineageById(draftRow.id))?.draftKey ?? null,
         cacheStatus,
         // False = this draft's existence and unsent status are remembered from
         // a cache, not confirmed on OFW. Call ofw_check_freshness before
@@ -525,6 +653,7 @@ export function registerMessageTools(
 
     let persisted: MessageRow | null = null;
     let verifyNote: string | null = null;
+    let sentDraftKey: string | null = null;
     if (newId !== null) {
       verifyNote = verifyWriteLanded('message', { subject, body }, detail);
       persisted = {
@@ -541,6 +670,21 @@ export function registerMessageTools(
         listData: detail,
       };
       await cache.upsertMessage(persisted);
+      // Extend the draft's identity chain onto the SENT message. Without this
+      // the chain would dead-end at the last draft id and "what happened to the
+      // draft I was editing?" would answer `deleted` — technically true of that
+      // id, and the exact wrong impression. With it, resolving the key lands on
+      // the sent message and reports state:"sent" with its sentAt.
+      if (draftRef !== undefined) {
+        const prior = await cache.getDraftLineageById(draftRef);
+        const now = new Date().toISOString();
+        const key = prior?.draftKey ?? newDraftKey();
+        if (prior === null) {
+          await cache.recordDraftLineage({ id: draftRef, draftKey: key, previousId: null, recordedAt: now });
+        }
+        await cache.recordDraftLineage({ id: newId, draftKey: key, previousId: draftRef, recordedAt: now });
+        sentDraftKey = key;
+      }
       // Link attached files to the new message in the attachments cache.
       // We may not have full metadata if the upload happened in a prior
       // session — fall back to what we know.
@@ -572,7 +716,9 @@ export function registerMessageTools(
       await cache.deleteDraft(draftRef);
     }
 
-    const responseObj = persisted ?? raw;
+    const responseObj = persisted === null
+      ? raw
+      : { ...persisted, ...(sentDraftKey !== null ? { draftKey: sentDraftKey, previousId: draftRef } : {}) };
     const text = responseObj ? JSON.stringify(responseObj, null, 2) : 'Message sent successfully.';
     const notes = [rewriteNote, verifyNote, unconfirmedNote].filter((n): n is string => n !== null).join('\n\n');
     return textResponse(notes ? `${notes}\n\n${text}` : text);
@@ -677,39 +823,78 @@ export function registerMessageTools(
   }
 
   server.registerTool('ofw_list_drafts', {
-    description: 'List draft messages from the local OurFamilyWizard cache. Call ofw_sync_messages first if the cache is empty.',
-    annotations: { readOnlyHint: true },
+    description: 'List draft messages from the local OurFamilyWizard cache. Returns an explicit `complete` boolean describing the RESULT SET: true means "these are ALL the drafts on OurFamilyWizard as of freshness.asOf" — check it before saying "you have N drafts". Each draft carries its `draftKey` (stable across the create-then-delete churn of editing) when one is known. An empty result from a cache that is not verified-fresh is REFUSED (result:"UNVERIFIED_EMPTY"); pass autoRefresh:true to sync and answer instead. For a live, one-call answer prefer ofw_status(includeDraftInventory:true).',
+    annotations: { readOnlyHint: false },
     inputSchema: {
       page: z.number().int().min(1).describe('Page number (default 1)').optional(),
       size: z.number().int().min(1).describe('Drafts per page (default 50)').optional(),
+      autoRefresh: z.boolean().describe(AUTO_REFRESH_DESC).optional(),
     },
   }, async (args) => {
     const page = args.page ?? 1;
     const size = args.size ?? 50;
     const cache = cacheProvider();
-    const { freshness, serverConfirmed, cacheStatus } = await draftsFreshness(cache);
-    const rows = await cache.listDrafts({ page, size });
-    // Every draft carries the concurrency token to echo back on a write, plus
-    // whether the last sync actually compared this cache against OFW and
-    // whether its presence-on-server is confirmed or merely remembered.
-    const drafts = rows.map((d) => ({
-      ...d,
-      revision: draftRevision(d),
-      cacheStatus,
-      serverConfirmed,
-      asOf: freshness.asOf,
-    }));
 
-    if (drafts.length === 0) {
-      return jsonResponse({
-        drafts: [],
-        freshness,
-        note: 'No drafts in the local cache. That is NOT proof there are no drafts on OurFamilyWizard — call ofw_sync_messages to populate, or ofw_check_freshness to confirm.',
+    const { value, refreshed, unverifiedEmpty } = await guardedCacheRead({
+      client,
+      cache,
+      folders: ['drafts'],
+      autoRefresh: args.autoRefresh ?? getAutoRefreshStaleReads(),
+      isEmpty: (v) => v.total === 0,
+      read: async () => {
+        const { freshness, serverConfirmed, cacheStatus } = await draftsFreshness(cache);
+        const rows = await cache.listDrafts({ page, size });
+        const total = await cache.countDrafts();
+        // One batch lookup for the whole page — on the Durable Object backend a
+        // per-draft lineage read would be a subrequest each.
+        const keyById = new Map(
+          (await cache.getDraftLineageByIds(rows.map((d) => d.id))).map((l) => [l.id, l.draftKey]),
+        );
+        // Every draft carries the concurrency token to echo back on a write, its
+        // stable identity across edits, and whether the last sync actually
+        // compared this cache against OFW.
+        const drafts = rows.map((d) => ({
+          ...d,
+          revision: draftRevision(d),
+          draftKey: keyById.get(d.id) ?? null,
+          cacheStatus,
+          serverConfirmed,
+          asOf: freshness.asOf,
+        }));
+        return { drafts, total, freshness, serverConfirmed };
+      },
+    });
+
+    if (unverifiedEmpty) {
+      return unverifiedEmptyResponse({
+        what: 'drafts',
+        freshness: value.freshness,
+        refreshed,
+        remedy: 'Call ofw_sync_messages(folders:["drafts"]) and retry, re-call with autoRefresh:true, or use ofw_status(includeDraftInventory:true) for a single live answer.',
+        extra: { page, size },
       });
     }
-    const payload: Record<string, unknown> = { drafts, freshness };
+
+    const { drafts, total, freshness, serverConfirmed } = value;
+    // True only when this payload IS the full server-side draft set: verified
+    // against OFW inside the freshness window AND not a slice of a larger list.
+    const fullSlice = page === 1 && drafts.length === total;
+    const complete = serverConfirmed && fullSlice;
+
+    const payload: Record<string, unknown> = { drafts, total, page, size, complete, freshness };
+    if (!complete) {
+      payload.completeNote = [
+        !fullSlice ? `this page holds ${drafts.length} of ${total} cached drafts` : null,
+        !serverConfirmed ? 'the drafts cache has not been confirmed against OurFamilyWizard inside the freshness window' : null,
+      ].filter((r): r is string => r !== null)
+        .join('; ')
+        .concat('. Do NOT state a draft count from this result — call ofw_status(includeDraftInventory:true) for a live, complete one.');
+    }
     if (!serverConfirmed) {
-      payload.note = 'serverConfirmed:false — these drafts are remembered from the local cache, NOT confirmed to still exist unsent on OurFamilyWizard right now, and their bodies may be behind the server. Do not state that a draft "is still sitting unsent" on this basis; drafts edited or deleted in the OFW web app bump no timestamp, so the cache cannot detect it on its own. Call ofw_check_freshness (cheap, live) or ofw_sync_messages first. Writes are guarded regardless — ofw_save_draft and ofw_delete_draft re-check the server and refuse a stale overwrite.';
+      payload.note = 'serverConfirmed:false — these drafts are remembered from the local cache, NOT confirmed to still exist unsent on OurFamilyWizard right now, and their bodies may be behind the server. Do not state that a draft "is still sitting unsent" on this basis; drafts edited, deleted or SENT in the OFW web app bump no timestamp, so the cache cannot detect it on its own. Call ofw_status / ofw_check_freshness (cheap, live) or ofw_sync_messages first. Writes are guarded regardless — ofw_save_draft and ofw_delete_draft re-check the server and refuse a stale overwrite.';
+    }
+    if (refreshed) {
+      payload.autoRefreshed = true;
     }
     return jsonResponse(payload);
   });
@@ -780,6 +965,7 @@ export function registerMessageTools(
     let replaceNote: string | null = null;
     let verifyNote: string | null = null;
     let newRevision: string | null = null;
+    let draftKey: string | null = null;
     // Fields accepted on the write that the saved draft must carry — or their
     // loss must be reported. Never a silent drop (Defect 3).
     const warnings: string[] = [];
@@ -808,6 +994,33 @@ export function registerMessageTools(
       // The revision is now computed from the server-authoritative detail, so it
       // is the value a subsequent read/verify will observe (Defect 1).
       newRevision = draftRevision(persisted);
+
+      // Carry the logical identity across the id change. Replacing a draft mints
+      // a NEW OFW id every time (create-then-delete — see the note below), so
+      // ten edits produced ten unrelated ids and there was no way to ask what
+      // became of the one you started with. The key is minted on first sight —
+      // including retroactively for the draft being replaced, so a draft that
+      // predates this mechanism joins a chain the moment it is edited.
+      const now = new Date().toISOString();
+      if (args.messageId !== undefined) {
+        const prior = await cache.getDraftLineageById(args.messageId);
+        if (prior !== null) {
+          draftKey = prior.draftKey;
+        } else {
+          draftKey = newDraftKey();
+          await cache.recordDraftLineage({
+            id: args.messageId, draftKey, previousId: null, recordedAt: now,
+          });
+        }
+      } else {
+        draftKey = newDraftKey();
+      }
+      await cache.recordDraftLineage({
+        id: newId,
+        draftKey,
+        previousId: args.messageId ?? null,
+        recordedAt: now,
+      });
 
       // Audit every field the caller supplied against what actually landed, so a
       // silent normalization becomes a visible warning rather than a surprise.
@@ -873,6 +1086,11 @@ export function registerMessageTools(
         ...persisted,
         inReplyTo: persisted.replyToId,
         revision: newRevision,
+        // The id above is volatile — it changes on every edit. `draftKey` is
+        // not: pass it to ofw_status to resolve the chain's CURRENT id, or to
+        // find out that the draft was sent and when.
+        draftKey,
+        previousId: args.messageId ?? null,
         cacheStatus: 'fresh',
         serverConfirmed: true,
         ...(warnings.length > 0 ? { warnings } : {}),
@@ -913,29 +1131,52 @@ export function registerMessageTools(
   });
 
   server.registerTool('ofw_get_unread_sent', {
-    description: 'List sent messages that have not been read by one or more recipients. Reads from local cache; call ofw_sync_messages first if cache is stale.',
-    annotations: { readOnlyHint: true },
+    description: 'List sent messages that have not been read by one or more recipients. Reads from local cache. Returns `complete` describing whether every sent message was scanned. An empty SENT cache that is not verified-fresh is REFUSED (result:"UNVERIFIED_EMPTY") rather than reported as "nothing sent"; pass autoRefresh:true to sync and answer instead.',
+    annotations: { readOnlyHint: false },
     inputSchema: {
       page: z.number().int().min(1).describe('Page (default 1)').optional(),
       size: z.number().int().min(1).describe('Per page (default 50)').optional(),
+      autoRefresh: z.boolean().describe(AUTO_REFRESH_DESC).optional(),
     },
   }, async (args) => {
     const page = args.page ?? 1;
     const size = args.size ?? 50;
     const cache = cacheProvider();
-    const sent = await cache.listMessages({ folder: 'sent', page, size });
-    // "Nobody has read it yet" is a present-tense claim drawn entirely from
-    // cached view timestamps, which only move when a sync refreshes them —
-    // so it needs the same age label as any other cached read.
-    const freshness = await buildFreshness(cache, { source: 'cache', folders: ['sent'] });
 
-    if (sent.length === 0) {
-      return jsonResponse({
-        unread: [],
-        freshness,
-        note: 'Sent cache is empty. Call ofw_sync_messages to populate. An empty cache is NOT evidence that no sent messages exist.',
+    const { value, refreshed, unverifiedEmpty } = await guardedCacheRead({
+      client,
+      cache,
+      folders: ['sent'],
+      autoRefresh: args.autoRefresh ?? getAutoRefreshStaleReads(),
+      // The guard is about the CACHE being empty, not the verdict. "You have
+      // no sent messages" is an absence claim a stale cache cannot support;
+      // "all of them are read" is a verdict over messages we did see, and it is
+      // labelled by `freshness` and `complete` as before.
+      isEmpty: (v) => v.total === 0,
+      read: async () => {
+        const sent = await cache.listMessages({ folder: 'sent', page, size });
+        const total = await cache.countMessages({ folder: 'sent' });
+        // "Nobody has read it yet" is a present-tense claim drawn entirely from
+        // cached view timestamps, which only move when a sync refreshes them —
+        // so it needs the same age label as any other cached read.
+        const freshness = await buildFreshness(cache, { source: 'cache', folders: ['sent'] });
+        return { sent, total, freshness };
+      },
+    });
+
+    if (unverifiedEmpty) {
+      return unverifiedEmptyResponse({
+        what: 'sent messages in the local cache',
+        freshness: value.freshness,
+        refreshed,
+        remedy: 'Call ofw_sync_messages(folders:["sent"]) and retry, or re-call with autoRefresh:true.',
+        extra: { page, size },
       });
     }
+
+    const { sent, total, freshness } = value;
+    const fullSlice = page === 1 && sent.length === total;
+    const complete = fullSlice && freshness.staleness === 'fresh' && freshness.historyComplete;
 
     const unread: Array<{ id: number; subject: string; sentAt: string; unreadBy: string[] }> = [];
     for (const msg of sent) {
@@ -945,14 +1186,17 @@ export function registerMessageTools(
       }
     }
 
-    if (unread.length === 0) {
-      return jsonResponse({
-        unread: [],
-        freshness,
-        message: 'All scanned sent messages had been read as of the timestamp in `freshness.asOf`. A recipient may have read a message since without the cache hearing about it.',
-      });
+    const payload: Record<string, unknown> = { unread, scanned: sent.length, total, complete, freshness };
+    if (!complete) {
+      payload.completeNote = `This verdict covers the ${sent.length} of ${total} cached sent messages on this page${freshness.staleness === 'fresh' ? '' : `, from a cache that is "${freshness.staleness}"`}. It is not a statement about every message you have sent.`;
     }
-    return jsonResponse({ unread, freshness });
+    if (unread.length === 0) {
+      payload.message = 'Every sent message scanned had been read as of the timestamp in `freshness.asOf`. A recipient may have read — or not read — a message since without the cache hearing about it.';
+    }
+    if (refreshed) {
+      payload.autoRefreshed = true;
+    }
+    return jsonResponse(payload);
   });
 
   if (allowDrafts) server.registerTool('ofw_upload_attachment', {
@@ -1149,12 +1393,12 @@ export function registerMessageTools(
   });
 
   server.registerTool('ofw_check_freshness', {
-    description: 'Cheaply confirm whether the local cache still matches OurFamilyWizard, WITHOUT running a full sync. Use this before asserting anything about current state — especially "draft X is still sitting unsent" — when a read returned serverConfirmed:false or freshness.staleness other than "fresh". Costs one OFW request for the folder check plus one per messageId. For each folder it returns the live server count next to the cached count; for each id, whether it still exists on OFW and whether its content matches the cache (compared by content revision, because OFW draft timestamps do NOT change when a draft is edited in the web app). Does not fetch bodies into the cache, does not touch attachments, and does not depend on sync state.',
-    annotations: { readOnlyHint: true },
+    description: 'Cheaply confirm whether the local cache still matches OurFamilyWizard, WITHOUT running a full sync. Use this before asserting anything about current state — especially "draft X is still sitting unsent". Costs one OFW request for the folder check plus one per messageId. For each folder it returns the live server count next to the cached count. For each id it returns a LIVE lifecycle `state` — "draft" | "sent" | "received" | "deleted" | "unknown" — alongside `folder`, `sentAt`, `existsOnServer` and a content comparison. `state` is the field that answers "is this still a draft?": a draft that has been SENT still exists on the server, so existsOnServer:true never distinguished the two. A cached draft whose state is no longer "draft" reports inSync:false even when its text is byte-identical. Content is compared by revision hash, because OFW draft timestamps do NOT change when a draft is edited in the web app. Does not fetch bodies into the cache, does not touch attachments, and does not depend on sync state. For draftKeys, or a full live draft inventory, use ofw_status.',
+    annotations: { readOnlyHint: false },
     inputSchema: {
       folders: z.array(z.enum(['inbox', 'sent', 'drafts'])).min(1).describe('Folders to compare cached vs live counts for. Defaults to all three when messageIds is not given. Must be non-empty if given.').optional(),
-      messageIds: z.array(z.number()).describe(`Specific ids to verify against OFW (max ${MAX_FRESHNESS_IDS}). By default only ids present in the drafts cache are probed — see allowMarkRead.`).optional(),
-      allowMarkRead: z.boolean().describe('Default false. Probing an id that is NOT a cached draft requires fetching its detail, which marks an unread inbox message as READ on OurFamilyWizard — an irreversible change to the record. Such ids are skipped unless you set this to true.').optional(),
+      messageIds: z.array(z.number()).describe(`Specific ids to verify against OFW (max ${MAX_FRESHNESS_IDS}). Ids cached as drafts, as sent messages, or as already-read inbox messages are probed freely — none of those can stamp the record. Anything else is skipped — see allowMarkRead.`).optional(),
+      allowMarkRead: z.boolean().describe('Default false. Probing an id whose cached state cannot rule out an unread INBOX message requires fetching its detail, which marks it READ on OurFamilyWizard and stamps a co-parent-visible "First Viewed" time — irreversible. Such ids are skipped (reason:"WOULD_MARK_READ") unless you set this to true. The server-wide OFW_ALLOW_MARK_READ=false is a ceiling this cannot raise.').optional(),
     },
   }, async (args) => {
     const cache = cacheProvider();
@@ -1220,63 +1464,12 @@ export function registerMessageTools(
       }
     }
 
-    const items: Array<Record<string, unknown>> = [];
-    for (const id of ids) {
-      const cachedDraft = await cache.getDraft(id);
-      // Drafts have no read state, so probing one is genuinely side-effect
-      // free. Any other id means GET /pub/v3/messages/{id}, which marks an
-      // unread inbox message read on OFW — a permanent change to a
-      // court-visible record. Refuse by default rather than quietly doing it.
-      if (cachedDraft === null && !allowMarkRead) {
-        items.push({
-          id,
-          skipped: true,
-          reason: 'NOT_A_CACHED_DRAFT',
-          note: 'Not in the drafts cache. Verifying it requires fetching its detail from OFW, which would mark an unread inbox message as READ on OurFamilyWizard. Pass allowMarkRead:true if that is acceptable.',
-        });
-        continue;
-      }
-      requestsUsed++;
-      try {
-        const server = await fetchServerDraft(client, id);
-        const cacheRevision = cachedDraft === null ? null : draftRevision(cachedDraft);
-        if (server === null) {
-          items.push({
-            id,
-            existsOnServer: false,
-            inSync: false,
-            cacheRevision,
-            serverRevision: null,
-            note: cachedDraft === null
-              ? 'Not found on OurFamilyWizard.'
-              : 'This draft is in the local cache but NO LONGER EXISTS on OurFamilyWizard — it was sent or deleted elsewhere. Do not describe it as still unsent.',
-          });
-          continue;
-        }
-        const serverRevision = draftRevision(server);
-        items.push({
-          id,
-          existsOnServer: true,
-          cacheRevision,
-          serverRevision,
-          inSync: cacheRevision !== null && cacheRevision === serverRevision,
-          ...(cacheRevision === null
-            ? { note: 'Exists on OurFamilyWizard but is not in the local cache.' }
-            : cacheRevision !== serverRevision
-              ? { note: 'Content differs from the cache — it was edited on OurFamilyWizard since the last sync. Run ofw_sync_messages before reading or writing it.' }
-              : {}),
-        });
-      } catch (e) {
-        // A check that could not run must not read as "in sync".
-        items.push({
-          id,
-          error: 'FRESHNESS_CHECK_FAILED',
-          message: (e as Error).message,
-          inSync: null,
-          note: 'The freshness check itself failed, so nothing is confirmed either way.',
-        });
-      }
-    }
+    // One folder-id resolve for the whole batch, and only when at least one id
+    // is actually going to be probed — a call whose every id is refused for
+    // mark-read reasons must cost nothing at all.
+    const probed = await probeIds(client, cache, ids, { allowMarkRead });
+    requestsUsed += probed.requests;
+    const items = probed.items;
 
     const payload: Record<string, unknown> = {
       checkedAt: new Date().toISOString(),
@@ -1289,6 +1482,169 @@ export function registerMessageTools(
     }
     return jsonResponse(payload);
   });
+
+  server.registerTool('ofw_status', {
+    description: 'ONE live call that answers "where does everything stand?". This is the call that should back any status summary about drafts or specific messages — never session memory, and never a cached read alone. With no arguments it returns the FULL current draft inventory, verified against OurFamilyWizard. Pass ids and/or draftKeys to get each one\'s live lifecycle `state` ("draft" | "sent" | "received" | "deleted" | "unknown") with `sentAt` and `viewedAt`. A draftKey is the stable identity ofw_save_draft returns: editing a draft mints a new OFW id every time (create-then-delete), so the key is the only way to ask "what happened to the thing I was working on?" — it resolves to the chain\'s current id and keeps resolving after the draft is SENT (state:"sent" with sentMessageId). The top-level `complete` is true ONLY when every part of this snapshot was verified live; if it is false, do not state a draft count or a lifecycle claim from this payload.',
+    annotations: { readOnlyHint: false },
+    inputSchema: {
+      ids: z.array(z.number()).describe(`Message/draft ids to resolve to a live state (combined with draftKeys, max ${MAX_FRESHNESS_IDS} probes per call).`).optional(),
+      draftKeys: z.array(z.string()).describe('Stable draft keys (from ofw_save_draft / ofw_list_drafts) to resolve to their CURRENT id and state.').optional(),
+      includeDraftInventory: z.boolean().describe('Return the full current draft list, verified against OurFamilyWizard first. Defaults to TRUE when neither ids nor draftKeys is given (so a bare ofw_status() is a complete status snapshot), otherwise false.').optional(),
+      allowMarkRead: z.boolean().describe('Default false. An id whose cached state cannot rule out an unread INBOX message can only be probed by fetching its detail, which marks it READ on OurFamilyWizard — irreversible and co-parent-visible. Those are skipped unless this is true. Cached drafts, sent messages and already-read messages are always probed. Capped by OFW_ALLOW_MARK_READ.').optional(),
+    },
+  }, async (args) => {
+    const cache = cacheProvider();
+    const allowMarkRead = getAllowMarkRead() && (args.allowMarkRead ?? false);
+    const requestedIds = args.ids ?? [];
+    const requestedKeys = args.draftKeys ?? [];
+    // A bare ofw_status() is meant to be the "here is where everything stands"
+    // call, so it defaults to the inventory. Asking about specific ids does not
+    // silently spend a drafts sync you did not ask for.
+    const wantInventory = args.includeDraftInventory
+      ?? (requestedIds.length === 0 && requestedKeys.length === 0);
+
+    // Ids and keys share ONE probe budget: each costs the same single request,
+    // and a cap that counted them separately would let a caller spend double.
+    type Target = { kind: 'id'; id: number } | { kind: 'draftKey'; draftKey: string };
+    const allTargets: Target[] = [
+      ...requestedIds.map((id): Target => ({ kind: 'id', id })),
+      ...requestedKeys.map((draftKey): Target => ({ kind: 'draftKey', draftKey })),
+    ];
+    const targets = allTargets.slice(0, MAX_FRESHNESS_IDS);
+    const truncated = allTargets.length - targets.length;
+
+    // Nothing asked for, nothing checked — so there is nothing to be complete
+    // ABOUT. Returning `complete: true` here would be a reassuring-looking
+    // payload that verified precisely nothing, which is the failure mode this
+    // whole tool exists to remove.
+    if (!wantInventory && targets.length === 0) {
+      return jsonErrorResponse({
+        result: 'NOTHING_REQUESTED',
+        reason: 'ofw_status was called with includeDraftInventory:false and no ids or draftKeys, so nothing was checked.',
+        remedy: 'Call ofw_status() with no arguments for the full draft inventory, or pass ids / draftKeys.',
+        complete: false,
+      });
+    }
+
+    let probeRequests = 0;
+    const incomplete: string[] = [];
+
+    // ── Draft inventory ────────────────────────────────────────────────────
+    let drafts: Array<Record<string, unknown>> | undefined;
+    let inventoryComplete = true;
+    let inventoryFreshness: FreshnessBlock | undefined;
+    if (wantInventory) {
+      const sync = await syncAll(client, {
+        folders: ['drafts'],
+        maxRequests: getSyncMaxRequests(),
+      }, cache);
+      // `refreshed` is the only honest signal that the walk actually diffed
+      // against OFW. A budget-paused walk applies nothing and returns no count
+      // — reporting its inventory as complete would be the same lie as
+      // `drafts: 0` from a deferred sync.
+      inventoryComplete = sync.refreshed.includes('drafts');
+      const { freshness, cacheStatus, serverConfirmed } = await draftsFreshness(cache);
+      inventoryFreshness = freshness;
+      if (!serverConfirmed) inventoryComplete = false;
+      const total = await cache.countDrafts();
+      const rows = await cache.listDrafts({ page: 1, size: Math.max(total, 1) });
+      const keyById = new Map(
+        (await cache.getDraftLineageByIds(rows.map((d) => d.id))).map((l) => [l.id, l.draftKey]),
+      );
+      drafts = rows.map((d) => ({
+        id: d.id,
+        draftKey: keyById.get(d.id) ?? null,
+        subject: d.subject,
+        revision: draftRevision(d),
+        modifiedAt: d.modifiedAt,
+        recipients: d.recipients,
+        replyToId: d.replyToId,
+        cacheStatus,
+      }));
+      if (!inventoryComplete) {
+        incomplete.push('the drafts folder was not fully verified against OurFamilyWizard on this call (the request budget paused the walk), so this inventory may be missing or misreporting drafts');
+      }
+    }
+
+    // ── Per-id / per-key lifecycle ─────────────────────────────────────────
+    const requested: Array<Record<string, unknown>> = [];
+    if (targets.length > 0) {
+      // Resolve keys to ids first so a key and a bare id naming the SAME
+      // message are probed once, not twice.
+      const resolved = new Map<string, { currentId: number; ids: number[] } | null>();
+      for (const t of targets) {
+        if (t.kind === 'draftKey' && !resolved.has(t.draftKey)) {
+          resolved.set(t.draftKey, await resolveDraftKey(cache, t.draftKey));
+        }
+      }
+      const toProbe = new Set<number>();
+      for (const t of targets) {
+        if (t.kind === 'id') toProbe.add(t.id);
+        else {
+          const chain = resolved.get(t.draftKey);
+          if (chain !== null && chain !== undefined) toProbe.add(chain.currentId);
+        }
+      }
+      const probed = await probeIds(client, cache, [...toProbe], { allowMarkRead });
+      probeRequests += probed.requests;
+      const probes = new Map(probed.items.map((item) => [item.id, item]));
+
+      for (const t of targets) {
+        if (t.kind === 'id') {
+          requested.push(decorate(probes.get(t.id) as LifecycleItem));
+          continue;
+        }
+        const chain = resolved.get(t.draftKey);
+        if (chain === null || chain === undefined) {
+          requested.push({
+            draftKey: t.draftKey,
+            state: 'unknown',
+            error: 'UNKNOWN_DRAFT_KEY',
+            note: 'This draftKey has never been recorded in the local cache, so it cannot be resolved to a message id. Draft keys are minted by ofw_save_draft; a cache rebuilt or opened on another machine will not know an older key.',
+          });
+          continue;
+        }
+        requested.push({
+          draftKey: t.draftKey,
+          currentId: chain.currentId,
+          previousIds: chain.ids.slice(0, -1),
+          ...decorate(probes.get(chain.currentId) as LifecycleItem),
+        });
+      }
+
+      for (const entry of requested) {
+        if (entry.skipped === true || entry.error !== undefined || entry.state === 'unknown') {
+          incomplete.push(`id/key ${String(entry.draftKey ?? entry.id)} could not be resolved to a confirmed live state`);
+        }
+      }
+    }
+
+    if (truncated > 0) {
+      incomplete.push(`${truncated} of ${allTargets.length} requested ids/draftKeys were not probed (per-call cap of ${MAX_FRESHNESS_IDS})`);
+    }
+
+    const complete = incomplete.length === 0;
+    return jsonResponse({
+      checkedAt: new Date().toISOString(),
+      probeRequests,
+      ...(drafts !== undefined ? { drafts, draftCount: drafts.length, draftInventoryComplete: inventoryComplete } : {}),
+      ...(requested.length > 0 ? { requested } : {}),
+      complete,
+      ...(complete
+        ? {}
+        : { incompleteReasons: incomplete, note: 'complete:false — this snapshot is NOT a verified statement of current state. Do not report a draft count or say whether something was sent from it; resolve the reasons above (usually by calling ofw_sync_messages, or re-calling with allowMarkRead:true) and ask again.' }),
+      ...(inventoryFreshness !== undefined ? { freshness: inventoryFreshness } : {}),
+    });
+  });
+}
+
+/**
+ * Add the derived fields a status entry wants on top of a raw lifecycle probe.
+ * `sentMessageId` names the id the message ended up as once sent — the answer to
+ * "the draft I was editing went where?" — and only exists for a `sent` verdict.
+ */
+function decorate(item: LifecycleItem): Record<string, unknown> {
+  return item.state === 'sent' ? { ...item, sentMessageId: item.id } : { ...item };
 }
 
 // OFW's bulk-delete endpoint takes a multipart form with `messageIds`.

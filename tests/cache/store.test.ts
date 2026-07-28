@@ -207,7 +207,59 @@ describe('OFWCache (:memory:) sync_state and meta', () => {
   });
 
   it('stamps schema_version into meta on open', async () => {
-    expect(await store.getMeta('schema_version')).toBe('2');
+    expect(await store.getMeta('schema_version')).toBe('3');
+  });
+});
+
+describe('OFWCache (:memory:) draft lineage', () => {
+  it('countDrafts reflects inserts and deletes', async () => {
+    expect(await store.countDrafts()).toBe(0);
+    await store.upsertDraft(sampleDraft({ id: 1 }));
+    await store.upsertDraft(sampleDraft({ id: 2 }));
+    expect(await store.countDrafts()).toBe(2);
+    await store.deleteDraft(1);
+    expect(await store.countDrafts()).toBe(1);
+  });
+
+  it('records a chain and resolves it oldest-first', async () => {
+    await store.recordDraftLineage({ id: 10, draftKey: 'dk_a', previousId: null, recordedAt: '2026-07-01T00:00:00Z' });
+    await store.recordDraftLineage({ id: 20, draftKey: 'dk_a', previousId: 10, recordedAt: '2026-07-02T00:00:00Z' });
+    await store.recordDraftLineage({ id: 30, draftKey: 'dk_a', previousId: 20, recordedAt: '2026-07-03T00:00:00Z' });
+    // A different document must not bleed into the chain.
+    await store.recordDraftLineage({ id: 99, draftKey: 'dk_b', previousId: null, recordedAt: '2026-07-02T12:00:00Z' });
+
+    expect((await store.getDraftLineage('dk_a')).map((r) => r.id)).toEqual([10, 20, 30]);
+    expect(await store.getDraftLineage('dk_unknown')).toEqual([]);
+    expect(await store.getDraftLineageById(20)).toEqual({
+      id: 20, draftKey: 'dk_a', previousId: 10, recordedAt: '2026-07-02T00:00:00Z',
+    });
+    expect(await store.getDraftLineageById(12345)).toBeNull();
+  });
+
+  it('tie-breaks same-millisecond links on id, so a replacement still sorts last', async () => {
+    // ofw_save_draft records the retroactive link for the OLD id and the link
+    // for the NEW id with the same timestamp. OFW mints ids monotonically, so
+    // id ASC is what keeps the newer one at the end of the chain.
+    const at = '2026-07-28T10:00:00Z';
+    await store.recordDraftLineage({ id: 500, draftKey: 'dk_c', previousId: null, recordedAt: at });
+    await store.recordDraftLineage({ id: 900, draftKey: 'dk_c', previousId: 500, recordedAt: at });
+    expect((await store.getDraftLineage('dk_c')).map((r) => r.id)).toEqual([500, 900]);
+  });
+
+  it('re-recording an id rewrites its link instead of duplicating it', async () => {
+    await store.recordDraftLineage({ id: 10, draftKey: 'dk_a', previousId: null, recordedAt: '2026-07-01T00:00:00Z' });
+    await store.recordDraftLineage({ id: 10, draftKey: 'dk_a', previousId: 5, recordedAt: '2026-07-04T00:00:00Z' });
+    const chain = await store.getDraftLineage('dk_a');
+    expect(chain).toHaveLength(1);
+    expect(chain[0].previousId).toBe(5);
+  });
+
+  it('getDraftLineageByIds batches, omits absent ids, and short-circuits on []', async () => {
+    await store.recordDraftLineage({ id: 10, draftKey: 'dk_a', previousId: null, recordedAt: '2026-07-01T00:00:00Z' });
+    await store.recordDraftLineage({ id: 20, draftKey: 'dk_b', previousId: null, recordedAt: '2026-07-01T00:00:00Z' });
+    expect(await store.getDraftLineageByIds([])).toEqual([]);
+    const rows = await store.getDraftLineageByIds([10, 20, 30]);
+    expect(rows.map((r) => r.id).sort((a, b) => a - b)).toEqual([10, 20]);
   });
 });
 

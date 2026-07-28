@@ -131,6 +131,25 @@ export function getFetchUnreadBodies(): boolean {
   return parseBoolEnv('OFW_FETCH_UNREAD_BODIES');
 }
 
+/**
+ * Default for the read tools' `autoRefresh` arg.
+ *
+ * When a cached read comes back EMPTY and the cache is not `fresh`, the tools
+ * refuse to report that emptiness (see UNVERIFIED_EMPTY in tools/messages.ts):
+ * an empty result from a 207-minute-old cache is shaped identically to a
+ * verified "nothing there", and answering "no, it wasn't sent" from one is how
+ * a false negative becomes a confident statement about a legal record.
+ *
+ * The refusal names its remedy, so the default (false) costs one extra call.
+ * Set OFW_AUTO_REFRESH=true and the tools instead sync the backing folders
+ * themselves and answer from the refreshed cache — same guarantee, no round
+ * trip. Never silently degrades: if the refresh does not make the read
+ * verifiable, the refusal still fires.
+ */
+export function getAutoRefreshStaleReads(): boolean {
+  return parseBoolEnv('OFW_AUTO_REFRESH');
+}
+
 // Default for ofw_download_attachment's `inline` arg when the caller doesn't
 // pass one. Set OFW_INLINE_ATTACHMENTS=true to have attachments returned as
 // MCP content blocks by default (skipping disk) — useful on sandboxed MCP

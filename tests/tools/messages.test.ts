@@ -178,21 +178,30 @@ describe('ofw_list_messages (cache-backed)', () => {
     expect(spy).not.toHaveBeenCalled();
   });
 
-  it('returns empty result with sync hint when cache is empty', async () => {
+  it('REFUSES to report emptiness from an unverified cache', async () => {
     const client = new OFWClient();
     setup(client);
     const result = await handlers.get('ofw_list_messages')!({ folderId: 'inbox' });
     const parsed = JSON.parse(result.content[0].text);
-    expect(parsed.messages).toEqual([]);
-    expect(parsed.note).toMatch(/ofw_sync_messages/);
+    // The old shape — `messages: []` alongside a freshness warning — is
+    // indistinguishable from a verified "nothing matched" and is exactly what
+    // let a stale cache be narrated as an absence.
+    expect(result.isError).toBe(true);
+    expect(parsed.messages).toBeUndefined();
+    expect(parsed.result).toBe('UNVERIFIED_EMPTY');
+    expect(parsed.complete).toBe(false);
+    expect(parsed.remedy).toMatch(/ofw_sync_messages/);
   });
 
-  it('rejects numeric folder ids with a helpful note', async () => {
+  it('rejects numeric folder ids as an error, not as an empty result', async () => {
     const client = new OFWClient();
     setup(client);
     const result = await handlers.get('ofw_list_messages')!({ folderId: '42' });
     const parsed = JSON.parse(result.content[0].text);
-    expect(parsed.note).toMatch(/inbox.*sent/);
+    expect(result.isError).toBe(true);
+    expect(parsed.result).toBe('INVALID_FOLDER');
+    expect(parsed.reason).toMatch(/inbox.*sent/);
+    expect(parsed.messages).toBeUndefined();
   });
 
   it('filters by date range (since + until)', async () => {
@@ -350,13 +359,16 @@ describe('ofw_list_drafts (cache-backed)', () => {
     expect(spy).not.toHaveBeenCalled();
   });
 
-  it('returns sync hint when empty', async () => {
+  it('REFUSES to report "no drafts" from an unverified cache', async () => {
     const client = new OFWClient();
     setup(client);
     const result = await handlers.get('ofw_list_drafts')!({});
     const parsed = JSON.parse(result.content[0].text);
-    expect(parsed.drafts).toEqual([]);
-    expect(parsed.note).toMatch(/ofw_sync_messages/);
+    expect(result.isError).toBe(true);
+    expect(parsed.drafts).toBeUndefined();
+    expect(parsed.result).toBe('UNVERIFIED_EMPTY');
+    expect(parsed.complete).toBe(false);
+    expect(parsed.remedy).toMatch(/ofw_sync_messages|ofw_status/);
   });
 });
 
@@ -1541,7 +1553,13 @@ describe('ofw_save_draft — threading & field preservation (Defects 1 & 3)', ()
       })
       .mockResolvedValueOnce({                                        // check_freshness live fetch (same state)
         subject: 'S', body: 'B', replyToId: 100, recipients: [],
+        folder: { id: 3, name: 'Drafts' },
       });
+    // Folder ids a prior sync would have persisted — without them the probe
+    // spends a request re-resolving the map.
+    setMeta('inbox_folder_id', '1');
+    setMeta('sent_folder_id', '2');
+    setMeta('drafts_folder_id', '3');
     setup(client);
 
     const saved = JSON.parse((await handlers.get('ofw_save_draft')!({
@@ -1977,12 +1995,14 @@ describe('ofw_get_unread_sent (cache-backed)', () => {
     expect(spy).not.toHaveBeenCalled();
   });
 
-  it('returns sync hint when sent cache is empty', async () => {
+  it('REFUSES to answer from an unverified, empty sent cache', async () => {
     const client = new OFWClient();
     setup(client);
     const result = await handlers.get('ofw_get_unread_sent')!({});
     const parsed = JSON.parse(result.content[0].text);
-    expect(parsed.note).toMatch(/ofw_sync_messages/);
+    expect(result.isError).toBe(true);
+    expect(parsed.result).toBe('UNVERIFIED_EMPTY');
+    expect(parsed.remedy).toMatch(/ofw_sync_messages/);
   });
 
   it('returns all-read message when all recipients have viewedAt', async () => {
@@ -2288,7 +2308,7 @@ describe('mark-read gate (issue #192)', () => {
       messageIds: [708], allowMarkRead: true,
     })).content[0].text);
 
-    expect(parsed.items[0]).toMatchObject({ id: 708, skipped: true, reason: 'NOT_A_CACHED_DRAFT' });
+    expect(parsed.items[0]).toMatchObject({ id: 708, skipped: true, reason: 'WOULD_MARK_READ' });
     // Folder counts are free; the id probe is what would have stamped.
     expect(spy).not.toHaveBeenCalled();
   });
@@ -3667,9 +3687,12 @@ describe('ofw_check_freshness', () => {
     id: 500, subject: 'Cruise', body: 'draft body', recipients: [],
     replyToId: null, modifiedAt: '2026-07-19T12:42:00Z', listData: {},
   };
-  // What fetchServerDraft parses out of GET /pub/v3/messages/{id}.
+  // What the lifecycle probe parses out of GET /pub/v3/messages/{id}. Real OFW
+  // detail payloads carry the owning folder, and that is what answers "is this
+  // STILL a draft?" — `existsOnServer` cannot, because a SENT draft still exists.
   const serverDraft = (over: Record<string, unknown> = {}) => ({
-    subject: 'Cruise', body: 'draft body', replyToId: null, recipients: [], ...over,
+    subject: 'Cruise', body: 'draft body', replyToId: null, recipients: [],
+    folder: { id: 3, name: 'Drafts' }, ...over,
   });
   const foldersPayload = (over: Record<string, unknown> = {}) => ({
     systemFolders: [
@@ -3678,6 +3701,13 @@ describe('ofw_check_freshness', () => {
       { id: '3', folderType: 'DRAFTS', totalCount: 2 },
     ],
     ...over,
+  });
+  // The folder-id map any past sync would have persisted, so a probe can
+  // classify without spending a request re-resolving it.
+  beforeEach(() => {
+    setMeta('inbox_folder_id', '1');
+    setMeta('sent_folder_id', '2');
+    setMeta('drafts_folder_id', '3');
   });
 
   it('confirms a cached draft is still on the server and unchanged', async () => {
@@ -3691,7 +3721,7 @@ describe('ofw_check_freshness', () => {
     );
 
     expect(parsed.items).toEqual([expect.objectContaining({
-      id: 500, existsOnServer: true, inSync: true,
+      id: 500, state: 'draft', existsOnServer: true, inSync: true,
     })]);
     // One request for the id, and none for folders — an ids-only call must not
     // silently spend budget on a folder probe.
@@ -3745,10 +3775,27 @@ describe('ofw_check_freshness', () => {
     );
 
     expect(parsed.items[0]).toEqual(expect.objectContaining({
-      id: 999, skipped: true, reason: 'NOT_A_CACHED_DRAFT',
+      id: 999, skipped: true, reason: 'WOULD_MARK_READ',
     }));
     expect(parsed.requestsUsed).toBe(0);
     expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('probes an id cached as SENT without allowMarkRead — that fetch cannot stamp anything', async () => {
+    upsertMessage(sampleMessageRow({ id: 777, folder: 'sent' }));
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request').mockResolvedValue(
+      serverDraft({ folder: { id: 2, name: 'Sent Messages' }, date: { dateTime: '2026-07-27T23:31:09' } }),
+    );
+    setup(client);
+
+    const parsed = JSON.parse(
+      (await handlers.get('ofw_check_freshness')!({ messageIds: [777] })).content[0].text,
+    );
+
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(parsed.items[0].state).toBe('sent');
+    expect(parsed.items[0].sentAt).toBe('2026-07-27T23:31:09');
   });
 
   it('probes a non-draft id when allowMarkRead is set', async () => {
@@ -3761,9 +3808,10 @@ describe('ofw_check_freshness', () => {
     )).content[0].text);
 
     expect(parsed.items[0].existsOnServer).toBe(true);
-    // Not in the drafts cache, so there is nothing to compare it against.
+    // Not in the drafts cache, so there is nothing to compare it against —
+    // `null` (not compared), never `false` (a drift was detected).
     expect(parsed.items[0].cacheRevision).toBeNull();
-    expect(parsed.items[0].inSync).toBe(false);
+    expect(parsed.items[0].inSync).toBeNull();
   });
 
   it('reports a failed check as unconfirmed rather than in-sync', async () => {
@@ -3979,17 +4027,18 @@ describe('freshness contract across read tools', () => {
     }
   });
 
-  it('ofw_list_messages carries freshness even on the invalid-folderId path', async () => {
+  it('ofw_list_messages refuses an invalid folderId rather than returning an empty list', async () => {
     setup(makeClient({}));
 
-    const parsed = JSON.parse(
-      (await handlers.get('ofw_list_messages')!({ folderId: '12345' })).content[0].text,
-    );
+    const result = await handlers.get('ofw_list_messages')!({ folderId: '12345' });
+    const parsed = JSON.parse(result.content[0].text);
 
-    expect(parsed.messages).toEqual([]);
-    expect(parsed.freshness).toBeDefined();
-    expect(parsed.freshness.staleness).not.toBe('fresh');
-    expect(parsed.note).toMatch(/says nothing about what is in the cache/);
+    // No `messages` key at all: a rejected argument must not be answerable as
+    // "no messages", which is the shape a caller would summarize from.
+    expect(result.isError).toBe(true);
+    expect(parsed.messages).toBeUndefined();
+    expect(parsed.complete).toBe(false);
+    expect(parsed.note).toMatch(/says NOTHING about what is in the cache/);
   });
 
   it('ofw_get_message carries freshness on the cache, live and draft paths', async () => {
@@ -4020,5 +4069,837 @@ describe('freshness contract across read tools', () => {
     );
     expect(parsed.freshness.source).toBe('cache');
     expect(parsed).toHaveProperty('serverConfirmed');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// "Is this entity still what I think it is?" — the layer above freshness.
+//
+// The triggering failure: an assistant carried three draft ids across many
+// turns and recited them as current. One had been SENT the night before. The
+// freshness work already in place answers "how old is this data?"; none of it
+// stops a claim built on a tool result from an earlier turn that was never
+// re-read. These suites cover the three structural closures — a lifecycle state
+// in the cheap check, a refusal to report unverified emptiness, and a draft
+// identity that survives the create-then-delete id churn.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * A tiny stand-in for the OFW message API: POST mints an id, GET returns the
+ * stored record (404 once deleted), DELETE removes it. Multi-step flows (save →
+ * replace → replace → send → verify) need the responses to stay CONSISTENT with
+ * each other, which an ordered mockResolvedValueOnce chain cannot express.
+ */
+function fakeOFW(opts: { draftsFolderId?: number; sentFolderId?: number } = {}) {
+  const draftsFolderId = opts.draftsFolderId ?? 3;
+  const sentFolderId = opts.sentFolderId ?? 2;
+  const messages = new Map<number, Record<string, unknown>>();
+  let nextId = 1000;
+  const client = new OFWClient();
+  vi.spyOn(client, 'request').mockImplementation(
+    async (method: string, path: string, body?: unknown) => {
+      if (method === 'POST' && path === '/pub/v3/messages') {
+        const p = body as Record<string, unknown>;
+        const id = nextId++;
+        messages.set(id, {
+          id,
+          subject: p.subject,
+          body: p.body,
+          replyToId: p.replyToId ?? null,
+          recipients: [],
+          date: { dateTime: '2026-07-28T00:00:00Z' },
+          folder: p.draft === true
+            ? { id: draftsFolderId, name: 'Drafts' }
+            : { id: sentFolderId, name: 'Sent Messages' },
+        });
+        return { entityId: id };
+      }
+      if (method === 'GET' && path.startsWith('/pub/v3/messages/')) {
+        const id = Number(path.split('/').pop());
+        const found = messages.get(id);
+        if (found === undefined) throw new Error('OFW API error: 404 Not Found');
+        return found;
+      }
+      if (method === 'DELETE' && path === '/pub/v1/messages') {
+        for (const raw of (body as FormData).getAll('messageIds')) messages.delete(Number(raw));
+        return {};
+      }
+      throw new Error(`fakeOFW: unexpected ${method} ${path}`);
+    },
+  );
+  return { client, messages };
+}
+
+/** The folder-id map any prior sync would have persisted. */
+function seedFolderIds(): void {
+  setMeta('inbox_folder_id', '1');
+  setMeta('sent_folder_id', '2');
+  setMeta('drafts_folder_id', '3');
+}
+
+/** Mark a folder verified NOW, so reads of it come back `fresh`. */
+function markFresh(folder: 'inbox' | 'sent' | 'drafts'): void {
+  const now = new Date().toISOString();
+  cache.core.setSyncState(folder, { lastSyncAt: now, newestId: null, resumePage: null });
+  cache.core.setMeta(`folder_verified_at:${folder}`, now);
+  if (folder === 'drafts') cache.core.setMeta('drafts_cache_status', 'fresh');
+}
+
+describe('lifecycle state in ofw_check_freshness (Gap 1)', () => {
+  it('reports a draft that was SENT as state:"sent" with sentAt — not merely existsOnServer', async () => {
+    seedFolderIds();
+    // The real scenario: the cache still calls 538279699 a draft because no
+    // sync has run since the user sent it from the web app last night.
+    upsertDraft({
+      id: 538279699, subject: 'Weekly Message 7/17 - 7/26', body: 'weekly',
+      recipients: [], replyToId: null, modifiedAt: '2026-07-27T18:00:00Z', listData: {},
+    });
+    const client = new OFWClient();
+    vi.spyOn(client, 'request').mockResolvedValue({
+      subject: 'Weekly Message 7/17 - 7/26', body: 'weekly', replyToId: null, recipients: [],
+      folder: { id: 2, name: 'Sent Messages' },
+      date: { dateTime: '2026-07-27T23:31:09' },
+    });
+    setup(client);
+
+    const parsed = JSON.parse((await handlers.get('ofw_check_freshness')!({
+      messageIds: [538279699],
+    })).content[0].text);
+
+    expect(parsed.items[0]).toMatchObject({
+      id: 538279699,
+      state: 'sent',
+      sentAt: '2026-07-27T23:31:09',
+      existsOnServer: true,
+      inSync: false,
+    });
+    expect(parsed.items[0].note).toMatch(/no longer a draft|was SENT/i);
+  });
+
+  it('reports a deleted draft as state:"deleted"', async () => {
+    seedFolderIds();
+    upsertDraft({
+      id: 501, subject: 'Gone', body: 'b', recipients: [], replyToId: null,
+      modifiedAt: '2026-07-19T12:42:00Z', listData: {},
+    });
+    const client = new OFWClient();
+    vi.spyOn(client, 'request').mockRejectedValue(new Error('OFW API error: 404 Not Found'));
+    setup(client);
+
+    const parsed = JSON.parse((await handlers.get('ofw_check_freshness')!({
+      messageIds: [501],
+    })).content[0].text);
+
+    expect(parsed.items[0]).toMatchObject({ id: 501, state: 'deleted', existsOnServer: false });
+  });
+
+  it('resolves the folder map live (one extra request) when no sync has ever run', async () => {
+    upsertDraft({
+      id: 502, subject: 'D', body: 'b', recipients: [], replyToId: null,
+      modifiedAt: '2026-07-19T12:42:00Z', listData: {},
+    });
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce({
+        systemFolders: [
+          { id: '1', folderType: 'INBOX' },
+          { id: '2', folderType: 'SENT_MESSAGES' },
+          { id: '3', folderType: 'DRAFTS' },
+        ],
+      })
+      .mockResolvedValueOnce({
+        subject: 'D', body: 'b', replyToId: null, recipients: [], folder: { id: 3, name: 'Drafts' },
+      });
+    setup(client);
+
+    const parsed = JSON.parse((await handlers.get('ofw_check_freshness')!({
+      messageIds: [502],
+    })).content[0].text);
+
+    expect(parsed.items[0].state).toBe('draft');
+    expect(parsed.requestsUsed).toBe(2);
+  });
+});
+
+describe('UNVERIFIED_EMPTY: absence is never reported from a stale cache (Gap 2)', () => {
+  it('ofw_list_messages answers normally when the cache IS fresh and genuinely empty', async () => {
+    markFresh('inbox');
+    setup(makeClient({}));
+
+    const result = await handlers.get('ofw_list_messages')!({ folderId: 'inbox' });
+    const parsed = JSON.parse(result.content[0].text);
+
+    expect(result.isError).toBeUndefined();
+    expect(parsed.messages).toEqual([]);
+    expect(parsed.complete).toBe(true);
+    expect(parsed.note).toMatch(/verified-fresh/);
+  });
+
+  it('ofw_list_drafts answers normally when the drafts cache IS verified and empty', async () => {
+    markFresh('drafts');
+    setup(makeClient({}));
+
+    const result = await handlers.get('ofw_list_drafts')!({});
+    const parsed = JSON.parse(result.content[0].text);
+
+    expect(result.isError).toBeUndefined();
+    expect(parsed.drafts).toEqual([]);
+    expect(parsed.complete).toBe(true);
+    expect(parsed.total).toBe(0);
+  });
+
+  it('does NOT refuse a page PAST THE END — an empty slice is not a claim of absence', async () => {
+    // The cache is stale and page 2 is empty, but there IS a draft. Refusing
+    // with "no drafts were found" would be its own false statement.
+    upsertDraft({
+      id: 1, subject: 'A', body: 'a', recipients: [], replyToId: null,
+      modifiedAt: '2026-07-19T12:00:00Z', listData: {},
+    });
+    setup(makeClient({}));
+
+    const result = await handlers.get('ofw_list_drafts')!({ page: 2 });
+    const parsed = JSON.parse(result.content[0].text);
+
+    expect(result.isError).toBeUndefined();
+    expect(parsed.drafts).toEqual([]);
+    expect(parsed.total).toBe(1);
+    expect(parsed.complete).toBe(false);
+  });
+
+  it('does NOT refuse a non-empty result from a stale cache — presence is still evidence', async () => {
+    upsertMessage(sampleMessageRow({ id: 1, folder: 'inbox' }));
+    setup(makeClient({}));
+
+    const result = await handlers.get('ofw_list_messages')!({ folderId: 'inbox' });
+    const parsed = JSON.parse(result.content[0].text);
+
+    expect(result.isError).toBeUndefined();
+    expect(parsed.messages).toHaveLength(1);
+    // ...but it is still not a complete answer, and says so.
+    expect(parsed.complete).toBe(false);
+    expect(parsed.completeNote).toMatch(/cache is "stale"/);
+  });
+
+  it('autoRefresh:true syncs and returns REAL results instead of refusing', async () => {
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce({                                    // resolveFolderIds
+        systemFolders: [
+          { id: '1', folderType: 'INBOX' },
+          { id: '2', folderType: 'SENT_MESSAGES' },
+          { id: '3', folderType: 'DRAFTS' },
+        ],
+      })
+      .mockResolvedValueOnce({                                    // inbox page 1
+        data: [{
+          id: 77, subject: 'Found after refresh', date: { dateTime: '2026-07-28T10:00:00Z' },
+          from: { name: 'Co-parent' }, showNeverViewed: false,
+        }],
+      })
+      .mockResolvedValueOnce({ body: 'the body' })                // detail
+      .mockResolvedValueOnce({ data: [] });                       // inbox page 2 → done
+    setup(client);
+
+    const result = await handlers.get('ofw_list_messages')!({ folderId: 'inbox', autoRefresh: true });
+    const parsed = JSON.parse(result.content[0].text);
+
+    expect(result.isError).toBeUndefined();
+    expect(parsed.messages).toHaveLength(1);
+    expect(parsed.messages[0].subject).toBe('Found after refresh');
+    expect(parsed.autoRefreshed).toBe(true);
+    expect(parsed.complete).toBe(true);
+  });
+
+  it('autoRefresh that does NOT make the read verifiable still refuses', async () => {
+    const client = new OFWClient();
+    // The folder resolve eats the entire budget, so the inbox walk never runs.
+    process.env.OFW_SYNC_MAX_REQUESTS = '1';
+    vi.spyOn(client, 'request').mockResolvedValue({
+      systemFolders: [
+        { id: '1', folderType: 'INBOX' },
+        { id: '2', folderType: 'SENT_MESSAGES' },
+        { id: '3', folderType: 'DRAFTS' },
+      ],
+    });
+    setup(client);
+
+    const result = await handlers.get('ofw_list_messages')!({ folderId: 'inbox', autoRefresh: true });
+    const parsed = JSON.parse(result.content[0].text);
+
+    expect(result.isError).toBe(true);
+    expect(parsed.result).toBe('UNVERIFIED_EMPTY');
+    expect(parsed.reason).toMatch(/automatic refresh ran on this call and did NOT/);
+    delete process.env.OFW_SYNC_MAX_REQUESTS;
+  });
+
+  it('honours the OFW_AUTO_REFRESH env default', async () => {
+    process.env.OFW_AUTO_REFRESH = 'true';
+    try {
+      const client = new OFWClient();
+      vi.spyOn(client, 'request')
+        .mockResolvedValueOnce({
+          systemFolders: [
+            { id: '1', folderType: 'INBOX' },
+            { id: '2', folderType: 'SENT_MESSAGES' },
+            { id: '3', folderType: 'DRAFTS' },
+          ],
+        })
+        .mockResolvedValueOnce({ data: [] });                     // drafts walk: none
+      const localHandlers = setupWithClient(client);
+
+      const result = await localHandlers.get('ofw_list_drafts')!({});
+      const parsed = JSON.parse(result.content[0].text);
+
+      expect(result.isError).toBeUndefined();
+      expect(parsed.autoRefreshed).toBe(true);
+      expect(parsed.drafts).toEqual([]);
+      expect(parsed.complete).toBe(true);
+    } finally {
+      delete process.env.OFW_AUTO_REFRESH;
+    }
+  });
+
+  it('ofw_get_unread_sent also refreshes rather than refusing when asked to', async () => {
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce({                                    // resolveFolderIds
+        systemFolders: [
+          { id: '1', folderType: 'INBOX' },
+          { id: '2', folderType: 'SENT_MESSAGES' },
+          { id: '3', folderType: 'DRAFTS' },
+        ],
+      })
+      .mockResolvedValueOnce({                                    // sent page 1
+        data: [{
+          id: 88, subject: 'Awaiting a read', date: { dateTime: '2026-07-28T10:00:00Z' },
+          from: { name: 'Me' }, showNeverViewed: true,
+          recipients: [{ user: { userId: 2, name: 'Co-parent' } }],
+        }],
+      })
+      .mockResolvedValueOnce({ body: 'the body' })                // detail
+      .mockResolvedValueOnce({ data: [] });                       // sent page 2 → done
+    setup(client);
+
+    const result = await handlers.get('ofw_get_unread_sent')!({ autoRefresh: true });
+    const parsed = JSON.parse(result.content[0].text);
+
+    expect(result.isError).toBeUndefined();
+    expect(parsed.autoRefreshed).toBe(true);
+    expect(parsed.unread).toHaveLength(1);
+    expect(parsed.unread[0].unreadBy).toEqual(['Co-parent']);
+  });
+
+  it('names the age in the refusal when the cache was verified but has gone stale', async () => {
+    const old = new Date(Date.now() - 207 * 60 * 1000).toISOString();
+    cache.core.setSyncState('sent', { lastSyncAt: old, newestId: null, resumePage: null });
+    cache.core.setMeta('folder_verified_at:sent', old);
+    setup(makeClient({}));
+
+    const result = await handlers.get('ofw_get_unread_sent')!({});
+    const parsed = JSON.parse(result.content[0].text);
+
+    expect(result.isError).toBe(true);
+    expect(parsed.reason).toMatch(/last verified 207 min ago/);
+  });
+
+  it('names a sub-minute age rather than rounding it to "0 min"', async () => {
+    const recent = new Date(Date.now() - 5000).toISOString();
+    cache.core.setSyncState('sent', { lastSyncAt: recent, newestId: null, resumePage: null });
+    cache.core.setMeta('folder_verified_at:sent', recent);
+    // Inside the TTL it would be `fresh`; shrink the window so it is not.
+    process.env.OFW_FRESHNESS_TTL_SECONDS = '1';
+    try {
+      const localHandlers = setupWithClient(makeClient({}));
+      const parsed = JSON.parse(
+        (await localHandlers.get('ofw_get_unread_sent')!({})).content[0].text,
+      );
+      expect(parsed.reason).toMatch(/last verified \d+ sec ago/);
+    } finally {
+      delete process.env.OFW_FRESHNESS_TTL_SECONDS;
+    }
+  });
+});
+
+describe('explicit `complete` on list reads (requirement 5)', () => {
+  it('ofw_list_messages: complete:false for a partial page even on a fresh cache', async () => {
+    markFresh('inbox');
+    upsertMessage(sampleMessageRow({ id: 1, folder: 'inbox' }));
+    upsertMessage(sampleMessageRow({ id: 2, folder: 'inbox' }));
+    setup(makeClient({}));
+
+    const parsed = JSON.parse(
+      (await handlers.get('ofw_list_messages')!({ folderId: 'inbox', size: 1 })).content[0].text,
+    );
+
+    expect(parsed.total).toBe(2);
+    expect(parsed.messages).toHaveLength(1);
+    expect(parsed.complete).toBe(false);
+    expect(parsed.completeNote).toMatch(/1 of 2/);
+  });
+
+  it('ofw_list_messages: complete:false while an old-history backfill is parked', async () => {
+    const now = new Date().toISOString();
+    cache.core.setSyncState('inbox', { lastSyncAt: now, newestId: 1, resumePage: 87 });
+    cache.core.setMeta('folder_verified_at:inbox', now);
+    upsertMessage(sampleMessageRow({ id: 1, folder: 'inbox' }));
+    setup(makeClient({}));
+
+    const parsed = JSON.parse(
+      (await handlers.get('ofw_list_messages')!({ folderId: 'inbox' })).content[0].text,
+    );
+
+    // The PRESENT is current (staleness stays fresh mid-backfill by design)...
+    expect(parsed.freshness.staleness).toBe('fresh');
+    // ...but the result set is not the full server-side set, and says so.
+    expect(parsed.complete).toBe(false);
+    expect(parsed.completeNote).toMatch(/backfilled/);
+  });
+
+  it('ofw_list_drafts: complete:true only when the whole verified set is returned', async () => {
+    markFresh('drafts');
+    upsertDraft({
+      id: 1, subject: 'A', body: 'a', recipients: [], replyToId: null,
+      modifiedAt: '2026-07-19T12:00:00Z', listData: {},
+    });
+    upsertDraft({
+      id: 2, subject: 'B', body: 'b', recipients: [], replyToId: null,
+      modifiedAt: '2026-07-20T12:00:00Z', listData: {},
+    });
+    setup(makeClient({}));
+
+    let parsed = JSON.parse((await handlers.get('ofw_list_drafts')!({})).content[0].text);
+    expect(parsed.total).toBe(2);
+    expect(parsed.complete).toBe(true);
+
+    parsed = JSON.parse((await handlers.get('ofw_list_drafts')!({ size: 1 })).content[0].text);
+    expect(parsed.complete).toBe(false);
+    expect(parsed.completeNote).toMatch(/1 of 2/);
+  });
+
+  it('ofw_list_drafts: complete:false when the cache was never confirmed, even for a full page', async () => {
+    upsertDraft({
+      id: 1, subject: 'A', body: 'a', recipients: [], replyToId: null,
+      modifiedAt: '2026-07-19T12:00:00Z', listData: {},
+    });
+    setup(makeClient({}));
+
+    const parsed = JSON.parse((await handlers.get('ofw_list_drafts')!({})).content[0].text);
+    expect(parsed.complete).toBe(false);
+    expect(parsed.completeNote).toMatch(/not been confirmed against OurFamilyWizard/);
+    expect(parsed.note).toMatch(/serverConfirmed:false/);
+  });
+
+  it('ofw_get_unread_sent: reports scanned/total and a complete flag', async () => {
+    markFresh('sent');
+    upsertMessage(sampleMessageRow({
+      id: 1, folder: 'sent', recipients: [{ userId: 2, name: 'Co-parent', viewedAt: null }],
+    }));
+    upsertMessage(sampleMessageRow({
+      id: 2, folder: 'sent', recipients: [{ userId: 2, name: 'Co-parent', viewedAt: '2026-07-01T00:00:00Z' }],
+    }));
+    setup(makeClient({}));
+
+    let parsed = JSON.parse((await handlers.get('ofw_get_unread_sent')!({})).content[0].text);
+    expect(parsed.unread).toHaveLength(1);
+    expect(parsed).toMatchObject({ scanned: 2, total: 2, complete: true });
+
+    parsed = JSON.parse((await handlers.get('ofw_get_unread_sent')!({ size: 1 })).content[0].text);
+    expect(parsed.complete).toBe(false);
+    expect(parsed.completeNote).toMatch(/1 of 2/);
+  });
+
+  it('ofw_get_unread_sent: a partial page from a stale cache names the staleness too', async () => {
+    upsertMessage(sampleMessageRow({
+      id: 1, folder: 'sent', recipients: [{ userId: 2, name: 'Co-parent', viewedAt: null }],
+    }));
+    upsertMessage(sampleMessageRow({
+      id: 2, folder: 'sent', recipients: [{ userId: 2, name: 'Co-parent', viewedAt: null }],
+    }));
+    setup(makeClient({}));
+
+    const parsed = JSON.parse(
+      (await handlers.get('ofw_get_unread_sent')!({ size: 1 })).content[0].text,
+    );
+    expect(parsed.complete).toBe(false);
+    expect(parsed.completeNote).toMatch(/from a cache that is "stale"/);
+  });
+
+  it('ofw_get_unread_sent: "all read" is a verdict over what was scanned, not an absence', async () => {
+    markFresh('sent');
+    upsertMessage(sampleMessageRow({
+      id: 1, folder: 'sent', recipients: [{ userId: 2, name: 'Co-parent', viewedAt: '2026-07-01T00:00:00Z' }],
+    }));
+    setup(makeClient({}));
+
+    const result = await handlers.get('ofw_get_unread_sent')!({});
+    const parsed = JSON.parse(result.content[0].text);
+    expect(result.isError).toBeUndefined();
+    expect(parsed.unread).toEqual([]);
+    expect(parsed.message).toMatch(/Every sent message scanned/);
+  });
+});
+
+describe('draftKey: identity that survives the create-then-delete churn (Gap 3)', () => {
+  it('carries ONE key across three edits, then onto the sent message', async () => {
+    seedFolderIds();
+    const { client } = fakeOFW();
+    setup(client);
+
+    // ofw_save_draft prepends transparency NOTEs before its JSON payload.
+    const save = async (args: Record<string, unknown>) => {
+      const text = (await handlers.get('ofw_save_draft')!(args)).content[0].text;
+      return JSON.parse(text.slice(text.indexOf('{')));
+    };
+
+    const v1 = await save({ subject: 'Weekly', body: 'draft one' });
+    const v2 = await save({ subject: 'Weekly', body: 'draft two', messageId: v1.id });
+    const v3 = await save({ subject: 'Weekly', body: 'draft three', messageId: v2.id });
+
+    // Three different OFW ids...
+    expect(new Set([v1.id, v2.id, v3.id]).size).toBe(3);
+    // ...one logical document.
+    expect(v1.draftKey).toBeTruthy();
+    expect(v2.draftKey).toBe(v1.draftKey);
+    expect(v3.draftKey).toBe(v1.draftKey);
+    expect(v3.previousId).toBe(v2.id);
+
+    // The ORIGINAL key resolves to the CURRENT id — the question that was
+    // previously unanswerable ("what happened to the thing I was editing?").
+    let parsed = JSON.parse((await handlers.get('ofw_status')!({
+      draftKeys: [v1.draftKey],
+    })).content[0].text);
+    expect(parsed.requested[0]).toMatchObject({
+      draftKey: v1.draftKey, currentId: v3.id, state: 'draft',
+    });
+    expect(parsed.requested[0].previousIds).toEqual([v1.id, v2.id]);
+    expect(parsed.complete).toBe(true);
+
+    // Send it, and the key follows the message into Sent.
+    const sent = JSON.parse((await handlers.get('ofw_send_message')!({
+      messageId: v3.id, recipientIds: [7],
+    })).content[0].text);
+    expect(sent.draftKey).toBe(v1.draftKey);
+
+    parsed = JSON.parse((await handlers.get('ofw_status')!({
+      draftKeys: [v1.draftKey],
+    })).content[0].text);
+    expect(parsed.requested[0]).toMatchObject({
+      draftKey: v1.draftKey,
+      currentId: sent.id,
+      state: 'sent',
+      sentMessageId: sent.id,
+    });
+    expect(parsed.requested[0].sentAt).toBe('2026-07-28T00:00:00Z');
+  });
+
+  it('adopts a draft that predates the mechanism, retroactively linking the old id', async () => {
+    seedFolderIds();
+    const { client, messages } = fakeOFW();
+    // A draft authored in the OFW web app: in the cache, no lineage row.
+    messages.set(400, {
+      id: 400, subject: 'Old', body: 'body', replyToId: null, recipients: [],
+      date: { dateTime: '2026-07-01T00:00:00Z' }, folder: { id: 3, name: 'Drafts' },
+    });
+    upsertDraft({
+      id: 400, subject: 'Old', body: 'body', recipients: [], replyToId: null,
+      modifiedAt: '2026-07-01T00:00:00Z', listData: {},
+    });
+    setup(client);
+
+    const savedText = (await handlers.get('ofw_save_draft')!({
+      subject: 'Old', body: 'edited', messageId: 400,
+    })).content[0].text;
+    const saved = JSON.parse(savedText.slice(savedText.indexOf('{')));
+
+    expect(saved.draftKey).toBeTruthy();
+    expect(saved.previousId).toBe(400);
+    const parsed = JSON.parse((await handlers.get('ofw_status')!({
+      draftKeys: [saved.draftKey],
+    })).content[0].text);
+    expect(parsed.requested[0].previousIds).toEqual([400]);
+    expect(parsed.requested[0].currentId).toBe(saved.id);
+  });
+
+  it('surfaces the draftKey on ofw_list_drafts and ofw_get_message, null when unknown', async () => {
+    seedFolderIds();
+    markFresh('drafts');
+    upsertDraft({
+      id: 400, subject: 'Old', body: 'body', recipients: [], replyToId: null,
+      modifiedAt: '2026-07-01T00:00:00Z', listData: {},
+    });
+    upsertDraft({
+      id: 401, subject: 'Known', body: 'body', recipients: [], replyToId: null,
+      modifiedAt: '2026-07-02T00:00:00Z', listData: {},
+    });
+    cache.core.recordDraftLineage({
+      id: 401, draftKey: 'dk_known', previousId: null, recordedAt: '2026-07-02T00:00:00Z',
+    });
+    setup(makeClient({}));
+
+    const listed = JSON.parse((await handlers.get('ofw_list_drafts')!({})).content[0].text);
+    const byId = new Map(listed.drafts.map((d: { id: number; draftKey: string | null }) => [d.id, d.draftKey]));
+    expect(byId.get(401)).toBe('dk_known');
+    expect(byId.get(400)).toBeNull();
+
+    const got = JSON.parse((await handlers.get('ofw_get_message')!({ messageId: '401' })).content[0].text);
+    expect(got.draftKey).toBe('dk_known');
+    const unknown = JSON.parse((await handlers.get('ofw_get_message')!({ messageId: '400' })).content[0].text);
+    expect(unknown.draftKey).toBeNull();
+  });
+
+  it('links a draft sent WITHOUT a prior save, so the key exists from the send alone', async () => {
+    seedFolderIds();
+    const { client, messages } = fakeOFW();
+    messages.set(400, {
+      id: 400, subject: 'Old', body: 'body', replyToId: null, recipients: [],
+      date: { dateTime: '2026-07-01T00:00:00Z' }, folder: { id: 3, name: 'Drafts' },
+    });
+    upsertDraft({
+      id: 400, subject: 'Old', body: 'body', recipients: [], replyToId: null,
+      modifiedAt: '2026-07-01T00:00:00Z', listData: {},
+    });
+    setup(client);
+
+    const sent = JSON.parse((await handlers.get('ofw_send_message')!({
+      messageId: 400, recipientIds: [7],
+    })).content[0].text);
+
+    expect(sent.draftKey).toBeTruthy();
+    expect(sent.previousId).toBe(400);
+    const parsed = JSON.parse((await handlers.get('ofw_status')!({
+      draftKeys: [sent.draftKey],
+    })).content[0].text);
+    expect(parsed.requested[0]).toMatchObject({ currentId: sent.id, state: 'sent' });
+  });
+
+  it('refuses to invent an answer for a key it has never seen', async () => {
+    seedFolderIds();
+    setup(makeClient({}));
+
+    const parsed = JSON.parse((await handlers.get('ofw_status')!({
+      draftKeys: ['dk_from_another_machine'],
+    })).content[0].text);
+
+    expect(parsed.requested[0]).toMatchObject({
+      draftKey: 'dk_from_another_machine', state: 'unknown', error: 'UNKNOWN_DRAFT_KEY',
+    });
+    expect(parsed.complete).toBe(false);
+    expect(parsed.incompleteReasons.join(' ')).toMatch(/dk_from_another_machine/);
+  });
+});
+
+describe('ofw_status (requirement 4)', () => {
+  const foldersResponse = {
+    systemFolders: [
+      { id: '1', folderType: 'INBOX' },
+      { id: '2', folderType: 'SENT_MESSAGES' },
+      { id: '3', folderType: 'DRAFTS' },
+    ],
+  };
+
+  it('with no arguments returns a verified full draft inventory', async () => {
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce(foldersResponse)                       // resolveFolderIds
+      .mockResolvedValueOnce({                                      // drafts list (short page → done)
+        data: [
+          { id: 10, subject: 'One', date: { dateTime: '2026-07-20T00:00:00Z' } },
+          { id: 11, subject: 'Two', date: { dateTime: '2026-07-21T00:00:00Z' } },
+        ],
+      })
+      .mockResolvedValueOnce({ subject: 'One', body: 'body one' })  // detail 10
+      .mockResolvedValueOnce({ subject: 'Two', body: 'body two' }); // detail 11
+    // One of them came from a prior ofw_save_draft, so it carries an identity.
+    cache.core.recordDraftLineage({
+      id: 11, draftKey: 'dk_inventory', previousId: null, recordedAt: '2026-07-21T00:00:00Z',
+    });
+    setup(client);
+
+    const parsed = JSON.parse((await handlers.get('ofw_status')!({})).content[0].text);
+
+    expect(parsed.complete).toBe(true);
+    expect(parsed.draftInventoryComplete).toBe(true);
+    expect(parsed.draftCount).toBe(2);
+    const byId = new Map(parsed.drafts.map((d: { id: number }) => [d.id, d]));
+    expect([...byId.keys()].sort()).toEqual([10, 11]);
+    expect(byId.get(11)).toMatchObject({ draftKey: 'dk_inventory' });
+    expect(byId.get(10)).toMatchObject({ draftKey: null });
+    expect(byId.get(10)).toHaveProperty('revision');
+    expect(parsed.requested).toBeUndefined();
+  });
+
+  it('reports complete:false when the inventory walk was paused by the request budget', async () => {
+    process.env.OFW_SYNC_MAX_REQUESTS = '1';                        // resolveFolderIds eats it
+    try {
+      const client = new OFWClient();
+      vi.spyOn(client, 'request').mockResolvedValue(foldersResponse);
+      const localHandlers = setupWithClient(client);
+
+      const parsed = JSON.parse((await localHandlers.get('ofw_status')!({})).content[0].text);
+
+      expect(parsed.draftInventoryComplete).toBe(false);
+      expect(parsed.complete).toBe(false);
+      expect(parsed.incompleteReasons.join(' ')).toMatch(/not fully verified/);
+      expect(parsed.note).toMatch(/Do not report a draft count/);
+    } finally {
+      delete process.env.OFW_SYNC_MAX_REQUESTS;
+    }
+  });
+
+  it('THE REGRESSION: three tracked ids, one sent externally → two drafts + one sent, in one call', async () => {
+    seedFolderIds();
+    // What the assistant "remembered": three drafts.
+    for (const id of [537828154, 538086428, 538279699]) {
+      upsertDraft({
+        id, subject: `Draft ${id}`, body: 'body', recipients: [], replyToId: null,
+        modifiedAt: '2026-07-27T18:00:00Z', listData: {},
+      });
+    }
+    const client = new OFWClient();
+    vi.spyOn(client, 'request').mockImplementation(async (_m: string, path: string) => {
+      const id = Number(path.split('/').pop());
+      // 538279699 was sent from the web app last night; the cache never heard.
+      if (id === 538279699) {
+        return {
+          subject: 'Draft 538279699', body: 'body', replyToId: null, recipients: [],
+          folder: { id: 2, name: 'Sent Messages' },
+          date: { dateTime: '2026-07-27T23:31:09' },
+        };
+      }
+      return {
+        subject: `Draft ${id}`, body: 'body', replyToId: null, recipients: [],
+        folder: { id: 3, name: 'Drafts' },
+      };
+    });
+    setup(client);
+
+    const parsed = JSON.parse((await handlers.get('ofw_status')!({
+      ids: [537828154, 538086428, 538279699],
+    })).content[0].text);
+
+    const byId = new Map(parsed.requested.map((r: { id: number }) => [r.id, r]));
+    expect(byId.get(537828154)).toMatchObject({ state: 'draft', inSync: true });
+    expect(byId.get(538086428)).toMatchObject({ state: 'draft', inSync: true });
+    expect(byId.get(538279699)).toMatchObject({
+      state: 'sent', sentAt: '2026-07-27T23:31:09', sentMessageId: 538279699, inSync: false,
+    });
+    // Every id was resolved live, so the snapshot IS a usable basis for a claim.
+    expect(parsed.complete).toBe(true);
+    expect(parsed.probeRequests).toBe(3);
+  });
+
+  it('probes an id named by BOTH a draftKey and a bare id only once', async () => {
+    seedFolderIds();
+    upsertDraft({
+      id: 600, subject: 'D', body: 'b', recipients: [], replyToId: null,
+      modifiedAt: '2026-07-19T12:42:00Z', listData: {},
+    });
+    cache.core.recordDraftLineage({
+      id: 600, draftKey: 'dk_dup', previousId: null, recordedAt: '2026-07-19T12:42:00Z',
+    });
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request').mockResolvedValue({
+      subject: 'D', body: 'b', replyToId: null, recipients: [], folder: { id: 3, name: 'Drafts' },
+    });
+    setup(client);
+
+    const parsed = JSON.parse((await handlers.get('ofw_status')!({
+      ids: [600], draftKeys: ['dk_dup'],
+    })).content[0].text);
+
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(parsed.probeRequests).toBe(1);
+    expect(parsed.requested).toHaveLength(2);
+    expect(parsed.requested[0].id).toBe(600);
+    expect(parsed.requested[1].draftKey).toBe('dk_dup');
+  });
+
+  it('marks the snapshot incomplete when an id had to be skipped for mark-read reasons', async () => {
+    seedFolderIds();
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request');
+    setup(client);
+
+    const parsed = JSON.parse((await handlers.get('ofw_status')!({ ids: [999] })).content[0].text);
+
+    expect(spy).not.toHaveBeenCalled();
+    expect(parsed.requested[0]).toMatchObject({ skipped: true, reason: 'WOULD_MARK_READ' });
+    expect(parsed.complete).toBe(false);
+    expect(parsed.drafts).toBeUndefined();
+  });
+
+  it('caps the combined ids+draftKeys probe budget and says what it dropped', async () => {
+    seedFolderIds();
+    const ids = Array.from({ length: 30 }, (_, i) => 700 + i);
+    for (const id of ids) {
+      upsertDraft({
+        id, subject: 'D', body: 'b', recipients: [], replyToId: null,
+        modifiedAt: '2026-07-19T12:42:00Z', listData: {},
+      });
+    }
+    const client = new OFWClient();
+    vi.spyOn(client, 'request').mockResolvedValue({
+      subject: 'D', body: 'b', replyToId: null, recipients: [], folder: { id: 3, name: 'Drafts' },
+    });
+    setup(client);
+
+    const parsed = JSON.parse((await handlers.get('ofw_status')!({ ids })).content[0].text);
+
+    expect(parsed.requested).toHaveLength(25);
+    expect(parsed.complete).toBe(false);
+    expect(parsed.incompleteReasons.join(' ')).toMatch(/5 of 30 requested ids\/draftKeys were not probed/);
+  });
+
+  it('can combine an explicit inventory with per-id probes', async () => {
+    seedFolderIds();
+    upsertDraft({
+      id: 800, subject: 'D', body: 'b', recipients: [], replyToId: null,
+      modifiedAt: '2026-07-19T12:42:00Z', listData: {},
+    });
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce(foldersResponse)                       // sync: resolveFolderIds
+      .mockResolvedValueOnce({                                      // drafts list
+        data: [{ id: 800, subject: 'D', date: { dateTime: '2026-07-19T12:42:00Z' } }],
+      })
+      .mockResolvedValueOnce({ subject: 'D', body: 'b' })           // draft detail
+      .mockResolvedValueOnce({                                      // probe
+        subject: 'D', body: 'b', replyToId: null, recipients: [], folder: { id: 3, name: 'Drafts' },
+      });
+    setup(client);
+
+    const parsed = JSON.parse((await handlers.get('ofw_status')!({
+      ids: [800], includeDraftInventory: true,
+    })).content[0].text);
+
+    expect(parsed.draftCount).toBe(1);
+    expect(parsed.requested[0].state).toBe('draft');
+    expect(parsed.complete).toBe(true);
+    expect(parsed.freshness).toBeDefined();
+  });
+
+  it('refuses a call that would check nothing rather than reporting complete:true', async () => {
+    setup(makeClient({}));
+    const result = await handlers.get('ofw_status')!({ includeDraftInventory: false });
+    const parsed = JSON.parse(result.content[0].text);
+    expect(result.isError).toBe(true);
+    expect(parsed.result).toBe('NOTHING_REQUESTED');
+    expect(parsed.complete).toBe(false);
+  });
+
+  it('is honest when a probe outright fails', async () => {
+    seedFolderIds();
+    upsertDraft({
+      id: 900, subject: 'D', body: 'b', recipients: [], replyToId: null,
+      modifiedAt: '2026-07-19T12:42:00Z', listData: {},
+    });
+    const client = new OFWClient();
+    vi.spyOn(client, 'request').mockRejectedValue(new Error('OFW API error: 503'));
+    setup(client);
+
+    const parsed = JSON.parse((await handlers.get('ofw_status')!({ ids: [900] })).content[0].text);
+
+    expect(parsed.requested[0].error).toBe('FRESHNESS_CHECK_FAILED');
+    expect(parsed.complete).toBe(false);
   });
 });
