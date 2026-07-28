@@ -143,6 +143,10 @@ export async function resolveFolderIds(client: OFWClient, store: CacheStore): Pr
   // label an uncached message sent-vs-inbox from the detail payload's own folder
   // id, instead of hard-defaulting to inbox.
   await store.setMeta('sent_folder_id', ids.sent);
+  // And inbox, which completes the map a lifecycle probe needs to turn a detail
+  // payload's own folder id into "draft" / "sent" / "received" (see
+  // tools/lifecycle.ts). Without all three, a probe can only say "unknown".
+  await store.setMeta('inbox_folder_id', ids.inbox);
   return ids;
 }
 

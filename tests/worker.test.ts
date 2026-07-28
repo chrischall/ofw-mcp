@@ -137,12 +137,13 @@ describe('OFW Cloudflare connector — tool surface', () => {
           'ofw_list_messages',
           'ofw_save_draft',
           'ofw_send_message',
+          'ofw_status',
           'ofw_sync_messages',
           'ofw_update_event',
           'ofw_upload_attachment',
         ].sort(),
       );
-      expect(names.length).toBe(23);
+      expect(names.length).toBe(24);
     } finally {
       await harness.close();
     }
