@@ -283,7 +283,7 @@ describe('read-state reconciliation (bug: stale read flag vs viewedAt)', () => {
     // and the raw listData flags no longer contradict the recipient viewedAt
     expect(msg.listData.read).toBe(true);
     expect(msg.listData.showNeverViewed).toBe(false);
-    expect(msg.recipients[0].viewedAt).toBe('2026-07-17T08:37:57');
+    expect(msg.recipients[0].viewedAt).toBe('2026-07-17T08:37:57-04:00');
     // the real account-holder id survived normalization (was 0 before the fix)
     expect(msg.recipients[0].userId).toBe(3039201);
   });
@@ -494,8 +494,8 @@ describe('ofw_get_message (cache-first)', () => {
     expect(parsed.body).toBe('NEW body');
     expect(parsed.subject).toBe('Fresh subject');
     expect(parsed.fromUser).toBe('');
-    expect(parsed.sentAt).toBe('2026-05-04T12:00:00Z');
-    expect(parsed.fetchedBodyAt).toBe('2026-05-04T12:00:00Z');
+    expect(parsed.sentAt).toBe('2026-05-04T08:00:00-04:00');
+    expect(parsed.fetchedBodyAt).toBe('2026-05-04T08:00:00-04:00');
     expect(parsed.chainRootId).toBeNull();
     // The drafts-table route doesn't hit OFW or the messages cache.
     expect(spy).not.toHaveBeenCalled();
@@ -1987,7 +1987,13 @@ describe('ofw_get_unread_sent (cache-backed)', () => {
     const result = await handlers.get('ofw_get_unread_sent')!({});
     const parsed = JSON.parse(result.content[0].text);
     expect(parsed.unread).toEqual([
-      { id: 1, subject: 'Schedule', sentAt: '2026-05-04T12:00:00Z', unreadBy: ['Alice'] },
+      {
+        id: 1,
+        subject: 'Schedule',
+        sentAt: '2026-05-04T08:00:00-04:00',
+        sentAtDisplay: 'Mon, May 4, 2026, 8:00 AM EDT',
+        unreadBy: ['Alice'],
+      },
     ]);
     // Read state here comes entirely from cached view timestamps, so the
     // result must carry the same age label as any other cached read.
@@ -3622,7 +3628,7 @@ describe('ofw_get_message — sent view-status refresh', () => {
     setup(client);
     const result = await handlers.get('ofw_get_message')!({ messageId: '600' });
     const parsed = JSON.parse(result.content[0].text);
-    expect(parsed.recipients[0].viewedAt).toBe('2026-06-16T15:49:20');
+    expect(parsed.recipients[0].viewedAt).toBe('2026-06-16T15:49:20-04:00');
     expect(getMessage(600)?.recipients[0].viewedAt).toBe('2026-06-16T15:49:20');
     // listData read-flag reconciled so it can't contradict recipients
     expect(parsed.listData.showNeverViewed).toBe(false);
@@ -3677,7 +3683,7 @@ describe('ofw_get_message — sent view-status refresh', () => {
     const spy = vi.spyOn(client, 'request');
     setup(client);
     const result = await handlers.get('ofw_get_message')!({ messageId: '602' });
-    expect(JSON.parse(result.content[0].text).recipients[0].viewedAt).toBe('2026-06-16T15:49:20');
+    expect(JSON.parse(result.content[0].text).recipients[0].viewedAt).toBe('2026-06-16T15:49:20-04:00');
     expect(spy).not.toHaveBeenCalled();
   });
 });
@@ -3795,7 +3801,7 @@ describe('ofw_check_freshness', () => {
 
     expect(spy).toHaveBeenCalledTimes(1);
     expect(parsed.items[0].state).toBe('sent');
-    expect(parsed.items[0].sentAt).toBe('2026-07-27T23:31:09');
+    expect(parsed.items[0].sentAt).toBe('2026-07-27T23:31:09-04:00');
   });
 
   it('probes a non-draft id when allowMarkRead is set', async () => {
@@ -4169,7 +4175,7 @@ describe('lifecycle state in ofw_check_freshness (Gap 1)', () => {
     expect(parsed.items[0]).toMatchObject({
       id: 538279699,
       state: 'sent',
-      sentAt: '2026-07-27T23:31:09',
+      sentAt: '2026-07-27T23:31:09-04:00',
       existsOnServer: true,
       inSync: false,
     });
@@ -4627,7 +4633,7 @@ describe('draftKey: identity that survives the create-then-delete churn (Gap 3)'
       state: 'sent',
       sentMessageId: sent.id,
     });
-    expect(parsed.requested[0].sentAt).toBe('2026-07-28T00:00:00Z');
+    expect(parsed.requested[0].sentAt).toBe('2026-07-27T20:00:00-04:00');
   });
 
   it('adopts a draft that predates the mechanism, retroactively linking the old id', async () => {
@@ -4819,7 +4825,7 @@ describe('ofw_status (requirement 4)', () => {
     expect(byId.get(537828154)).toMatchObject({ state: 'draft', inSync: true });
     expect(byId.get(538086428)).toMatchObject({ state: 'draft', inSync: true });
     expect(byId.get(538279699)).toMatchObject({
-      state: 'sent', sentAt: '2026-07-27T23:31:09', sentMessageId: 538279699, inSync: false,
+      state: 'sent', sentAt: '2026-07-27T23:31:09-04:00', sentMessageId: 538279699, inSync: false,
     });
     // Every id was resolved live, so the snapshot IS a usable basis for a claim.
     expect(parsed.complete).toBe(true);

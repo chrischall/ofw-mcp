@@ -3,10 +3,20 @@ import { z } from 'zod';
 import type { MessageRow, Recipient } from '../cache/store.js';
 import type { OFWClient } from '../client.js';
 import { parseLenient } from '@chrischall/mcp-utils';
+import { normalizeTimestampsInValue } from '../timestamps.js';
 
 // Pretty-printed JSON tool result. Thin wrapper over @chrischall/mcp-utils'
-// `textResult` so the rest of the codebase keeps the local name.
-export const jsonResponse = textResult;
+// `textResult`, with one addition: every timestamp in the payload is rewritten
+// to ISO-8601 with an explicit offset and paired with a `<field>Display`
+// sibling in the operator's zone.
+//
+// This is the single seam every structured tool response passes through, which
+// is the point — normalizing here rather than at each call site is what makes
+// it impossible for a tool to reintroduce the naive-local values that had
+// `sentAt` and `fetchedBodyAt` silently disagreeing by the UTC offset.
+export function jsonResponse(data: unknown): ReturnType<typeof textResult> {
+  return textResult(normalizeTimestampsInValue(data));
+}
 
 // Raw-string tool result. Wrapper over @chrischall/mcp-utils' `rawTextResult`.
 export const textResponse = rawTextResult;
@@ -16,7 +26,11 @@ export const textResponse = rawTextResult;
 // we declined to overwrite) without being mistaken for a successful write.
 // mcp-utils' `errorResult` only carries a string.
 export function jsonErrorResponse(data: unknown): ReturnType<typeof textResult> {
-  return { ...textResult(data), isError: true };
+  // Routed through jsonResponse, not textResult: a refusal payload carries the
+  // same freshness block as the success path, and emitting it unnormalized made
+  // an UNVERIFIED_EMPTY response report `asOf` in UTC while every successful
+  // response reported it with an offset.
+  return { ...jsonResponse(data), isError: true };
 }
 
 // OFW API shape for `recipients[]` on message/draft list and detail

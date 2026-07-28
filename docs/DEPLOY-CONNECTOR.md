@@ -249,3 +249,35 @@ had added the connector will need to log in again if it's redeployed. It also
 drops the encrypted per-user OFW credentials from `OAUTH_KV` (the `OFWCacheDO`
 message caches are separate Durable Object storage and are removed when the
 Worker itself is deleted).
+
+## Timezone (`DISPLAY_TZ`)
+
+Every timestamp in a tool response is ISO-8601 with an explicit offset, paired
+with a `<field>Display` value rendered in `DISPLAY_TZ` (set in
+`wrangler.jsonc` `vars`, defaulting to `America/New_York`).
+
+`DISPLAY_TZ` does two jobs:
+
+1. It is the zone `*Display` strings render in.
+2. It is the zone a **naive** OFW timestamp is interpreted as. OFW's API returns
+   `sentAt`/`viewedAt`/`modifiedAt` as local wall-clock with no offset, so the
+   correct instant can only be recovered by knowing which zone that wall clock
+   belongs to.
+
+Job 2 is the constraint that matters: **it is deployment-wide, not per-tenant.**
+OFW reports those naive times in the *account's* zone. A tenant whose account
+sits outside `DISPLAY_TZ` will have their naive timestamps labelled with the
+wrong offset — the displayed wall-clock time stays right, but the instant it
+claims to be is off by the difference between the two zones, which can move an
+evening message onto the wrong calendar day.
+
+This is acceptable while the connector serves accounts in a single zone. If it
+ever serves accounts across zones, thread a per-tenant zone through `OFWProps`
+alongside the credentials and pass it to `normalizeTimestampsInValue` instead of
+reading the global. The helper already takes the zone as a parameter, so the
+change is at the call seam in `src/tools/_shared.ts`, not in the timestamp
+logic.
+
+Always an IANA name, never a fixed offset: DST is resolved from the IANA
+database per instant, so `-04:00` hardcoded would be an hour wrong from
+November through March.

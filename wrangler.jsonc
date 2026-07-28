@@ -33,7 +33,19 @@
     // resume round-trips on a large backfill. Unsetting / removing this var makes
     // sync unbounded (walks fully in one call) — only safe for the local stdio
     // server, never the Worker.
-    "OFW_SYNC_MAX_REQUESTS": "40"
+    "OFW_SYNC_MAX_REQUESTS": "40",
+    // IANA zone for every `<field>Display` value, and the zone a naive OFW
+    // timestamp is read as wall-clock in. Set explicitly rather than left to
+    // the America/New_York default so the value is visible in the deployment
+    // rather than implied by code.
+    //
+    // DEPLOYMENT-WIDE, not per-tenant: OFW reports naive local times in the
+    // ACCOUNT's zone, so a tenant outside this zone gets a correct instant
+    // label only if their account zone matches. Threading a per-tenant zone
+    // through OFWProps is the fix if this connector ever serves accounts
+    // outside one zone; until then this var is the whole story. See
+    // docs/DEPLOY-CONNECTOR.md.
+    "DISPLAY_TZ": "America/New_York"
   },
   // Production custom domain (matches untappd-mcp's connector.untappd.nullnet.app).
   // The zone must be in the deploying account's Cloudflare; wrangler provisions

@@ -91,7 +91,29 @@ OFW_ALLOW_MARK_READ       Optional. Default true (= the long-standing behaviour)
 OFW_FETCH_UNREAD_BODIES   Optional. "1|true|yes|on" → ofw_sync_messages fetches unread inbox bodies by default (default false). Capped by OFW_ALLOW_MARK_READ
 OFW_AUTO_REFRESH          Optional. "1|true|yes|on" → when a cached read comes back EMPTY from a non-fresh cache, the read tools sync the backing folders and answer from the refreshed cache instead of refusing with UNVERIFIED_EMPTY (default false, i.e. refuse). Per-call `autoRefresh` overrides it. A refresh that does not make the read verifiable still refuses
 OFW_CALENDAR_WRITES       Optional. "1|true|yes|on" → in mode "drafts", additionally register the calendar write tools (ofw_create_event, ofw_update_event, ofw_delete_event). Rationale: calendar events have no draft stage but are reversible (editable/deletable), unlike a sent message. Redundant in "all"; never overrides "none" (including the unrecognized-mode fail-closed path)
+DISPLAY_TZ                Optional. IANA zone (e.g. America/New_York, the default) for every `<field>Display` value, and the zone a NAIVE source timestamp is assumed to be wall-clock in. OFW's API reports naive local times in the account's own zone, so this must match it. Unrecognized values fall back to the default rather than throwing — a typo degrades a label instead of breaking every tool. Never a fixed offset: DST comes from the IANA database, so a hardcoded -04:00 would be an hour wrong from November through March
 ```
+
+## Timestamps
+
+Every structured response goes through `jsonResponse` (`src/tools/_shared.ts`), which routes the payload through `normalizeTimestampsInValue` (`src/timestamps.ts`). That is the single seam — normalizing there rather than at each call site is what makes it impossible for a tool to reintroduce a naive value.
+
+Each allowlisted timestamp becomes ISO-8601 **with an explicit offset**, paired with a `<field>Display` sibling carrying the weekday:
+
+```json
+"sentAt": "2026-07-27T23:31:09-04:00",
+"sentAtDisplay": "Mon, Jul 27, 2026, 11:31 PM EDT"
+```
+
+Why: `sentAt`/`viewedAt`/`modifiedAt` arrived from OFW as naive local while `fetchedBodyAt`/`freshness.asOf` were stamped UTC with a `Z`, so one object mixed two zones with nothing to tell them apart. A reader assumed one zone for both and was wrong by the offset on half the fields — enough to move a 10:38 PM send onto the next calendar day, which changes which custody day it belongs to.
+
+A field is rewritten only when the key is allowlisted **and** the value matches a timestamp shape, so user content (a message body quoting a date) is never touched. The payload is cloned first: responses carry live cache rows, and rewriting them in place would corrupt the cache.
+
+The allowlist covers the freshness/sync bookkeeping fields (`lastServerSyncAt`, `checkedAt`, `lastVerifiedAt`, `oldestVerifiedAt`, `lastSyncAt`) as well as the message fields — they share an object with `asOf`, so omitting them put two zones back in one payload. Derive additions from a sweep of emitted field names, not from whichever field a bug report happens to name. `startDate`/`endDate` (YYYY-MM-DD) and `startTime`/`endTime` (HH:mm) are deliberately excluded: a date and a wall time are not instants.
+
+`jsonErrorResponse` routes through `jsonResponse`, so a refusal payload carries the same normalized freshness block as the success path.
+
+**`DISPLAY_TZ` is deployment-wide, not per-tenant.** OFW reports naive times in the *account's* zone, so a tenant outside `DISPLAY_TZ` gets the wrong offset on those values. See [`docs/DEPLOY-CONNECTOR.md`](docs/DEPLOY-CONNECTOR.md) for the fix if this ever serves multiple zones.
 
 `auth.ts` ignores blank values, the strings `"undefined"`/`"null"`, and unsubstituted `${VAR}` placeholders — defensive against MCP hosts passing the env block through unexpanded.
 

@@ -13,6 +13,11 @@ export default defineConfig({
     }),
   ],
   test: {
-    include: ['tests/worker.test.ts', 'tests/worker-cache.test.ts', 'tests/worker-extract.test.ts'],
+    include: [
+      'tests/worker.test.ts',
+      'tests/worker-cache.test.ts',
+      'tests/worker-extract.test.ts',
+      'tests/worker-timestamps.test.ts',
+    ],
   },
 });

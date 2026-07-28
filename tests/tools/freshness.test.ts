@@ -206,3 +206,57 @@ describe('buildFreshness', () => {
     expect(f.lastServerSyncAt).toBe(ago(100));
   });
 });
+
+// The blocking finding on PR #200: the allowlist omitted the freshness block's
+// own bookkeeping fields, so `asOf` carried an offset while `lastServerSyncAt`
+// sat next to it in UTC `Z` — two zones in one object, the exact property the
+// normalization was introduced to establish.
+//
+// This scans a REAL handler response rather than a hand-built literal. The
+// earlier mixed-zone test passed because it asserted over a payload I wrote by
+// hand from the reported field names, so it could only ever confirm the fields
+// already known to be broken.
+describe('freshness block zone consistency (contract)', () => {
+  const NAIVE = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2})?(\.\d+)?$/;
+  const OFFSET_BEARING = /([+-]\d{2}:\d{2}|Z)$/;
+
+  function collectTimestamps(node: unknown, out: string[] = []): string[] {
+    if (Array.isArray(node)) {
+      node.forEach((n) => collectTimestamps(n, out));
+    } else if (node && typeof node === 'object') {
+      Object.values(node).forEach((n) => collectTimestamps(n, out));
+    } else if (typeof node === 'string' && (NAIVE.test(node) || OFFSET_BEARING.test(node))) {
+      if (/^\d{4}-\d{2}-\d{2}[T ]\d{2}:/.test(node)) out.push(node);
+    }
+    return out;
+  }
+
+  it('emits no naive timestamp and one zone across a real freshness payload', async () => {
+    await seedVerified('inbox', ago(30));
+    const freshness = await buildFreshness(store, { source: 'cache', folders: ['inbox'], now: NOW });
+
+    // Route it through the real response seam, as a tool would.
+    const { jsonResponse } = await import('../../src/tools/_shared.js');
+    const payload = JSON.parse(jsonResponse({ freshness }).content[0].text as string);
+
+    const stamps = collectTimestamps(payload);
+    expect(stamps.length).toBeGreaterThan(1); // asOf AND lastServerSyncAt at minimum
+    expect(stamps.filter((s) => NAIVE.test(s))).toEqual([]);
+    expect(stamps.every((s) => OFFSET_BEARING.test(s))).toBe(true);
+    // One zone throughout: every value ends in the same offset.
+    expect(new Set(stamps.map((s) => s.slice(-6))).size).toBe(1);
+  });
+
+  it('a refusal payload is normalized the same way as a success payload', async () => {
+    await seedVerified('inbox', ago(30));
+    const freshness = await buildFreshness(store, { source: 'cache', folders: ['inbox'], now: NOW });
+    const { jsonResponse, jsonErrorResponse } = await import('../../src/tools/_shared.js');
+
+    const ok = JSON.parse(jsonResponse({ freshness }).content[0].text as string);
+    const refused = JSON.parse(jsonErrorResponse({ error: 'UNVERIFIED_EMPTY', freshness }).content[0].text as string);
+
+    expect(refused.freshness.asOf).toBe(ok.freshness.asOf);
+    expect(refused.freshness.lastServerSyncAt).toBe(ok.freshness.lastServerSyncAt);
+    expect(collectTimestamps(refused).filter((s) => NAIVE.test(s))).toEqual([]);
+  });
+});
