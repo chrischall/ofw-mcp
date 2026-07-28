@@ -9,7 +9,7 @@ import {
   DraftFreshnessError, checkDraftFreshness, draftRevision, fetchServerDraft, staleDraftPayload,
 } from './draft-freshness.js';
 import type { DraftContent } from './draft-freshness.js';
-import { newDraftKey, probeIds, resolveDraftKey } from './lifecycle.js';
+import { FOLDER_TYPE, newDraftKey, persistFolderIds, probeIds, resolveDraftKey } from './lifecycle.js';
 import type { LifecycleItem } from './lifecycle.js';
 import type { CacheStore, MessageRow, DraftRow, FolderName } from '../cache/store.js';
 import { getFolderVerifiedAt } from '../sync.js';
@@ -62,7 +62,10 @@ const MessageDetailSchema = z.looseObject({
   // The detail payload carries its own owning folder ({id, name}). We read the
   // id to label a live-fetched message sent-vs-inbox instead of blindly
   // defaulting to inbox — see the folder derivation in ofw_get_message.
-  folder: z.looseObject({ id: z.number() }).optional(),
+  // Same union as ServerDraftSchema's, for the same reason — OFW types this id
+  // as a string on the folders listing and a number on message detail. Lenient
+  // here, so a mismatch only warns, but it would warn on EVERY live fetch.
+  folder: z.looseObject({ id: z.union([z.string(), z.number()]) }).optional(),
 });
 
 // Attachment-backfill detail fetch reads only `files`.
@@ -81,12 +84,6 @@ const FolderCountsSchema = z.looseObject({
     count: z.number().optional(),
   })).optional(),
 });
-
-const FOLDER_TYPE: Record<FolderName, string> = {
-  inbox: 'INBOX',
-  sent: 'SENT_MESSAGES',
-  drafts: 'DRAFTS',
-};
 
 /**
  * Cap on per-id probes in one ofw_check_freshness call.
@@ -1424,6 +1421,11 @@ export function registerMessageTools(
         { label: 'ofw-mcp', context: 'GET /pub/v1/messageFolders (ofw_check_freshness)' },
       );
       const sys = data.systemFolders ?? [];
+      // Take the folder ids while we have them. Without this a call asking
+      // about BOTH folders and ids, on a cache that has never synced, fetched
+      // this exact endpoint twice — once here for the counts and again inside
+      // probeIds' ensureFolderIdMap for the ids it already had in hand.
+      await persistFolderIds(cache, sys);
       for (const folder of wantFolders) {
         const entry = sys.find((x) => x.folderType === FOLDER_TYPE[folder]);
         const serverCount = entry?.totalCount ?? entry?.messageCount ?? entry?.count ?? null;

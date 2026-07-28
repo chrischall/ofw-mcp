@@ -3,8 +3,8 @@ import { OFWClient } from '../../src/client.js';
 import { OFWCache } from '../../src/cache/node.js';
 import { sampleMessageRow } from '../_fixtures.js';
 import {
-  classifyState, ensureFolderIdMap, newDraftKey, probeIds, probeWouldStamp,
-  readFolderIdMap, resolveDraftKey,
+  classifyState, ensureFolderIdMap, newDraftKey, persistFolderIds, probeIds,
+  probeWouldStamp, readFolderIdMap, resolveDraftKey,
 } from '../../src/tools/lifecycle.js';
 import type { FolderIdMap } from '../../src/tools/lifecycle.js';
 import type { MessageSnapshot } from '../../src/tools/draft-freshness.js';
@@ -129,6 +129,29 @@ describe('readFolderIdMap / ensureFolderIdMap', () => {
   });
 });
 
+describe('persistFolderIds', () => {
+  it('harvests ids from an already-fetched listing, making ensureFolderIdMap free', async () => {
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request');
+
+    await persistFolderIds(cache, [
+      { id: '1', folderType: 'INBOX' },
+      { id: '2', folderType: 'SENT_MESSAGES' },
+      { id: '3', folderType: 'DRAFTS' },
+      { id: '9', folderType: 'SOMETHING_ELSE' },
+    ]);
+
+    expect(await readFolderIdMap(cache)).toEqual(MAP);
+    expect(await ensureFolderIdMap(client, cache)).toEqual({ map: MAP, requests: 0 });
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('persists only the folders the listing actually reported', async () => {
+    await persistFolderIds(cache, [{ id: '3', folderType: 'DRAFTS' }]);
+    expect(await readFolderIdMap(cache)).toEqual({ inbox: null, sent: null, drafts: '3' });
+  });
+});
+
 describe('resolveDraftKey', () => {
   it('resolves to the chain tip and lists every id', async () => {
     await cache.recordDraftLineage({ id: 10, draftKey: 'dk_a', previousId: null, recordedAt: '2026-07-01T00:00:00Z' });
@@ -190,6 +213,24 @@ describe('probeIds', () => {
     });
     expect(items[0].cacheRevision).toBe(items[0].serverRevision);
     expect(items[0].note).toMatch(/was SENT/);
+  });
+
+  it('accepts a STRING folder id — the strict schema must not hard-fail on it', async () => {
+    // OFW types this id as a string on the folders listing and a number on
+    // message detail. ServerDraftSchema is parsed strict because it backs the
+    // destructive-draft guard, so pinning one spelling would turn a harmless
+    // representation change into a failed ofw_save_draft / ofw_delete_draft.
+    seedFolderIds();
+    await cache.upsertDraft(draftRow);
+    const client = new OFWClient();
+    vi.spyOn(client, 'request').mockResolvedValue({
+      subject: 'S', body: 'B', replyToId: null, recipients: [],
+      folder: { id: '2', name: 'Sent Messages' },
+      date: { dateTime: '2026-07-27T23:31:09' },
+    });
+
+    const { items } = await probeIds(client, cache, [500], { allowMarkRead: false });
+    expect(items[0]).toMatchObject({ id: 500, state: 'sent', sentAt: '2026-07-27T23:31:09' });
   });
 
   it('reports an id that OFW moved to the inbox as "received"', async () => {

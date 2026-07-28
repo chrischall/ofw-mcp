@@ -4193,6 +4193,44 @@ describe('lifecycle state in ofw_check_freshness (Gap 1)', () => {
     expect(parsed.items[0]).toMatchObject({ id: 501, state: 'deleted', existsOnServer: false });
   });
 
+  it('fetches the folders endpoint ONCE when asked about folders and ids together', async () => {
+    // No sync has ever run, so the folder-id map is empty. The folder-count
+    // branch already fetches /pub/v1/messageFolders; harvesting the ids from
+    // that same response keeps probeIds' ensureFolderIdMap from re-fetching it.
+    upsertDraft({
+      id: 503, subject: 'D', body: 'b', recipients: [], replyToId: null,
+      modifiedAt: '2026-07-19T12:42:00Z', listData: {},
+    });
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request').mockImplementation(async (_m: string, path: string) => {
+      if (path.startsWith('/pub/v1/messageFolders')) {
+        return {
+          systemFolders: [
+            { id: '1', folderType: 'INBOX', totalCount: 10 },
+            { id: '2', folderType: 'SENT_MESSAGES', totalCount: 5 },
+            { id: '3', folderType: 'DRAFTS', totalCount: 1 },
+          ],
+        };
+      }
+      return { subject: 'D', body: 'b', replyToId: null, recipients: [], folder: { id: 3, name: 'Drafts' } };
+    });
+    setup(client);
+
+    const parsed = JSON.parse((await handlers.get('ofw_check_freshness')!({
+      folders: ['drafts'], messageIds: [503],
+    })).content[0].text);
+
+    const folderCalls = spy.mock.calls.filter(([, path]) => String(path).startsWith('/pub/v1/messageFolders'));
+    expect(folderCalls).toHaveLength(1);
+    // One folder fetch + one id probe — the map came free with the counts.
+    expect(parsed.requestsUsed).toBe(2);
+    expect(parsed.items[0].state).toBe('draft');
+    // And the ids are now persisted for every later call.
+    expect(cache.core.getMeta('drafts_folder_id')).toBe('3');
+    expect(cache.core.getMeta('sent_folder_id')).toBe('2');
+    expect(cache.core.getMeta('inbox_folder_id')).toBe('1');
+  });
+
   it('resolves the folder map live (one extra request) when no sync has ever run', async () => {
     upsertDraft({
       id: 502, subject: 'D', body: 'b', recipients: [], replyToId: null,
