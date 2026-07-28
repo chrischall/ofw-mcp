@@ -68,7 +68,20 @@ const ServerDraftSchema = z.looseObject({
   // Read for the LIFECYCLE answer (see tools/lifecycle.ts): which folder OFW
   // itself says this id lives in right now. `existsOnServer` alone cannot
   // distinguish "still a draft" from "was sent" — a sent draft still exists.
-  folder: z.looseObject({ id: z.number().optional(), name: z.string().optional() }).nullable().optional(),
+  // `id` accepts BOTH spellings deliberately. This schema is parsed in
+  // `mode: 'strict'` because it backs the destructive-draft guard, so a
+  // present-but-mistyped field THROWS — and OFW is already inconsistent about
+  // this exact field: the folders listing (`FoldersSchema` in sync.ts) types it
+  // `z.string()`, while message detail has been observed returning a number.
+  // Pinning one spelling here would turn a harmless representation change into
+  // a hard failure of ofw_save_draft / ofw_delete_draft, which is the opposite
+  // of what a strict boundary is for: it exists to stop us acting on a response
+  // we cannot interpret, not to reject one we can. `folderId` is normalized to
+  // a string below, so both spellings compare correctly downstream.
+  folder: z.looseObject({
+    id: z.union([z.string(), z.number()]).optional(),
+    name: z.string().optional(),
+  }).nullable().optional(),
   date: z.looseObject({ dateTime: z.string().optional() }).nullable().optional(),
 });
 

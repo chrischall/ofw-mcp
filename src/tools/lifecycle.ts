@@ -1,5 +1,5 @@
 import type { OFWClient } from '../client.js';
-import type { CacheStore, DraftRow, MessageRow } from '../cache/store.js';
+import type { CacheStore, DraftRow, FolderName, MessageRow } from '../cache/store.js';
 import { resolveFolderIds } from '../sync.js';
 import { draftRevision, fetchMessageSnapshot } from './draft-freshness.js';
 import type { MessageSnapshot } from './draft-freshness.js';
@@ -34,13 +34,49 @@ export interface FolderIdMap {
   drafts: string | null;
 }
 
+/** OFW's `folderType` discriminator for each folder we track. */
+export const FOLDER_TYPE: Record<FolderName, string> = {
+  inbox: 'INBOX',
+  sent: 'SENT_MESSAGES',
+  drafts: 'DRAFTS',
+};
+
+/** Where each folder's id is persisted in the `meta` table. */
+const FOLDER_ID_META_KEY: Record<FolderName, string> = {
+  inbox: 'inbox_folder_id',
+  sent: 'sent_folder_id',
+  drafts: 'drafts_folder_id',
+};
+
+const FOLDERS: FolderName[] = ['inbox', 'sent', 'drafts'];
+
 /** Read whatever folder ids past syncs persisted. No requests. */
 export async function readFolderIdMap(store: CacheStore): Promise<FolderIdMap> {
   return {
-    inbox: await store.getMeta('inbox_folder_id'),
-    sent: await store.getMeta('sent_folder_id'),
-    drafts: await store.getMeta('drafts_folder_id'),
+    inbox: await store.getMeta(FOLDER_ID_META_KEY.inbox),
+    sent: await store.getMeta(FOLDER_ID_META_KEY.sent),
+    drafts: await store.getMeta(FOLDER_ID_META_KEY.drafts),
   };
+}
+
+/**
+ * Persist folder ids harvested from a folders listing the caller ALREADY
+ * fetched.
+ *
+ * `ofw_check_freshness` asked about folders and ids in one call hits
+ * `/pub/v1/messageFolders?includeFolderCounts=true` for the counts, and then
+ * `ensureFolderIdMap` hit the very same endpoint again to learn the ids. The
+ * response in hand already carries them; taking them makes the second call a
+ * no-op instead of a duplicate round trip.
+ */
+export async function persistFolderIds(
+  store: CacheStore,
+  systemFolders: Array<{ id: string; folderType: string }>,
+): Promise<void> {
+  for (const folder of FOLDERS) {
+    const entry = systemFolders.find((f) => f.folderType === FOLDER_TYPE[folder]);
+    if (entry !== undefined) await store.setMeta(FOLDER_ID_META_KEY[folder], entry.id);
+  }
 }
 
 /**

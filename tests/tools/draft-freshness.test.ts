@@ -3,6 +3,7 @@ import { OFWClient } from '../../src/client.js';
 import {
   draftRevision,
   fetchServerDraft,
+  fetchMessageSnapshot,
   checkDraftFreshness,
   staleDraftPayload,
   DraftFreshnessError,
@@ -71,6 +72,32 @@ describe('fetchServerDraft', () => {
       replyToId: 12,
       recipients: [{ userId: 42, name: 'Co Parent', viewedAt: null }],
     });
+  });
+
+  it('does not hard-fail on either spelling of folder.id (strict boundary)', async () => {
+    // This schema is parsed strict — a throw here ABORTS ofw_save_draft /
+    // ofw_delete_draft. OFW types this id as a string on the folders listing
+    // and a number on message detail, so both must parse, and both must
+    // normalize to the same string for comparison.
+    for (const id of ['3', 3]) {
+      const c = new OFWClient();
+      vi.spyOn(c, 'request').mockResolvedValue({
+        subject: 'Pickup', body: 'server body', replyToId: null, recipients: [],
+        folder: { id, name: 'Drafts' },
+      });
+      const snap = await fetchMessageSnapshot(c, 5);
+      expect(snap?.folderId).toBe('3');
+      expect(snap?.folderName).toBe('Drafts');
+    }
+  });
+
+  it('reports a null folderId when OFW omits the folder entirely', async () => {
+    const c = new OFWClient();
+    vi.spyOn(c, 'request').mockResolvedValue({ subject: 'S', body: 'B' });
+    const snap = await fetchMessageSnapshot(c, 5);
+    expect(snap?.folderId).toBeNull();
+    expect(snap?.folderName).toBeNull();
+    expect(snap?.dateTime).toBeNull();
   });
 
   it('treats an empty/null response body as missing rather than throwing', async () => {
