@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.9.0](https://github.com/chrischall/ofw-mcp/compare/v2.8.0...v2.9.0) (2026-07-28)
+
+
+### Features
+
+* **messages:** make it impossible to report stale draft/message state ([#196](https://github.com/chrischall/ofw-mcp/issues/196)) ([cdedecb](https://github.com/chrischall/ofw-mcp/commit/cdedecb64f648c718bda78e355d5b84fe9ab541e))
+
 ## [2.8.0](https://github.com/chrischall/ofw-mcp/compare/v2.7.1...v2.8.0) (2026-07-27)
 
 
