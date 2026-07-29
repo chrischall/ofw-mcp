@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.9.1](https://github.com/chrischall/ofw-mcp/compare/v2.9.0...v2.9.1) (2026-07-28)
+
+
+### Bug Fixes
+
+* emit every timestamp with an explicit offset and a display value ([#200](https://github.com/chrischall/ofw-mcp/issues/200)) ([d8407fc](https://github.com/chrischall/ofw-mcp/commit/d8407fc01dcd1ead7a646ae819aa5b0152f2fab5)), closes [#201](https://github.com/chrischall/ofw-mcp/issues/201)
+
 ## [2.9.0](https://github.com/chrischall/ofw-mcp/compare/v2.8.0...v2.9.0) (2026-07-28)
 
 
