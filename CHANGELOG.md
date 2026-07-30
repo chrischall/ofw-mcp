@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.9.2](https://github.com/chrischall/ofw-mcp/compare/v2.9.1...v2.9.2) (2026-07-30)
+
+
+### Bug Fixes
+
+* **deps:** bump @fetchproxy/* to 1.7.0 and @chrischall/mcp-utils to 0.14.0 ([#203](https://github.com/chrischall/ofw-mcp/issues/203)) ([1be0764](https://github.com/chrischall/ofw-mcp/commit/1be0764a16e45baf589daf19c263aff9c2f6ea7b))
+
 ## [2.9.1](https://github.com/chrischall/ofw-mcp/compare/v2.9.0...v2.9.1) (2026-07-28)
 
 
