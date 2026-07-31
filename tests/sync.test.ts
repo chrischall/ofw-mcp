@@ -443,6 +443,31 @@ describe('syncDrafts', () => {
     expect(getDraft(1)?.replyToId).toBeNull();
   });
 
+  it('stores the reply target from inReplyTo when the list item\'s replyToId is null', async () => {
+    // OFW reports the threading echo inconsistently: list payloads have been
+    // observed carrying inReplyTo (with showContext) while replyToId is null.
+    // The cached row must derive the same value ofw_save_draft derives from
+    // the detail echo, or the content revision drifts between a save and the
+    // next sync — a self-inflicted STALE.
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce({
+        data: [{
+          id: 1,
+          subject: 'Threaded draft',
+          date: { dateTime: '2026-07-29T00:00:00Z' },
+          replyToId: null,
+          inReplyTo: 538672434,
+          showContext: true,
+          recipients: [],
+        }],
+      })
+      .mockResolvedValueOnce({ body: 'body', subject: 'Threaded draft', recipientIds: [] });
+
+    await syncDrafts(client, '333', store());
+    expect(getDraft(1)?.replyToId).toBe(538672434);
+  });
+
   it('handles drafts where OFW omits the date field entirely', async () => {
     const client = new OFWClient();
     vi.spyOn(client, 'request')

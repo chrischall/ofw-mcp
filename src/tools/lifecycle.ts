@@ -105,19 +105,43 @@ export async function ensureFolderIdMap(
 }
 
 /**
+ * OFW's own display names for the three system folders, as observed on live
+ * detail payloads (`folder.name`). Keys are lower-cased for the comparison —
+ * this is a fixed vocabulary OFW controls, not user content, so a
+ * case-insensitive match is a normalization, not a guess.
+ */
+const STATE_BY_FOLDER_NAME: Record<string, EntityState> = {
+  drafts: 'draft',
+  sent: 'sent',
+  'sent messages': 'sent',
+  inbox: 'received',
+};
+
+/**
  * Map a live snapshot to a lifecycle state. Pure — the request already happened.
  *
- * A null snapshot means OFW returned 404 / an empty body, i.e. `deleted`. An
- * unmappable folder is `unknown` rather than being guessed at: guessing here is
- * exactly how "still a draft" gets asserted about something that was sent.
+ * A null snapshot means OFW returned 404 / an empty body, i.e. `deleted`. The
+ * folder ID (matched against the persisted system-folder map) is the primary
+ * signal; when the id is unreported or unmapped, the folder NAME OFW itself put
+ * on the payload is a fallback with exactly the same authority — a snapshot
+ * reporting `folder.name: "Drafts"` answered the question, and declaring it
+ * `unknown` was a refusal to read the answer (observed live: every draft probe
+ * came back "unknown" while echoing the name "Drafts"). Only a folder that is
+ * unmappable by BOTH id and name is `unknown`: guessing beyond that is exactly
+ * how "still a draft" gets asserted about something that was sent.
  */
 export function classifyState(snapshot: MessageSnapshot | null, map: FolderIdMap): EntityState {
   if (snapshot === null) return 'deleted';
-  const { folderId } = snapshot;
-  if (folderId === null) return 'unknown';
-  if (map.drafts !== null && folderId === map.drafts) return 'draft';
-  if (map.sent !== null && folderId === map.sent) return 'sent';
-  if (map.inbox !== null && folderId === map.inbox) return 'received';
+  const { folderId, folderName } = snapshot;
+  if (folderId !== null) {
+    if (map.drafts !== null && folderId === map.drafts) return 'draft';
+    if (map.sent !== null && folderId === map.sent) return 'sent';
+    if (map.inbox !== null && folderId === map.inbox) return 'received';
+  }
+  if (folderName !== null) {
+    const byName = STATE_BY_FOLDER_NAME[folderName.trim().toLowerCase()];
+    if (byName !== undefined) return byName;
+  }
   return 'unknown';
 }
 

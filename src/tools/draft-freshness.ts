@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { parseLenient } from '@chrischall/mcp-utils';
 import type { OFWClient } from '../client.js';
 import type { Recipient } from '../cache/store.js';
-import { ApiRecipientSchema, mapRecipients } from './_shared.js';
+import { ApiRecipientSchema, mapRecipients, threadedReplyTo } from './_shared.js';
 
 /**
  * The content of a draft, normalized so a server copy and a cached copy are
@@ -63,7 +63,14 @@ export function draftRevision(d: DraftContent): string {
 const ServerDraftSchema = z.looseObject({
   subject: z.string().optional(),
   body: z.string().optional(),
+  // BOTH spellings of the threading echo (see ThreadingEcho in _shared.ts):
+  // OFW reports the reply target as `replyToId` on some payloads and as
+  // `inReplyTo` on others. The snapshot derives one value from whichever is
+  // present, so the revision hashed here matches the one ofw_save_draft
+  // computed from the same server state — a one-sided read produced revisions
+  // that disagreed about the same draft.
   replyToId: z.number().nullable().optional(),
+  inReplyTo: z.number().nullable().optional(),
   recipients: z.array(ApiRecipientSchema).optional(),
   // Read for the LIFECYCLE answer (see tools/lifecycle.ts): which folder OFW
   // itself says this id lives in right now. `existsOnServer` alone cannot
@@ -142,7 +149,7 @@ export async function fetchMessageSnapshot(client: OFWClient, id: number): Promi
     content: {
       subject: detail.subject ?? '',
       body: detail.body ?? '',
-      replyToId: detail.replyToId ?? null,
+      replyToId: threadedReplyTo(detail),
       recipients: mapRecipients(detail.recipients),
     },
     folderId: detail.folder?.id === undefined ? null : String(detail.folder.id),

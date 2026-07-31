@@ -21,7 +21,7 @@ import {
   getFetchUnreadBodies, getSyncMaxRequests, getWriteMode,
 } from '../config.js';
 import { basename, join } from 'node:path';
-import { ApiRecipientSchema, deriveRead, expandPath, hasRealView, jsonErrorResponse, jsonResponse, mapRecipients, postMessageAndRefetch, textResponse, verifyWriteLanded, withReadState } from './_shared.js';
+import { ApiRecipientSchema, deriveRead, expandPath, hasRealView, jsonErrorResponse, jsonResponse, mapRecipients, postMessageAndRefetch, reportsThreaded, textResponse, threadedReplyTo, verifyWriteLanded, withReadState } from './_shared.js';
 import { parseLenient } from '@chrischall/mcp-utils';
 
 // Schemas for the load-bearing fields of each /pub/v3 response this file
@@ -38,12 +38,24 @@ const SentDetailSchema = z.looseObject({
   date: DateSchema.optional(),
   from: z.looseObject({ name: z.string().optional() }).optional(),
   recipients: z.array(ApiRecipientSchema).optional(),
+  // The threading echo, in BOTH spellings plus showContext — OFW reports the
+  // reply target inconsistently across payloads (see ThreadingEcho in
+  // _shared.ts). Backs the `threaded` verdict on ofw_send_message.
+  replyToId: z.number().nullable().optional(),
+  inReplyTo: z.number().nullable().optional(),
+  showContext: z.boolean().optional(),
 });
 const SavedDraftDetailSchema = z.looseObject({
   subject: z.string().optional(),
   body: z.string().optional(),
   date: DateSchema.optional(),
+  // All three threading-echo fields. Reading ONLY `replyToId` here fired a
+  // false "OurFamilyWizard did not thread this draft" warning on nearly every
+  // threaded save, while the same payload's `inReplyTo`/`showContext` showed
+  // the draft WAS threaded — see threadedReplyTo in _shared.ts.
   replyToId: z.number().nullable().optional(),
+  inReplyTo: z.number().nullable().optional(),
+  showContext: z.boolean().optional(),
   recipients: z.array(ApiRecipientSchema).optional(),
   // Read to audit whether requested myFileIDs actually attached (Defect 3).
   files: z.array(z.number()).optional(),
@@ -419,6 +431,11 @@ export function registerMessageTools(
     if (draftRow !== null) {
       const { freshness, serverConfirmed, cacheStatus } = await draftsFreshness(cache);
       return jsonResponse({
+        // Stable identity FIRST — the id below changes on every edit
+        // (create-then-delete), so callers should key off draftKey. Null when
+        // this draft was never written through this tool (e.g. authored in
+        // the web app).
+        draftKey: (await cache.getDraftLineageById(draftRow.id))?.draftKey ?? null,
         id: draftRow.id,
         folder: 'drafts',
         subject: draftRow.subject,
@@ -435,13 +452,9 @@ export function registerMessageTools(
         listData: draftRow.listData,
         attachments: [],
         // Concurrency token — pass as expectedRevision to ofw_save_draft /
-        // ofw_delete_draft to assert you are editing THIS version.
+        // ofw_delete_draft / ofw_send_message to assert you are acting on
+        // THIS version.
         revision: draftRevision(draftRow),
-        // Stable logical identity. Survives the create-then-delete id churn of
-        // editing AND the transition to sent — pass it to ofw_status to ask
-        // "what happened to the thing I was working on?". Null when this draft
-        // was never written through this tool (e.g. authored in the web app).
-        draftKey: (await cache.getDraftLineageById(draftRow.id))?.draftKey ?? null,
         cacheStatus,
         // False = this draft's existence and unsent status are remembered from
         // a cache, not confirmed on OFW. Call ofw_check_freshness before
@@ -564,15 +577,18 @@ export function registerMessageTools(
   });
 
   if (allowSend) server.registerTool('ofw_send_message', {
-    description: 'Send a message via OurFamilyWizard. To send an existing draft, pass messageId — subject/body/recipientIds become optional overrides (missing fields default to the draft\'s cached values) and the draft is deleted after sending. To send a fresh message, supply subject/body/recipientIds directly. draftId is the legacy spelling of messageId and works the same way. If replyToId is provided, the cache may rewrite it to the latest reply in the same thread (a note is included in the response when this happens). Attach files by passing their fileIds (from ofw_upload_attachment) in myFileIDs. After sending, the tool re-fetches the message from OFW to populate the local cache and link attachments to the new message id.',
+    description: 'Send a message via OurFamilyWizard — the ONE irreversible operation here, so it carries the strongest guard. TO SEND AN EXISTING DRAFT (the safe default): pass draftId (or messageId — same thing). The tool re-reads the draft from OFW and sends the SERVER\'S version, so what goes out is what is on OurFamilyWizard, not what this session remembers — subject/body act only as explicit overrides. It is guarded exactly like ofw_save_draft: pass expectedRevision to assert which version you are sending; if the draft changed on OFW since you read it — or no longer exists (it may already have been SENT) — the send is REFUSED with the current server content echoed back, and nothing goes out. RECIPIENTS: OurFamilyWizard does not persist recipients on drafts, so recipientIds is usually still required at send time (ids from ofw_get_profile). After the send is CONFIRMED (OFW returned the new message id and the re-fetched sent record matches what was posted), the source draft is deleted automatically; pass deleteDraftOnSuccess:false to keep it. On ANY failure or ambiguity the draft is never deleted — the response carries draftRetained:true with the reason. TO COMPOSE FROM SCRATCH: supply subject/body/recipientIds with no draftId. If replyToId is provided (or inherited from the draft), the cache may rewrite it to the latest reply in the same thread (a note is included when this happens). Attach files via myFileIDs (from ofw_upload_attachment). The response leads with sentMessageId and the stable draftKey, and reports threaded (whether OFW actually linked the reply) and draftDeleted.',
     annotations: { destructiveHint: true },
     inputSchema: {
-      subject: z.string().describe('Message subject. Required unless messageId/draftId references a cached draft.').optional(),
-      body: z.string().describe('Message body text. Required unless messageId/draftId references a cached draft.').optional(),
-      recipientIds: z.array(z.number()).describe('Array of recipient user IDs (get from ofw_get_profile). Required unless messageId/draftId references a cached draft.').optional(),
-      replyToId: z.number().describe('ID of the message being replied to').optional(),
-      messageId: z.number().describe('ID of an existing draft to send. When set, missing subject/body/recipientIds default to the draft\'s cached values, and the draft is deleted after sending.').optional(),
-      draftId: z.number().describe('Legacy synonym for messageId. If both are passed they must be equal.').optional(),
+      subject: z.string().describe('Message subject. Required unless draftId/messageId is given (then it overrides the server draft\'s subject).').optional(),
+      body: z.string().describe('Message body text. Required unless draftId/messageId is given (then it overrides the server draft\'s body — omit it to send exactly what is on OurFamilyWizard).').optional(),
+      recipientIds: z.array(z.number()).describe('Array of recipient user IDs (get from ofw_get_profile). Usually required even when sending a draft: OurFamilyWizard does not persist recipients on drafts.').optional(),
+      replyToId: z.number().describe('ID of the message being replied to. Defaults to the draft\'s stored reply target when sending by draftId.').optional(),
+      draftId: z.number().describe('ID of an existing draft to send. The draft is re-read from OurFamilyWizard and its SERVER content is sent; missing subject/body default from it. Guarded: a draft that changed since you read it, or that was already sent/deleted, refuses rather than sending blind.').optional(),
+      messageId: z.number().describe('Synonym for draftId (if both are passed they must be equal).').optional(),
+      expectedRevision: z.string().describe('With draftId: the `revision` from ofw_list_drafts / ofw_get_message / ofw_check_freshness for that draft. Asserts you are sending THAT version; if the draft changed on OFW since, the send is refused and the current server content returned. Omit and the tool compares the server against the local cache instead — omitting never means "send whatever is there now".').optional(),
+      deleteDraftOnSuccess: z.boolean().describe('Default true. Delete the source draft after — and ONLY after — the send is confirmed (new message id returned and the re-fetched sent record checks out). Set false to keep the draft. On a failed or unverifiable send the draft is ALWAYS kept, regardless of this flag.').optional(),
+      force: z.boolean().describe('Default false. Send even when the draft changed on OurFamilyWizard since you read it, or its current state could not be read. Only use after showing the user the conflict.').optional(),
       myFileIDs: z.array(z.number()).describe('Attachment file ids (from ofw_upload_attachment) to attach to the message').optional(),
     },
   }, async (args) => {
@@ -581,43 +597,70 @@ export function registerMessageTools(
     }
     const draftRef = args.messageId ?? args.draftId;
     const cache = cacheProvider();
+    const deleteOnSuccess = args.deleteDraftOnSuccess ?? true;
 
-    // Best-effort draft lookup: when draftRef points at a cached draft, use
-    // its stored fields (including replyToId) as defaults for anything the
-    // caller didn't supply. The "missing draft" case only matters when we
-    // actually NEED the defaults — a caller passing all fields explicitly
-    // can use draftId as a pure delete-target even on an empty cache.
     let subject = args.subject;
     let body = args.body;
     let recipientIds = args.recipientIds;
     let draftReplyToId: number | null = null;
-    let draftLookupAttempted = false;
-    let draftFound = false;
+    let guardNote: string | null = null;
+
     if (draftRef !== undefined) {
-      draftLookupAttempted = true;
-      const draft = await cache.getDraft(draftRef);
-      if (draft !== null) {
-        draftFound = true;
-        subject = subject ?? draft.subject;
-        body = body ?? draft.body;
-        recipientIds = recipientIds ?? draft.recipients.map((r) => r.userId);
-        draftReplyToId = draft.replyToId;
+      const cachedDraft = await cache.getDraft(draftRef);
+      // The guard runs whenever this call would TRUST the draft (a content
+      // field defaults from it) or DESTROY it (delete after send). Only a call
+      // that overrides every field AND keeps the draft touches nothing that
+      // needs guarding. Sending is the one irreversible operation here, so it
+      // is never less protected than ofw_save_draft.
+      const needsContent = subject === undefined || body === undefined || recipientIds === undefined;
+      let serverDraft: DraftContent | null | undefined;
+      if (needsContent || deleteOnSuccess) {
+        const guard = await guardDestructiveDraftOp({
+          cache,
+          draftId: draftRef,
+          expectedRevision: args.expectedRevision,
+          force: args.force ?? false,
+          action: 'send',
+        });
+        if (!guard.ok) return guard.response;
+        guardNote = guard.note;
+        serverDraft = guard.server;
+      }
+      // Content defaults come from the SERVER draft the guard just read — the
+      // point of sending by id is that the artifact sent is the artifact on
+      // the server. The cached row is a fallback only for the force paths
+      // where the server copy could not be read (or the guard was skipped).
+      const base = serverDraft ?? cachedDraft;
+      if (base != null) {
+        subject = subject ?? base.subject;
+        body = body ?? base.body;
+        draftReplyToId = base.replyToId;
+      }
+      if (recipientIds === undefined) {
+        // OFW does not persist recipients on drafts (the server copy routinely
+        // reports []), so take any NON-EMPTY recipient set we have — server
+        // first, then cache — and otherwise require the caller to supply one.
+        // Defaulting to [] would "send" to nobody.
+        const source = [serverDraft ?? null, cachedDraft].find(
+          (s) => s !== null && s !== undefined && s.recipients.some((r) => r.userId !== 0),
+        );
+        if (source != null) {
+          recipientIds = [...new Set(source.recipients.map((r) => r.userId).filter((id) => id !== 0))];
+        }
       }
     }
     if (subject === undefined || body === undefined || recipientIds === undefined) {
-      if (draftLookupAttempted && !draftFound) {
-        throw new Error(
-          `draft ${draftRef} not found in local cache. Call ofw_sync_messages first, or supply subject/body/recipientIds explicitly.`,
-        );
-      }
       const missing = [
         subject === undefined ? 'subject' : null,
         body === undefined ? 'body' : null,
         recipientIds === undefined ? 'recipientIds' : null,
       ].filter((n): n is string => n !== null).join(', ');
-      throw new Error(
-        `ofw_send_message requires ${missing}. Pass it directly, or pass messageId to default missing fields from a cached draft.`,
-      );
+      const hint = draftRef === undefined
+        ? 'Pass them directly, or pass draftId to send an existing draft.'
+        : missing === 'recipientIds'
+          ? `Draft ${draftRef} carries no stored recipients — OurFamilyWizard does not persist recipients on drafts, so they must be supplied at send time. Get the co-parent's user id from ofw_get_profile and pass recipientIds.`
+          : `Draft ${draftRef}'s content was not readable from OurFamilyWizard or the local cache, so it cannot supply the missing fields. Pass them explicitly.`;
+      throw new Error(`ofw_send_message requires ${missing}. ${hint}`);
     }
 
     // Inherit the draft's replyToId when the caller didn't supply one. A
@@ -651,19 +694,66 @@ export function registerMessageTools(
     let persisted: MessageRow | null = null;
     let verifyNote: string | null = null;
     let sentDraftKey: string | null = null;
+    let threaded = false;
+    let threadNote: string | null = null;
     if (newId !== null) {
       verifyNote = verifyWriteLanded('message', { subject, body }, detail);
+
+      // Threading verdict, from OFW's own echo on the re-fetched sent record.
+      // `threaded` is positive evidence (replyToId/inReplyTo/showContext), and
+      // a total absence of the echo fields is "not echoed", NOT "dropped" — a
+      // warning the caller can see is false is a warning it learns to skip.
+      const echoed = threadedReplyTo(detail);
+      const echoReported = detail.replyToId !== undefined
+        || detail.inReplyTo !== undefined
+        || detail.showContext !== undefined;
+      if (resolvedReplyTo === null) {
+        threaded = reportsThreaded(detail);
+      } else if (reportsThreaded(detail)) {
+        threaded = true;
+        if (echoed !== null && echoed !== resolvedReplyTo) {
+          threadNote = `NOTE: the sent message threads to ${echoed}, not the requested ${resolvedReplyTo} — OurFamilyWizard re-targeted the reply within the thread.`;
+        }
+      } else if (!echoReported) {
+        threaded = true;
+      } else {
+        threaded = false;
+        threadNote = `WARNING: the sent message came back UNTHREADED — replyToId ${resolvedReplyTo} was posted but OurFamilyWizard reports no reply linkage on the sent record, so it went out as a new top-level conversation. Verify on ourfamilywizard.com.`;
+      }
+
+      // Recipient confirmation is part of "the send is confirmed" (it gates
+      // the draft delete below). Only a NON-EMPTY echo can disconfirm: an
+      // omitted or empty recipients array is "not echoed" (OFW routinely
+      // echoes [] the way it does on drafts), and crying wolf on it would
+      // retain the draft after every ordinary send.
+      const storedRecipients = mapRecipients(detail.recipients);
+      if (Array.isArray(detail.recipients) && detail.recipients.length > 0) {
+        const landed = new Set(storedRecipients.map((r) => r.userId));
+        const missingRecipients = recipientIds.filter((rid) => !landed.has(rid));
+        if (missingRecipients.length > 0) {
+          verifyNote = [
+            verifyNote,
+            `WARNING: the sent record does not list requested recipient id(s) ${missingRecipients.join(', ')}, so the send could not be fully confirmed. Verify on ourfamilywizard.com.`,
+          ].filter((n): n is string => n !== null).join('\n\n');
+        }
+      }
+
       persisted = {
         id: newId,
         folder: 'sent',
         subject: detail.subject ?? subject,
         fromUser: detail.from?.name ?? '',
         sentAt: detail.date?.dateTime ?? new Date().toISOString(),
-        recipients: mapRecipients(detail.recipients),
+        recipients: storedRecipients,
         body: detail.body ?? body,
         fetchedBodyAt: new Date().toISOString(),
-        replyToId: resolvedReplyTo,
-        chainRootId,
+        // Prefer OFW's own echo of where the reply landed; keep what was
+        // posted when OFW echoed nothing (sent rows feed findLatestReplyTip,
+        // and a null would break the chain for a message that IS threaded).
+        // A positively UNTHREADED send stores null — the chain link OFW says
+        // does not exist must not be invented.
+        replyToId: threaded ? echoed ?? resolvedReplyTo : null,
+        chainRootId: threaded ? chainRootId : null,
         listData: detail,
       };
       await cache.upsertMessage(persisted);
@@ -699,25 +789,63 @@ export function registerMessageTools(
       }
     }
 
-    // Only clean up the draft once the send is confirmed (the POST response
-    // carried an id). On the unconfirmed path the draft is the user's only
-    // copy of the message — keep it.
+    // Clean up the draft ONLY once the send is confirmed: OFW returned the new
+    // message id AND the re-fetched sent record raised no verification warning
+    // (subject/body landed, requested recipients listed). On any failure or
+    // ambiguity the draft is the user's only reliable copy — keep it and say
+    // why, never silently.
     let unconfirmedNote: string | null = null;
+    let draftDeleted = false;
+    let draftRetainedReason: string | null = null;
     if (newId === null) {
       const draftClause = draftRef !== undefined
         ? `Draft ${draftRef} was NOT deleted — check`
         : 'Check';
       unconfirmedNote = `WARNING: OFW's send response did not include a message id, so the send could not be confirmed. ${draftClause} ourfamilywizard.com to see whether the message went out before retrying.`;
+      if (draftRef !== undefined) {
+        draftRetainedReason = 'the send could not be confirmed (OFW returned no message id), so the draft is your only reliable copy of the message';
+      }
     } else if (draftRef !== undefined) {
-      await deleteOFWMessages(client, [draftRef]);
-      await cache.deleteDraft(draftRef);
+      if (verifyNote !== null) {
+        draftRetainedReason = 'the sent record could not be fully verified against what was posted (see WARNING above) — the draft is kept until you confirm the send on ourfamilywizard.com';
+      } else if (!deleteOnSuccess) {
+        draftRetainedReason = 'deleteDraftOnSuccess:false — kept by request';
+      } else {
+        try {
+          await deleteOFWMessages(client, [draftRef]);
+          await cache.deleteDraft(draftRef);
+          draftDeleted = true;
+        } catch (e) {
+          draftRetainedReason = `the send succeeded but the draft delete failed (${(e as Error).message}) — remove it with ofw_delete_draft once you have verified the sent message`;
+        }
+      }
     }
+    const retainNote = draftRef !== undefined && newId !== null && !draftDeleted
+      ? `NOTE: draft ${draftRef} was retained: ${draftRetainedReason}.`
+      : null;
 
+    // Leads with the stable identifiers (sentMessageId, draftKey) — the
+    // volatile ids and the full sent row follow.
     const responseObj = persisted === null
-      ? raw
-      : { ...persisted, ...(sentDraftKey !== null ? { draftKey: sentDraftKey, previousId: draftRef } : {}) };
+      ? (draftRef !== undefined
+        ? { sendConfirmed: false, draftDeleted: false, draftRetained: true, draftRetainedReason, raw }
+        : raw)
+      : {
+        sentMessageId: newId,
+        draftKey: sentDraftKey,
+        threaded,
+        ...(draftRef !== undefined
+          ? {
+            draftDeleted,
+            ...(draftDeleted ? {} : { draftRetained: true, draftRetainedReason }),
+            previousId: draftRef,
+          }
+          : {}),
+        ...persisted,
+      };
     const text = responseObj ? JSON.stringify(responseObj, null, 2) : 'Message sent successfully.';
-    const notes = [rewriteNote, verifyNote, unconfirmedNote].filter((n): n is string => n !== null).join('\n\n');
+    const notes = [guardNote, rewriteNote, verifyNote, threadNote, unconfirmedNote, retainNote]
+      .filter((n): n is string => n !== null).join('\n\n');
     return textResponse(notes ? `${notes}\n\n${text}` : text);
   });
 
@@ -732,8 +860,14 @@ export function registerMessageTools(
   // ofw_save_draft replaces via create-then-delete, so acting on a stale base
   // does not merge — it DESTROYS the server's version. Hence: refuse by
   // default, and never treat "no token supplied" as consent to overwrite.
+  // On ok:true, `server` carries the draft content the guard already read from
+  // OFW — the authoritative copy. ofw_send_message sends exactly this content,
+  // so "what goes out is what is on the server" costs no extra request. It is
+  // `undefined` (not null) when the guard proceeded WITHOUT reading the server
+  // (force:true over a failed freshness fetch); `null` means the server
+  // affirmatively reported the draft gone.
   type DraftGuardOutcome =
-    | { ok: true; note: string | null }
+    | { ok: true; note: string | null; server: DraftContent | null | undefined }
     | { ok: false; response: ReturnType<typeof jsonErrorResponse> };
 
   async function guardDestructiveDraftOp(input: {
@@ -766,7 +900,7 @@ export function registerMessageTools(
       // `.message`, which every Error carries.)
       const reason = (e as DraftFreshnessError).message;
       if (force) {
-        return { ok: true, note: `WARNING: force:true — proceeded with ${action} on draft ${draftId} even though its current state could not be read from OurFamilyWizard (${reason}). Any newer server-side version was destroyed and is NOT recoverable from this response.` };
+        return { ok: true, note: `WARNING: force:true — proceeded with ${action} on draft ${draftId} even though its current state could not be read from OurFamilyWizard (${reason}). Any newer server-side version was destroyed and is NOT recoverable from this response.`, server: undefined };
       }
       return {
         ok: false,
@@ -787,7 +921,7 @@ export function registerMessageTools(
       const note = verdict.metadataOnly
         ? `NOTE: draft ${draftId} was treated as current for this ${action}. Since you read it, OurFamilyWizard normalized connector-authored metadata (${verdict.changedFields.join(', ')}); the subject, body and recipients are unchanged, so this is not a conflict.`
         : null;
-      return { ok: true, note };
+      return { ok: true, note, server };
     }
 
     if (force) {
@@ -804,6 +938,7 @@ export function registerMessageTools(
           null,
           2,
         )}`,
+        server,
       };
     }
 
@@ -820,17 +955,32 @@ export function registerMessageTools(
   }
 
   server.registerTool('ofw_list_drafts', {
-    description: 'List draft messages from the local OurFamilyWizard cache. Returns an explicit `complete` boolean describing the RESULT SET: true means "these are ALL the drafts on OurFamilyWizard as of freshness.asOf" — check it before saying "you have N drafts". Each draft carries its `draftKey` (stable across the create-then-delete churn of editing) when one is known. An empty result from a cache that is not verified-fresh is REFUSED (result:"UNVERIFIED_EMPTY"); pass autoRefresh:true to sync and answer instead. For a live, one-call answer prefer ofw_status(includeDraftInventory:true).',
+    description: 'List draft messages, verified against OurFamilyWizard in ONE call: when the local drafts cache is not verified-fresh, a cheap drafts sync runs first by default (verify:true), so the answer is server-confirmed without a second call. Pass verify:false to answer purely from the cache (no OFW requests). Returns an explicit `complete` boolean describing the RESULT SET: true means "these are ALL the drafts on OurFamilyWizard as of freshness.asOf" — check it before saying "you have N drafts". Each draft carries its `draftKey` (stable across the create-then-delete churn of editing) when one is known. An empty result from a cache that is not verified-fresh is REFUSED (result:"UNVERIFIED_EMPTY"); pass autoRefresh:true to sync and answer instead.',
     annotations: { readOnlyHint: false },
     inputSchema: {
       page: z.number().int().min(1).describe('Page number (default 1)').optional(),
       size: z.number().int().min(1).describe('Drafts per page (default 50)').optional(),
+      verify: z.boolean().describe('Default true: when the drafts cache is not verified-fresh, run a drafts sync first (cheap — one list page plus one detail per draft) so the response is server-confirmed in one call. Set false to serve straight from the local cache with no OFW requests.').optional(),
       autoRefresh: z.boolean().describe(AUTO_REFRESH_DESC).optional(),
     },
   }, async (args) => {
     const page = args.page ?? 1;
     const size = args.size ?? 50;
     const cache = cacheProvider();
+
+    // Auto-verify (default on): drafts change rarely but INVISIBLY — a web-app
+    // edit bumps no timestamp — so an aged cache used to answer "unverified,
+    // don't state a count" and force a second call. The drafts walk is cheap
+    // enough to just run it. A walk the budget pauses leaves the cache
+    // unverified, and the response says so honestly below.
+    let autoVerified = false;
+    if (args.verify ?? true) {
+      const { cacheStatus } = await draftsFreshness(cache);
+      if (cacheStatus !== 'fresh') {
+        await syncAll(client, { folders: ['drafts'], maxRequests: getSyncMaxRequests() }, cache);
+        autoVerified = true;
+      }
+    }
 
     const { value, refreshed, unverifiedEmpty } = await guardedCacheRead({
       client,
@@ -893,11 +1043,14 @@ export function registerMessageTools(
     if (refreshed) {
       payload.autoRefreshed = true;
     }
+    if (autoVerified) {
+      payload.autoVerified = true;
+    }
     return jsonResponse(payload);
   });
 
   if (allowDrafts) server.registerTool('ofw_save_draft', {
-    description: 'Save a message as a draft in OurFamilyWizard. Recipients are optional. Pass messageId to replace an existing draft — note that under the hood this creates a NEW draft and deletes the old one (OFW\'s update-in-place endpoint silently no-ops while echoing the posted body, so we don\'t use it); the response.id will be the NEW id, not the messageId you passed, and the change is documented in a transparency NOTE in the response that also lists which fields (subject/body/recipients/replyToId/attachments) were carried over. If replyToId is provided, the cache may rewrite it to the latest reply in the thread (note included in response). Attach files by passing their fileIds (from ofw_upload_attachment) in myFileIDs. After saving, the tool re-fetches the draft from OFW to populate the local cache from authoritative server state, and the returned `revision` reflects that authoritative state (so it will match on your next edit). FIELD PRESERVATION: the response echoes the effective threading (replyToId/inReplyTo) and, whenever OFW did not carry over a requested replyToId, recipient or attachment, a `warnings[]` entry naming what was dropped — never a silent null. SAFETY: because replacing DESTROYS the old draft rather than merging, passing messageId first re-reads that draft from OFW and REFUSES the write if its subject/body/recipients changed since you read it (drafts edited in the OFW web app do not bump any timestamp, so the local cache can be silently behind). A pure replyToId normalization by OFW is NOT treated as a conflict. The refusal returns the current server body under serverBody — merge your edit into it and retry with expectedRevision.',
+    description: 'Save a message as a draft in OurFamilyWizard. RECIPIENTS: OurFamilyWizard does NOT persist recipients on drafts — recipientIds are accepted but the saved draft comes back with none (documented OFW behavior, noted once in the response, not warned about; supply recipientIds at send time instead). IDENTITY: the response leads with `draftKey`, the stable identity that survives editing — key off it, because the `id` changes on EVERY edit (replacing a draft creates a NEW draft and deletes the old one; OFW\'s update-in-place endpoint silently no-ops, so we never use it). Pass messageId to replace an existing draft; the response.id will be the NEW id, and a transparency NOTE documents the swap and which fields were carried over. THREADING: if replyToId is provided, the cache may rewrite it to the latest reply in the thread (note included). The threading verdict is read from OFW\'s full echo (replyToId/inReplyTo/showContext) — a warning appears ONLY when the reply linkage was genuinely dropped or re-targeted, and the response\'s top-level replyToId/inReplyTo always agree with its listData. Attach files via myFileIDs (from ofw_upload_attachment). After saving, the tool re-fetches the draft from OFW, and the returned `revision` reflects that authoritative state (so it will match on your next edit). SAFETY: because replacing DESTROYS the old draft rather than merging, passing messageId first re-reads that draft from OFW and REFUSES the write if its subject/body/recipients changed since you read it (drafts edited in the OFW web app do not bump any timestamp, so the local cache can be silently behind). A pure replyToId normalization by OFW is NOT treated as a conflict. The refusal returns the current server body under serverBody — merge your edit into it and retry with expectedRevision.',
     annotations: { readOnlyHint: false },
     inputSchema: {
       subject: z.string().describe('Message subject'),
@@ -961,6 +1114,7 @@ export function registerMessageTools(
     let persisted: DraftRow | null = null;
     let replaceNote: string | null = null;
     let verifyNote: string | null = null;
+    let recipientsNote: string | null = null;
     let newRevision: string | null = null;
     let draftKey: string | null = null;
     // Fields accepted on the write that the saved draft must carry — or their
@@ -974,9 +1128,12 @@ export function registerMessageTools(
       // normalizes/drops threading after a save, and masking that with our own
       // intent (the old `detail.replyToId ?? resolvedReplyTo`) both returned a
       // revision that was stale on arrival (Defect 1) and hid a dropped reply
-      // link (Defect 3). `?? null` keeps a genuinely-echoed value and reflects a
-      // null/absent one honestly.
-      const effectiveReplyTo = detail.replyToId ?? null;
+      // link (Defect 3). The echo is read via threadedReplyTo because OFW
+      // reports the target as `inReplyTo` on payloads where `replyToId` is
+      // null — reading only `replyToId` fired a false "did not thread" warning
+      // on nearly every threaded save while the same response's listData
+      // showed inReplyTo populated.
+      const effectiveReplyTo = threadedReplyTo(detail);
       const storedRecipients = mapRecipients(detail.recipients);
       persisted = {
         id: newId,
@@ -1021,28 +1178,37 @@ export function registerMessageTools(
 
       // Audit every field the caller supplied against what actually landed, so a
       // silent normalization becomes a visible warning rather than a surprise.
-      if (resolvedReplyTo !== null && effectiveReplyTo !== resolvedReplyTo) {
+      // The verdict comes from the FULL threading echo (replyToId, inReplyTo,
+      // showContext) — a draft reporting inReplyTo (or showContext:true) IS
+      // threaded, and warning about it anyway is the false positive that
+      // trained callers to skim warnings. Genuine drops still warn.
+      if (resolvedReplyTo !== null && effectiveReplyTo !== resolvedReplyTo && !reportsThreaded(detail)) {
         const rewrittenFrom = requestedReplyTo !== resolvedReplyTo ? ` (rewritten from ${requestedReplyTo})` : '';
-        // Two different outcomes reach this branch, and they need different
-        // warnings. OFW either DROPPED the link (null) or RE-TARGETED it to
-        // another message in the thread. Describing both as "did not thread
-        // this draft (its inReplyTo/showContext will be empty)" contradicted
-        // the non-null inReplyTo the same response echoes — and a warning the
-        // caller can see is false is a warning it learns to skip.
-        const outcome = effectiveReplyTo === null
-          ? 'OurFamilyWizard did not thread this draft (its inReplyTo/showContext will be empty). The subject and body were saved; only the reply linkage was dropped.'
-          : `OurFamilyWizard re-targeted the reply to message ${effectiveReplyTo} instead. The draft IS threaded — to that message, not the one requested — and the inReplyTo in this response reflects where it actually landed.`;
         warnings.push(
-          `replyToId was requested as ${resolvedReplyTo}${rewrittenFrom} but the saved draft came back with replyToId ${effectiveReplyTo === null ? 'null' : effectiveReplyTo} — ${outcome} If threading matters, verify on ourfamilywizard.com.`,
+          `replyToId was requested as ${resolvedReplyTo}${rewrittenFrom} but the saved draft came back with replyToId null — OurFamilyWizard did not thread this draft (its inReplyTo/showContext are empty). The subject and body were saved; only the reply linkage was dropped. If threading matters, verify on ourfamilywizard.com.`,
+        );
+      } else if (resolvedReplyTo !== null && effectiveReplyTo !== null && effectiveReplyTo !== resolvedReplyTo) {
+        // OFW RE-TARGETED the link to another message in the thread — the
+        // draft IS threaded, just not to the requested id, and the inReplyTo
+        // in this response reflects where it actually landed.
+        const rewrittenFrom = requestedReplyTo !== resolvedReplyTo ? ` (rewritten from ${requestedReplyTo})` : '';
+        warnings.push(
+          `replyToId was requested as ${resolvedReplyTo}${rewrittenFrom} but the saved draft came back with replyToId ${effectiveReplyTo} — OurFamilyWizard re-targeted the reply to message ${effectiveReplyTo} instead. The draft IS threaded — to that message, not the one requested. If threading matters, verify on ourfamilywizard.com.`,
         );
       }
-      // Only warn on recipients/attachments when the detail actually reported
-      // them — an omitted array is "not echoed", not "dropped", and crying wolf
-      // there would desensitize the caller to the real drops.
-      if (args.recipientIds !== undefined && Array.isArray(detail.recipients)) {
+      // Recipients: OFW does NOT persist recipients on drafts — the saved copy
+      // routinely comes back with [] no matter what was posted. That is
+      // documented OFW behavior (and doubles as an accidental-send guard), so
+      // it gets a one-line NOTE, not a per-call WARNING that cries wolf on
+      // every save. A PARTIAL echo (some stored, but not what was asked) is a
+      // genuine drop and still warns. Both only when the detail actually
+      // reported recipients — an omitted array is "not echoed", not "dropped".
+      if (args.recipientIds !== undefined && args.recipientIds.length > 0 && Array.isArray(detail.recipients)) {
         const requested = [...new Set(args.recipientIds)].sort((a, b) => a - b);
         const stored = [...new Set(storedRecipients.map((r) => r.userId))].sort((a, b) => a - b);
-        if (requested.join(',') !== stored.join(',')) {
+        if (stored.length === 0) {
+          recipientsNote = 'NOTE: OurFamilyWizard does not persist recipients on drafts — the recipientIds you passed were accepted but are not stored on the draft (documented OFW behavior, not an error; it also means a draft cannot be sent by accident). Supply recipientIds when you send: ofw_send_message requires them when the draft carries none.';
+        } else if (requested.join(',') !== stored.join(',')) {
           warnings.push(
             `recipientIds were requested as [${requested.join(', ')}] but the saved draft has [${stored.join(', ')}]. Verify the recipients on ourfamilywizard.com.`,
           );
@@ -1064,7 +1230,7 @@ export function registerMessageTools(
         try {
           await deleteOFWMessages(client, [args.messageId]);
           await cache.deleteDraft(args.messageId);
-          replaceNote = `NOTE: ofw_save_draft replaced draft ${args.messageId} via create-then-delete. The new draft id is ${newId}; the old draft has been deleted. (OFW's update-in-place endpoint silently no-ops on subsequent updates, so we never use it. If you cached the old id anywhere, replace it with the new one.) Fields carried over to the new draft: subject, body, recipients (${persisted.recipients.length}), replyToId (${persisted.replyToId === null ? 'none' : persisted.replyToId}), attachments (${myFileIDs.length}).${warnings.length > 0 ? ' See warnings above for any field OurFamilyWizard did not carry over.' : ''}`;
+          replaceNote = `NOTE: ofw_save_draft replaced draft ${args.messageId} via create-then-delete. The new draft id is ${newId}; the old draft has been deleted. The draftKey is UNCHANGED — key off it rather than the volatile id, which changes on every edit. (OFW's update-in-place endpoint silently no-ops on subsequent updates, so we never use it.) Fields carried over to the new draft: subject, body, recipients (${persisted.recipients.length}), replyToId (${persisted.replyToId === null ? 'none' : persisted.replyToId}), attachments (${myFileIDs.length}).${warnings.length > 0 ? ' See warnings above for any field OurFamilyWizard did not carry over.' : ''}`;
         } catch (e) {
           // Partial-failure safety: the new draft is already created and
           // cached, so BOTH drafts now exist. That is the correct end state —
@@ -1076,28 +1242,29 @@ export function registerMessageTools(
 
     // The draft was just re-fetched from OFW by postMessageAndRefetch, so this
     // one row IS server-confirmed regardless of the drafts folder's overall
-    // cache freshness. `inReplyTo` echoes the effective threading alongside the
-    // volatile `id`, and `warnings` names any requested field that did not land.
+    // cache freshness. The response LEADS with `draftKey` (stable across the
+    // create-then-delete id churn of editing — key off it, not `id`) and the
+    // `revision` concurrency token; the volatile `id` is carried further down
+    // as an implementation detail. `inReplyTo` echoes the effective threading,
+    // and `warnings` names any requested field that did not land.
     const responseObj = persisted !== null
       ? {
+        draftKey,
+        revision: newRevision,
         ...persisted,
         inReplyTo: persisted.replyToId,
-        revision: newRevision,
-        // The id above is volatile — it changes on every edit. `draftKey` is
-        // not: pass it to ofw_status to resolve the chain's CURRENT id, or to
-        // find out that the draft was sent and when.
-        draftKey,
         previousId: args.messageId ?? null,
         cacheStatus: 'fresh',
         serverConfirmed: true,
         ...(warnings.length > 0 ? { warnings } : {}),
+        ...(recipientsNote !== null ? { recipientsNote } : {}),
       }
       : raw;
     const text = responseObj ? JSON.stringify(responseObj, null, 2) : 'Draft saved.';
     const warnNote = warnings.length > 0
       ? `WARNING: ${warnings.join('\n\n')}`
       : null;
-    const notes = [forceNote, rewriteNote, verifyNote, warnNote, replaceNote]
+    const notes = [forceNote, rewriteNote, verifyNote, warnNote, recipientsNote, replaceNote]
       .filter((n): n is string => n !== null).join('\n\n');
     return textResponse(notes ? `${notes}\n\n${text}` : text);
   });
