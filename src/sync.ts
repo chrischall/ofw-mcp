@@ -4,7 +4,7 @@ import type {
   MessageRow, DraftRow, FolderName,
 } from './cache/store.js';
 import { z } from 'zod';
-import { ApiRecipientSchema, hasRealView, mapRecipients } from './tools/_shared.js';
+import { ApiRecipientSchema, hasRealView, mapRecipients, threadedReplyTo } from './tools/_shared.js';
 import { parseLenient } from '@chrischall/mcp-utils';
 
 // Each OFW message detail returns `files: [fileId, ...]`. We fetch the metadata
@@ -493,7 +493,12 @@ const DraftListItemSchema = z.looseObject({
   id: z.number(),
   subject: z.string(),
   date: z.looseObject({ dateTime: z.string() }),
+  // Both spellings of the threading echo — OFW reports the reply target as
+  // `inReplyTo` (with showContext) on list payloads where `replyToId` is null.
+  // The cached row must derive the SAME value ofw_save_draft derived from the
+  // detail, or the content revision drifts between a save and the next sync.
   replyToId: z.number().nullable().optional(),
+  inReplyTo: z.number().nullable().optional(),
   recipients: z.array(ApiRecipientSchema).optional(),
 });
 type DraftListItem = z.infer<typeof DraftListItemSchema>;
@@ -631,7 +636,7 @@ export async function syncDrafts(
       subject: detail.subject ?? item.subject ?? '(no subject)',
       body: detail.body ?? '',
       recipients: mapRecipients(item.recipients),
-      replyToId: item.replyToId ?? null,
+      replyToId: threadedReplyTo(item),
       modifiedAt: item.date?.dateTime ?? new Date().toISOString(),
       listData: item,
     });

@@ -81,6 +81,33 @@ export function hasRealView(recipients: { viewedAt: string | null }[]): boolean 
   return recipients.some((r) => r.viewedAt !== null && !r.viewedAt.startsWith('1970-01-01'));
 }
 
+/**
+ * The threading echo OFW puts on a message/draft detail payload. OFW is
+ * inconsistent about WHERE it reports the reply target: some payloads carry a
+ * top-level `replyToId`, others report the same link as `inReplyTo` (with
+ * `showContext: true`) while `replyToId` is null/absent — observed live on
+ * nearly every threaded draft save. Reading only `replyToId` manufactured a
+ * false "OurFamilyWizard did not thread this draft" warning on drafts that WERE
+ * threaded, which trains callers to skim past warnings. Every reader of a
+ * detail/list payload's threading must go through {@link threadedReplyTo} so
+ * the derived value (and the revision hashed from it) is the same everywhere.
+ */
+export interface ThreadingEcho {
+  replyToId?: number | null;
+  inReplyTo?: number | null;
+  showContext?: boolean;
+}
+
+/** The reply target OFW actually reports, whichever field it chose to put it in. */
+export function threadedReplyTo(detail: ThreadingEcho): number | null {
+  return detail.replyToId ?? detail.inReplyTo ?? null;
+}
+
+/** True when the payload positively reports the message as threaded. */
+export function reportsThreaded(detail: ThreadingEcho): boolean {
+  return threadedReplyTo(detail) !== null || detail.showContext === true;
+}
+
 // Just the read-relevant slice of a MessageRow — so deriveRead/withReadState can
 // be unit-tested and called without constructing a whole row.
 type ReadStateInput = Pick<MessageRow, 'folder' | 'recipients' | 'fetchedBodyAt' | 'listData'>;

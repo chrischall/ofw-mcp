@@ -49,13 +49,29 @@ describe('classifyState', () => {
     expect(classifyState(null, MAP)).toBe('deleted');
   });
 
-  it('refuses to guess: an unreported or unmappable folder is "unknown"', () => {
-    expect(classifyState(snapshot({ folderId: null }), MAP)).toBe('unknown');
-    expect(classifyState(snapshot({ folderId: '77' }), MAP)).toBe('unknown');
+  it('falls back to the folder NAME OFW itself reported when the id cannot be mapped', () => {
+    // The observed failure: every draft probe answered "unknown" while the
+    // note echoed `it reported "Drafts"` — OFW had answered the question and
+    // the mapper refused to read it. The name is OFW's own, so it carries the
+    // same authority as the id.
+    expect(classifyState(snapshot({ folderId: null, folderName: 'Drafts' }), MAP)).toBe('draft');
+    expect(classifyState(snapshot({ folderId: '77', folderName: 'Drafts' }), MAP)).toBe('draft');
+    expect(classifyState(snapshot({ folderId: null, folderName: 'Sent' }), MAP)).toBe('sent');
+    expect(classifyState(snapshot({ folderId: null, folderName: 'Sent Messages' }), MAP)).toBe('sent');
+    expect(classifyState(snapshot({ folderId: null, folderName: 'Inbox' }), MAP)).toBe('received');
+    // Case-insensitive: the vocabulary is OFW's, the casing is presentation.
+    expect(classifyState(snapshot({ folderId: null, folderName: 'DRAFTS' }), MAP)).toBe('draft');
+    // The id map stays primary — a mapped id wins over a contradicting name.
+    expect(classifyState(snapshot({ folderId: '2', folderName: 'Drafts' }), MAP)).toBe('sent');
+  });
+
+  it('refuses to guess: a folder unmappable by BOTH id and name is "unknown"', () => {
+    expect(classifyState(snapshot({ folderId: null, folderName: null }), MAP)).toBe('unknown');
+    expect(classifyState(snapshot({ folderId: '77', folderName: 'Archive' }), MAP)).toBe('unknown');
     // A map with holes must not accidentally match on a null.
-    expect(classifyState(snapshot({ folderId: '3' }), { inbox: null, sent: null, drafts: null })).toBe('unknown');
-    expect(classifyState(snapshot({ folderId: '2' }), { inbox: null, sent: null, drafts: '3' })).toBe('unknown');
-    expect(classifyState(snapshot({ folderId: '1' }), { inbox: null, sent: '2', drafts: '3' })).toBe('unknown');
+    expect(classifyState(snapshot({ folderId: '3', folderName: null }), { inbox: null, sent: null, drafts: null })).toBe('unknown');
+    expect(classifyState(snapshot({ folderId: '2', folderName: null }), { inbox: null, sent: null, drafts: '3' })).toBe('unknown');
+    expect(classifyState(snapshot({ folderId: '1', folderName: null }), { inbox: null, sent: '2', drafts: '3' })).toBe('unknown');
   });
 });
 
@@ -328,6 +344,39 @@ describe('probeIds', () => {
     // Not `true` — the content agreeing proves nothing about whether it is
     // still a draft, which is the question being asked.
     expect(items[0].inSync).toBeNull();
+  });
+
+  it('maps a draft by OFW\'s folder NAME when the id is unmappable, and inSync is TRUE on matching revisions', async () => {
+    // The observed defect: OFW reported folder {id: <unmapped>, name: "Drafts"}
+    // and every probe answered state:"unknown" + inSync:null for a draft that
+    // was sitting right there. The name maps; matching content is in sync.
+    seedFolderIds();
+    await cache.upsertDraft(draftRow);
+    const client = new OFWClient();
+    vi.spyOn(client, 'request').mockResolvedValue({
+      subject: 'S', body: 'B', replyToId: null, recipients: [],
+      folder: { id: 77, name: 'Drafts' },
+    });
+
+    const { items } = await probeIds(client, cache, [500], { allowMarkRead: false });
+    expect(items[0]).toMatchObject({ id: 500, state: 'draft', inSync: true, folder: 'Drafts' });
+    expect(items[0].note).toBeUndefined();
+  });
+
+  it('reads the reply target from inReplyTo when the snapshot\'s replyToId is null', async () => {
+    // Same draft, but OFW echoes the threading as inReplyTo — the snapshot
+    // must derive the same replyToId the cache stored, or the revisions
+    // disagree about an identical draft.
+    seedFolderIds();
+    await cache.upsertDraft({ ...draftRow, replyToId: 321 });
+    const client = new OFWClient();
+    vi.spyOn(client, 'request').mockResolvedValue({
+      subject: 'S', body: 'B', replyToId: null, inReplyTo: 321, recipients: [],
+      folder: { id: 3, name: 'Drafts' },
+    });
+
+    const { items } = await probeIds(client, cache, [500], { allowMarkRead: false });
+    expect(items[0]).toMatchObject({ id: 500, state: 'draft', inSync: true });
   });
 
   it('names the folder OFW reported when it cannot be mapped', async () => {

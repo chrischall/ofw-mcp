@@ -74,6 +74,19 @@ describe('fetchServerDraft', () => {
     });
   });
 
+  it('derives the reply target from inReplyTo when replyToId is null (both spellings of the threading echo)', async () => {
+    // OFW reports the reply target as replyToId on some payloads and as
+    // inReplyTo on others. The snapshot must derive ONE value from whichever
+    // is present, so the revision hashed here matches the one ofw_save_draft
+    // computed from the same server state.
+    const c = new OFWClient();
+    vi.spyOn(c, 'request').mockResolvedValue({
+      subject: 'Pickup', body: 'server body',
+      replyToId: null, inReplyTo: 538672434, recipients: [],
+    });
+    await expect(fetchServerDraft(c, 5)).resolves.toMatchObject({ replyToId: 538672434 });
+  });
+
   it('does not hard-fail on either spelling of folder.id (strict boundary)', async () => {
     // This schema is parsed strict — a throw here ABORTS ofw_save_draft /
     // ofw_delete_draft. OFW types this id as a string on the folders listing
