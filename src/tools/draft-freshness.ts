@@ -22,6 +22,16 @@ export interface DraftContent {
   body: string;
   recipients: Recipient[];
   replyToId: number | null;
+  /**
+   * Attachment fileIds, when the server detail reported them. Carried so
+   * ofw_send_message(draftId) sends the server draft WITH its attachments —
+   * without this the send silently dropped them, while claiming to send the
+   * server's version. Deliberately NOT part of the revision hash or the
+   * freshness diff: the concurrency token has always covered
+   * subject/body/recipients/replyToId, and widening it would invalidate every
+   * token already in callers' hands.
+   */
+  files?: number[];
 }
 
 /** Thrown when the freshness check itself could not be completed. */
@@ -72,6 +82,9 @@ const ServerDraftSchema = z.looseObject({
   replyToId: z.number().nullable().optional(),
   inReplyTo: z.number().nullable().optional(),
   recipients: z.array(ApiRecipientSchema).optional(),
+  // Attachment fileIds — read so send-by-draft carries the draft's
+  // attachments onto the sent message (see DraftContent.files).
+  files: z.array(z.number()).optional(),
   // Read for the LIFECYCLE answer (see tools/lifecycle.ts): which folder OFW
   // itself says this id lives in right now. `existsOnServer` alone cannot
   // distinguish "still a draft" from "was sent" — a sent draft still exists.
@@ -151,6 +164,7 @@ export async function fetchMessageSnapshot(client: OFWClient, id: number): Promi
       body: detail.body ?? '',
       replyToId: threadedReplyTo(detail),
       recipients: mapRecipients(detail.recipients),
+      ...(detail.files !== undefined ? { files: detail.files } : {}),
     },
     folderId: detail.folder?.id === undefined ? null : String(detail.folder.id),
     folderName: detail.folder?.name ?? null,

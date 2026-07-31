@@ -68,6 +68,10 @@ describe('classifyState', () => {
   it('refuses to guess: a folder unmappable by BOTH id and name is "unknown"', () => {
     expect(classifyState(snapshot({ folderId: null, folderName: null }), MAP)).toBe('unknown');
     expect(classifyState(snapshot({ folderId: '77', folderName: 'Archive' }), MAP)).toBe('unknown');
+    // Object.prototype members must not leak through the name lookup — a
+    // folder named "constructor" is unmappable, not a Function.
+    expect(classifyState(snapshot({ folderId: null, folderName: 'constructor' }), MAP)).toBe('unknown');
+    expect(classifyState(snapshot({ folderId: null, folderName: 'toString' }), MAP)).toBe('unknown');
     // A map with holes must not accidentally match on a null.
     expect(classifyState(snapshot({ folderId: '3', folderName: null }), { inbox: null, sent: null, drafts: null })).toBe('unknown');
     expect(classifyState(snapshot({ folderId: '2', folderName: null }), { inbox: null, sent: null, drafts: '3' })).toBe('unknown');
