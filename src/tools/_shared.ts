@@ -108,6 +108,23 @@ export function reportsThreaded(detail: ThreadingEcho): boolean {
   return threadedReplyTo(detail) !== null || detail.showContext === true;
 }
 
+/**
+ * True when the payload POSITIVELY reports the message as unthreaded — the
+ * evidence bar a "reply linkage was dropped" warning must clear.
+ *
+ * Only `inReplyTo` and `showContext` count as evidence, because those are the
+ * fields OFW actually signals threading with. A present-but-null `replyToId`
+ * is NOT evidence: OFW routinely emits `replyToId: null` on items that ARE
+ * threaded (their linkage lives in `inReplyTo`), so treating it as a
+ * disconfirmation manufactures a false UNTHREADED warning on exactly OFW's
+ * normal shape. Total absence of all three fields is "not echoed", never
+ * "dropped".
+ */
+export function reportsUnthreaded(detail: ThreadingEcho): boolean {
+  if (reportsThreaded(detail)) return false;
+  return detail.inReplyTo !== undefined || detail.showContext !== undefined;
+}
+
 // Just the read-relevant slice of a MessageRow — so deriveRead/withReadState can
 // be unit-tested and called without constructing a whole row.
 type ReadStateInput = Pick<MessageRow, 'folder' | 'recipients' | 'fetchedBodyAt' | 'listData'>;

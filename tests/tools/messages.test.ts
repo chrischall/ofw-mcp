@@ -1643,9 +1643,10 @@ describe('ofw_save_draft — threading & field preservation (Defects 1 & 3)', ()
     const client = new OFWClient();
     vi.spyOn(client, 'request')
       .mockResolvedValueOnce({ entityId: 800 })
-      .mockResolvedValueOnce({                                        // OFW came back with replyToId: null
+      .mockResolvedValueOnce({                                        // OFW positively reports NO reply linkage
         id: 800, subject: 'Re: pickup', body: 'reply',
-        date: { dateTime: '2026-07-20T00:00:00Z' }, replyToId: null,
+        date: { dateTime: '2026-07-20T00:00:00Z' },
+        replyToId: null, inReplyTo: null, showContext: false,
       });
     setup(client);
 
@@ -1776,7 +1777,8 @@ describe('ofw_save_draft — threading & field preservation (Defects 1 & 3)', ()
       .mockResolvedValueOnce({ entityId: 830 })
       .mockResolvedValueOnce({
         id: 830, subject: 'Re: Original', body: 'reply',
-        date: { dateTime: '2026-07-20T00:00:00Z' }, replyToId: null,
+        date: { dateTime: '2026-07-20T00:00:00Z' },
+        replyToId: null, inReplyTo: null, showContext: false,
       });
     setup(client);
 
@@ -1852,7 +1854,8 @@ describe('ofw_save_draft — threading & field preservation (Defects 1 & 3)', ()
       .mockResolvedValueOnce({ entityId: 851 })
       .mockResolvedValueOnce({
         id: 851, subject: 'S', body: 'B',
-        date: { dateTime: '2026-07-20T00:00:00Z' }, replyToId: null,   // OFW dropped the reply link
+        date: { dateTime: '2026-07-20T00:00:00Z' },
+        replyToId: null, inReplyTo: null, showContext: false,          // OFW positively dropped the reply link
       })
       .mockResolvedValueOnce({});                                       // DELETE old 850
     setup(client);
@@ -5609,5 +5612,200 @@ describe('ofw_save_draft — draft recipients are a documented NOTE, not a warni
 
     expect(text).not.toContain('WARNING');
     expect(trailingJson(text).recipientsNote).toBeUndefined();
+  });
+});
+
+describe('auto-review follow-ups for the consolidated fixes (issue #207)', () => {
+  const trailingJson = (text: string): Record<string, unknown> =>
+    JSON.parse(text.slice(text.indexOf('{')));
+
+  it('send: a bare replyToId:null echo is NOT evidence of a drop — threaded, no warning, chain preserved', async () => {
+    // OFW routinely emits replyToId:null on items that ARE threaded (the
+    // linkage lives in inReplyTo, which this payload simply omits). Treating
+    // it as disconfirmation produced a false UNTHREADED warning and nulled
+    // the cached chain link, dropping the message out of findLatestReplyTip.
+    upsertDraft({
+      id: 310, subject: 'S', body: 'B', recipients: [], replyToId: 100,
+      modifiedAt: '2026-07-29T12:00:00Z', listData: {},
+    });
+    upsertMessage({
+      id: 100, folder: 'inbox', subject: 'Original', fromUser: 'Alice',
+      sentAt: '2026-05-01T00:00:00Z', recipients: [], body: 'orig',
+      fetchedBodyAt: '2026-05-01T00:01:00Z', replyToId: null, chainRootId: null, listData: {},
+    });
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce({ subject: 'S', body: 'B', recipients: [], replyToId: 100, folder: { id: '3', name: 'Drafts' } })
+      .mockResolvedValueOnce({ entityId: 920 })
+      .mockResolvedValueOnce({
+        id: 920, subject: 'S', body: 'B',
+        date: { dateTime: '2026-07-29T13:00:00Z' }, from: { name: 'Me' }, recipients: [],
+        replyToId: null,                                    // present-but-null, nothing else
+      })
+      .mockResolvedValueOnce({});
+    setup(client);
+
+    const text = (await handlers.get('ofw_send_message')!({
+      draftId: 310, recipientIds: [7],
+    })).content[0].text;
+
+    expect(text).not.toContain('UNTHREADED');
+    expect(text).not.toContain('WARNING');
+    const parsed = trailingJson(text);
+    expect(parsed.threaded).toBe(true);
+    expect(parsed.draftDeleted).toBe(true);
+    // The chain link survives for findLatestReplyTip.
+    expect(getMessage(920)?.replyToId).toBe(100);
+    expect(getMessage(920)?.chainRootId).toBe(100);
+  });
+
+  it('save: a bare replyToId:null echo does not warn either — same evidence rule as send', async () => {
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce({ entityId: 921 })
+      .mockResolvedValueOnce({
+        id: 921, subject: 'Re: pickup', body: 'reply',
+        date: { dateTime: '2026-07-20T00:00:00Z' }, replyToId: null,
+      });
+    setup(client);
+
+    const result = await handlers.get('ofw_save_draft')!({
+      subject: 'Re: pickup', body: 'reply', replyToId: 100,
+    });
+
+    expect(result.content[0].text).not.toMatch(/WARNING/);
+    expect(result.content[0].text).not.toMatch(/did not thread/);
+    const parsed = trailingJson(result.content[0].text);
+    expect(parsed.warnings).toBeUndefined();
+    // The stored value is still the server echo (null), never masked intent —
+    // the revision must hash what the next sync reads.
+    expect(parsed.replyToId).toBeNull();
+  });
+
+  it('save: a detail omitting EVERY echo field is "not echoed", never "dropped"', async () => {
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce({ entityId: 922 })
+      .mockResolvedValueOnce({
+        id: 922, subject: 'Re: pickup', body: 'reply',
+        date: { dateTime: '2026-07-20T00:00:00Z' },
+      });
+    setup(client);
+
+    const result = await handlers.get('ofw_save_draft')!({
+      subject: 'Re: pickup', body: 'reply', replyToId: 100,
+    });
+
+    expect(result.content[0].text).not.toMatch(/did not thread/);
+    expect(trailingJson(result.content[0].text).warnings).toBeUndefined();
+  });
+
+  it('list_drafts: a budget-paused auto-verify does NOT claim autoVerified', async () => {
+    upsertDraft({
+      id: 5, subject: 'D', body: 'b', recipients: [], replyToId: null,
+      modifiedAt: '2026-05-04T12:00:00Z', listData: {},
+    });
+    // A budget of 1 is spent entirely on the folder resolve; the drafts walk
+    // defers, so the cache is still unverified after the "verification".
+    process.env.OFW_SYNC_MAX_REQUESTS = '1';
+    try {
+      const client = new OFWClient();
+      vi.spyOn(client, 'request').mockResolvedValue({
+        systemFolders: [
+          { id: '1', folderType: 'INBOX' },
+          { id: '2', folderType: 'SENT_MESSAGES' },
+          { id: '3', folderType: 'DRAFTS' },
+        ],
+      });
+      const localHandlers = setupWithClient(client);
+
+      const parsed = JSON.parse((await localHandlers.get('ofw_list_drafts')!({})).content[0].text);
+      expect(parsed.autoVerified).toBeUndefined();
+      expect(parsed.drafts[0].serverConfirmed).toBe(false);
+      expect(parsed.complete).toBe(false);
+    } finally {
+      delete process.env.OFW_SYNC_MAX_REQUESTS;
+    }
+  });
+
+  it('list_drafts: a failed auto-verify degrades to the labelled cache answer, not a hard error', async () => {
+    upsertDraft({
+      id: 5, subject: 'D', body: 'b', recipients: [], replyToId: null,
+      modifiedAt: '2026-05-04T12:00:00Z', listData: {},
+    });
+    const client = new OFWClient();
+    vi.spyOn(client, 'request').mockRejectedValue(new Error('OFW API error: 503 down'));
+    setup(client);
+
+    const result = await handlers.get('ofw_list_drafts')!({});
+    expect(result.isError).toBeUndefined();
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.drafts).toHaveLength(1);
+    expect(parsed.verifyNote).toMatch(/could not reach OurFamilyWizard.*503/s);
+    expect(parsed.drafts[0].serverConfirmed).toBe(false);
+  });
+
+  it('list_drafts: a failed auto-verify over an EMPTY cache still refuses, with the failure named', async () => {
+    const client = new OFWClient();
+    vi.spyOn(client, 'request').mockRejectedValue(new Error('OFW API error: 503 down'));
+    setup(client);
+
+    const result = await handlers.get('ofw_list_drafts')!({});
+    expect(result.isError).toBe(true);
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.result).toBe('UNVERIFIED_EMPTY');
+    expect(parsed.verifyNote).toMatch(/could not reach OurFamilyWizard/);
+  });
+
+  it('send-by-draft carries the SERVER draft\'s attachments onto the sent message', async () => {
+    upsertDraft({
+      id: 320, subject: 'S', body: 'B', recipients: [], replyToId: null,
+      modifiedAt: '2026-07-29T12:00:00Z', listData: {},
+    });
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request')
+      .mockResolvedValueOnce({
+        subject: 'S', body: 'B', recipients: [], replyToId: null,
+        folder: { id: '3', name: 'Drafts' }, files: [51, 52],
+      })
+      .mockResolvedValueOnce({ entityId: 930 })
+      .mockResolvedValueOnce({
+        id: 930, subject: 'S', body: 'B',
+        date: { dateTime: '2026-07-29T13:00:00Z' }, from: { name: 'Me' }, recipients: [],
+      })
+      .mockResolvedValueOnce({});
+    setup(client);
+
+    await handlers.get('ofw_send_message')!({ draftId: 320, recipientIds: [7] });
+
+    const postCall = spy.mock.calls.find((c) => c[0] === 'POST');
+    expect((postCall![2] as { attachments: { myFileIDs: number[] } }).attachments.myFileIDs).toEqual([51, 52]);
+    // …and the attachment cache links them to the new sent id.
+    expect(listAttachmentsForMessage(930).map((a) => a.fileId).sort()).toEqual([51, 52]);
+  });
+
+  it('an explicit myFileIDs still overrides the server draft\'s attachments', async () => {
+    upsertDraft({
+      id: 321, subject: 'S', body: 'B', recipients: [], replyToId: null,
+      modifiedAt: '2026-07-29T12:00:00Z', listData: {},
+    });
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request')
+      .mockResolvedValueOnce({
+        subject: 'S', body: 'B', recipients: [], replyToId: null,
+        folder: { id: '3', name: 'Drafts' }, files: [51],
+      })
+      .mockResolvedValueOnce({ entityId: 931 })
+      .mockResolvedValueOnce({
+        id: 931, subject: 'S', body: 'B',
+        date: { dateTime: '2026-07-29T13:00:00Z' }, from: { name: 'Me' }, recipients: [],
+      })
+      .mockResolvedValueOnce({});
+    setup(client);
+
+    await handlers.get('ofw_send_message')!({ draftId: 321, recipientIds: [7], myFileIDs: [99] });
+
+    const postCall = spy.mock.calls.find((c) => c[0] === 'POST');
+    expect((postCall![2] as { attachments: { myFileIDs: number[] } }).attachments.myFileIDs).toEqual([99]);
   });
 });

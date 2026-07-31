@@ -108,14 +108,17 @@ export async function ensureFolderIdMap(
  * OFW's own display names for the three system folders, as observed on live
  * detail payloads (`folder.name`). Keys are lower-cased for the comparison —
  * this is a fixed vocabulary OFW controls, not user content, so a
- * case-insensitive match is a normalization, not a guess.
+ * case-insensitive match is a normalization, not a guess. A Map, not a plain
+ * object: an object lookup reaches `Object.prototype`, so a folder named
+ * "constructor" would come back as a function and silently vanish from the
+ * JSON payload instead of classifying as `unknown`.
  */
-const STATE_BY_FOLDER_NAME: Record<string, EntityState> = {
-  drafts: 'draft',
-  sent: 'sent',
-  'sent messages': 'sent',
-  inbox: 'received',
-};
+const STATE_BY_FOLDER_NAME = new Map<string, EntityState>([
+  ['drafts', 'draft'],
+  ['sent', 'sent'],
+  ['sent messages', 'sent'],
+  ['inbox', 'received'],
+]);
 
 /**
  * Map a live snapshot to a lifecycle state. Pure — the request already happened.
@@ -139,7 +142,7 @@ export function classifyState(snapshot: MessageSnapshot | null, map: FolderIdMap
     if (map.inbox !== null && folderId === map.inbox) return 'received';
   }
   if (folderName !== null) {
-    const byName = STATE_BY_FOLDER_NAME[folderName.trim().toLowerCase()];
+    const byName = STATE_BY_FOLDER_NAME.get(folderName.trim().toLowerCase());
     if (byName !== undefined) return byName;
   }
   return 'unknown';
