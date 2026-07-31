@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.10.0](https://github.com/chrischall/ofw-mcp/compare/v2.9.2...v2.10.0) (2026-07-31)
+
+
+### Features
+
+* **messages:** guarded send-by-draft, accurate threading verdicts, lifecycle fixes ([#206](https://github.com/chrischall/ofw-mcp/issues/206)) ([e0994dd](https://github.com/chrischall/ofw-mcp/commit/e0994dd99279d6da477dccf5c8333c6381a4f41e))
+
+
+### Bug Fixes
+
+* **messages:** evidence-based threading verdicts, honest autoVerified, attachments carried on send-by-draft ([#209](https://github.com/chrischall/ofw-mcp/issues/209)) ([087e478](https://github.com/chrischall/ofw-mcp/commit/087e478280f70b6a128beb1cff098bd3cabf058c))
+
 ## [2.9.2](https://github.com/chrischall/ofw-mcp/compare/v2.9.1...v2.9.2) (2026-07-30)
 
 
