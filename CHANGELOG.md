@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.10.1](https://github.com/chrischall/ofw-mcp/compare/v2.10.0...v2.10.1) (2026-08-06)
+
+
+### Bug Fixes
+
+* **deps:** move to @fetchproxy/server 2.0.0 for the v3 handshake ([#216](https://github.com/chrischall/ofw-mcp/issues/216)) ([9675baf](https://github.com/chrischall/ofw-mcp/commit/9675baf602cb857af4587d020cdde0166c7a81f7))
+
 ## [2.10.0](https://github.com/chrischall/ofw-mcp/compare/v2.9.2...v2.10.0) (2026-07-31)
 
 
