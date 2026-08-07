@@ -364,8 +364,8 @@ async function walkPages(
     }
 
     // Flush the page's rows in one transaction/RPC. Skipped entirely when the
-    // page held nothing new: where the cache is remote this call is an RPC,
-    // and a DO RPC counts against the same subrequest budget as an OFW fetch.
+    // page held nothing new: where the cache is remote this call is a round
+    // trip, counting against the same subrequest budget as an OFW fetch.
     // A deep re-walk crosses page after page of already-cached messages, so an
     // unconditional "no-op" write spends the caller's budget to store nothing.
     if (toUpsert.length > 0) await store.upsertMessages(toUpsert);
