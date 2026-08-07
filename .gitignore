@@ -5,5 +5,3 @@ coverage/
 *.skill
 *.mcpb
 .claude/worktrees/
-.dev.vars
-.wrangler/

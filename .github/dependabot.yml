@@ -5,23 +5,6 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 10
-    ignore:
-      # `agents` is a PEER of @chrischall/mcp-connector, and the connector — not
-      # this repo — decides which versions are supported. Its published peer range
-      # is `>=0.17.3 <0.20.0`, so a bump to 0.20.x cannot install here at all:
-      # npm dies with ERESOLVE before a single test runs.
-      #
-      # This is not hypothetical. agents 0.19.0 met the connector's then-peer of
-      # `^0.17.3` and took out every consumer's dependabot PR simultaneously
-      # (chrischall/mcp-connector#11 widened the peer to fix it). The ceiling
-      # below mirrors that peer so dependabot stops proposing bumps the harness
-      # cannot accept — versions inside the window still flow normally.
-      #
-      # When the connector widens its peer, raise this ceiling in the same pass:
-      # every consumer is listed in that repo's CLAUDE.md blast-radius section.
-      - dependency-name: agents
-        versions:
-          - ">=0.20.0"
     groups:
       dev-dependencies:
         dependency-type: development

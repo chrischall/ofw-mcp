@@ -6,8 +6,8 @@ import { OFWCacheCore, LocalCacheStore, type SqlDriver, type SqlParam } from './
 // The `node:sqlite` backend for the OFW message cache — a local on-disk SQLite
 // file used by the stdio/desktop server. The query logic lives in OFWCacheCore
 // (src/cache/store.ts); this file only adapts `node:sqlite` to the SqlDriver
-// surface and manages the file handle + permissions. (The hosted Cloudflare
-// connector uses a Durable Object backend instead — a later task.)
+// surface and manages the file handle + permissions. Another deployment can
+// adapt a different driver to the same surface.
 
 /** Adapts a `node:sqlite` DatabaseSync to the driver surface the core needs. */
 export class NodeSqlDriver implements SqlDriver {

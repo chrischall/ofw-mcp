@@ -14,7 +14,6 @@ export default defineConfig({
       // without this every test file gets collected twice: once from `tests/`
       // and once from each worktree's copy, run against that worktree's `src/`.
       // The duplicates pass, so the only visible symptom is the copied
-      // `worker*.test.ts` failing to resolve `cloudflare:test`. Coverage
       // TOTALS stay clean (the `include` below is root-anchored, so a
       // worktree's `src/` never merges in) — but those failing suites abort the
       // run before the summary is computed, so `test:coverage` silently stops
@@ -22,23 +21,14 @@ export default defineConfig({
       // not the noise.
       '**/.claude/**',
       '**/worktrees/**',
-      // `tests/worker*.test.ts` only run under the Workers runtime pool
-      // (`vitest.workers.config.ts` / `npm run worker:test`), which provides
-      // the virtual `cloudflare:test` module they import. Globbed rather than
       // root-anchored so a copy at any depth is excluded too — the anchored
       // form silently stopped matching once a worktree existed.
-      '**/tests/worker*.test.ts',
     ],
     coverage: {
       provider: 'v8',
       include: ['src/**/*.ts'],
       exclude: [
         'src/index.ts', // stdio entry point — not unit-testable
-        // Worker-only entry points import cloudflare:workers / agents and
-        // cannot run under the node pool — they are covered by the Workers
-        // pool suite (tests/worker*.test.ts via `npm run worker:test`).
-        'src/worker.ts',
-        'src/cache/durable.ts',
       ],
       thresholds: {
         lines: 100,

@@ -372,7 +372,7 @@ export async function resolveDraftKey(
 /**
  * Mint a new stable draft identity. Uses the Web Crypto global, which both
  * Node ≥19 and the Workers runtime provide — a `node:crypto` import would not
- * bundle for the hosted connector.
+ * bundle for a hosted deployment.
  */
 export function newDraftKey(): string {
   return `dk_${crypto.randomUUID()}`;

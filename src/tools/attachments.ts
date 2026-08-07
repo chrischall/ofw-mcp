@@ -4,8 +4,8 @@
 // writes downloaded bytes to disk (and reads them back for the inline-reuse
 // path). Those are the ONLY node:fs touch points in the message tools — they
 // live behind this {@link AttachmentIO} interface so the stdio server can use
-// the disk-backed {@link NodeAttachmentIO} while the hosted Cloudflare
-// connector (a later task) injects an inline, filesystem-free implementation.
+// the disk-backed {@link NodeAttachmentIO} while a deployment with no usable
+// disk injects an inline, filesystem-free implementation.
 // Keeping the interface here means src/tools/messages.ts imports nothing from
 // node:fs.
 
@@ -32,7 +32,7 @@ export interface ResolvedUpload {
 export interface AttachmentIO {
   /**
    * Whether this deployment can persist downloads to a local filesystem. False
-   * on the hosted connector, where inline is the ONLY channel to the bytes —
+   * on a hosted deployment, where inline is the ONLY channel to the bytes —
    * the download tool forces inline mode instead of erroring on a disk write
    * that would fail, so the caller is never left with neither a render nor bytes.
    */
