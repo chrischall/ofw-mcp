@@ -13,7 +13,7 @@
 // passes the limit. Peak memory is then bounded by the limit rather than by
 // whatever the file felt like claiming.
 
-/** 32 MiB. Sized to fit comfortably inside the Worker's memory budget. */
+/** 32 MiB. Sized to fit comfortably inside a constrained memory budget. */
 export const MAX_DECOMPRESSED_BYTES = 32 * 1024 * 1024;
 
 /**
@@ -34,7 +34,7 @@ export class DecompressionLimitError extends Error {
  *
  * `deflate-raw` is the ZIP member format; `deflate` is the zlib-wrapped form a
  * PDF `/FlateDecode` stream uses. Both go through the WHATWG
- * `DecompressionStream` so this runs unchanged on Node and workerd.
+ * `DecompressionStream` so this runs unchanged wherever the standard exists.
  */
 export async function inflateBounded(
   data: Buffer, format: 'deflate-raw' | 'deflate', limit: number, label: string,

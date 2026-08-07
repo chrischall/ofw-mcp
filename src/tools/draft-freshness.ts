@@ -40,7 +40,7 @@ export class DraftFreshnessError extends Error {}
 // FNV-1a (64-bit) over a canonical encoding. Not cryptographic — this is a
 // change detector, and it is never the sole guard: an unsupplied token falls
 // back to a full field-by-field comparison against the cached base.
-// BigInt keeps it byte-identical on node and on the Workers runtime.
+// BigInt keeps it byte-identical across runtimes.
 const FNV_OFFSET = 0xcbf29ce484222325n;
 const FNV_PRIME = 0x100000001b3n;
 const MASK64 = 0xffffffffffffffffn;

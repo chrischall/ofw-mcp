@@ -2,7 +2,7 @@
 //
 // The office formats are machine-generated XML with a known, flat shape per
 // part (rows of cells, runs of text), so a scanning reader beats pulling in a
-// DOM parser that has to run in both Node and workerd. The one rule this file
+// DOM parser that has to run anywhere. The one rule this file
 // exists to enforce is that a tag match is anchored on the FULL tag name:
 // naively scanning for `<w:p` also matches `<w:pPr>`, which silently turns
 // paragraph properties into paragraphs.

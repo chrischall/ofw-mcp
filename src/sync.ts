@@ -364,7 +364,7 @@ async function walkPages(
     }
 
     // Flush the page's rows in one transaction/RPC. Skipped entirely when the
-    // page held nothing new: on the Worker this call is a Durable-Object RPC,
+    // page held nothing new: where the cache is remote this call is an RPC,
     // and a DO RPC counts against the same subrequest budget as an OFW fetch.
     // A deep re-walk crosses page after page of already-cached messages, so an
     // unconditional "no-op" write spends the caller's budget to store nothing.
@@ -442,7 +442,7 @@ export async function syncMessageFolder(
       // This was a real starvation bug. `fwd.nextPage` is just the start page
       // (1) when nothing was fetched, so the `Math.min` below would silently
       // reset a deep backfill — e.g. resumePage 87 → 1 — discarding 86 pages
-      // of progress. On the hosted Worker (OFW_SYNC_MAX_REQUESTS=40) a user
+      // of progress. Under a request budget (OFW_SYNC_MAX_REQUESTS) a user
       // with enough drafts to consume the whole budget, with drafts running
       // first, hit this on EVERY call: inbox/sent never got budget, their
       // cursor was reset every time, and the backfill could never advance.
@@ -724,7 +724,7 @@ export async function syncAll(client: OFWClient, opts: SyncAllOptions, store: Ca
   // Drafts go FIRST. They are the only folder a destructive tool
   // (ofw_save_draft / ofw_delete_draft) reads as its base, and they are cheap
   // and bounded — one list page plus one detail per draft. Running them last,
-  // behind inbox and sent, meant a bounded call (the Worker's
+  // behind inbox and sent, meant a bounded call (the
   // OFW_SYNC_MAX_REQUESTS=40) spent its whole budget backfilling history and
   // deferred drafts on every single call, so server-side draft edits stayed
   // invisible indefinitely while the response reported `drafts: 0`.

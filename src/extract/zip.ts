@@ -4,9 +4,10 @@
 // reading one is the first step of every office-document extractor. This is
 // deliberately not a general ZIP library: it reads the central directory,
 // slices an entry's bytes, and inflates DEFLATE members via the WHATWG
-// `DecompressionStream` — which exists in BOTH Node ≥18 and workerd, so the
+// `DecompressionStream` — a web standard available in Node ≥18 and in
+// sandboxed runtimes alike, so the
 // same code runs on the stdio server and a hosted deployment. Using
-// `node:zlib` here would break the Worker build; adding a userland inflate
+// `node:zlib` here would tie this to Node; adding a userland inflate
 // dependency would bloat it. Neither is necessary.
 
 import { inflateBounded, MAX_DECOMPRESSED_BYTES } from './inflate.js';
@@ -19,7 +20,7 @@ const ZIP64_SENTINEL = 0xffffffff;
 /**
  * Hard ceiling on a single decompressed member (32 MiB). An attachment is a
  * co-parent-supplied file, so a zip bomb is a real (if unlikely) input, and the
- * Worker's memory budget is what is being protected.
+ * memory budget of a constrained runtime is what is being protected.
  *
  * The cap is enforced on the bytes as they arrive ({@link inflateBounded}), NOT
  * on the size the archive declares for itself. The declared size is checked too

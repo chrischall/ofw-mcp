@@ -25,7 +25,7 @@ src/
   config.ts         env-driven cache dir + sha256(OFW_CACHE_IDENTITY|OFW_USERNAME|"_default") DB path + attachments dir
   cache.ts          node:sqlite cache (messages, drafts, draft_lineage, attachments, sync_state, meta) with typed CRUD + findLatestReplyTip
   sync.ts           resolveFolderIds + syncMessageFolder/syncDrafts/syncAll + attachment-meta fetch
-  extract/          format-agnostic content extraction (no deps, Node + workerd)
+  extract/          format-agnostic content extraction (no deps, runtime-portable)
     zip.ts          minimal ZIP reader (DecompressionStream, not node:zlib)
     xml.ts          scanning XML reader (entity decode, full-tag-name matching)
     ooxml.ts        shared part-path + relationship resolution
