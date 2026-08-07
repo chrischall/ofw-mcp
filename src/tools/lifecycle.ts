@@ -228,7 +228,7 @@ export async function probeIds(
   ids: number[],
   opts: { allowMarkRead: boolean },
 ): Promise<{ items: LifecycleItem[]; requests: number }> {
-  // THREE cache reads for the whole batch, not three per id. On the Durable
+  // THREE cache reads for the whole batch, not three per id. Where the
   // Object backend every cache call is a subrequest counting against the same
   // hosting cap as the OFW fetches, so a per-id lookup would spend the caller's
   // budget on bookkeeping before a single probe ran.
@@ -371,7 +371,7 @@ export async function resolveDraftKey(
 
 /**
  * Mint a new stable draft identity. Uses the Web Crypto global, which both
- * Node ≥19 and the Workers runtime provide — a `node:crypto` import would not
+ * Node ≥19 provides natively — a `node:crypto` import would not
  * bundle for a hosted deployment.
  */
 export function newDraftKey(): string {

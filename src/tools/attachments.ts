@@ -26,7 +26,7 @@ export interface ResolvedUpload {
 }
 
 /**
- * The filesystem operations the message tools need, abstracted so a Worker
+ * The filesystem operations the message tools need, abstracted so a
  * deployment can supply an inline (no-disk) implementation.
  */
 export interface AttachmentIO {

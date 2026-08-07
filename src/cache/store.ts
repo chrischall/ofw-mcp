@@ -3,9 +3,9 @@
 // All message reads (list/get/drafts/unread-sent) are served from this cache;
 // only ofw_sync_messages walks OFW for new content. The SQL lives here ONCE,
 // over a tiny synchronous {@link SqlDriver}, so the same schema/queries back
-// both engines: `node:sqlite` on the stdio/desktop server (src/cache/node.ts)
-// and a Durable Object's SQLite on a hosted deployment (a later
-// task). This module imports nothing platform-specific.
+// any engine: `node:sqlite` is the one that ships (src/cache/node.ts), and
+// another deployment can adapt a different driver to the same surface. This
+// module imports nothing platform-specific.
 
 export interface Recipient {
   userId: number;
@@ -124,7 +124,7 @@ export interface SqlDriver {
 
 /**
  * The async cache surface the sync logic and MCP tools depend on. Async because
- * the hosted Worker backend answers over a Durable Object RPC boundary; the node
+ * a remote backend would answer over an RPC boundary; the node
  * backend fulfils it synchronously behind resolved promises.
  */
 export interface CacheStore {
@@ -343,7 +343,7 @@ export const SCHEMA_STATEMENTS = [
  * every open. SQLite has no `ADD COLUMN IF NOT EXISTS`, so each statement runs
  * inside a try/catch — re-running against an already-migrated DB throws
  * "duplicate column name", which is swallowed. Driver-agnostic: both
- * `node:sqlite` and the Durable Object's SQLite raise synchronously.
+ * `node:sqlite` raises synchronously, as any conforming driver must.
  */
 export const MIGRATIONS = [
   // Resumable deep-sync cursor. Absent/NULL → SyncState.resumePage null.
@@ -441,7 +441,7 @@ export class OFWCacheCore {
 
   /**
    * Batch upsert every row in a single transaction — one round-trip's worth of
-   * work (crucial on the Durable Object backend, where each RPC is a subrequest).
+   * work (crucial where each round trip is a billed request).
    * Empty array is a no-op (no transaction opened).
    */
   upsertMessages(rows: MessageRow[]): void {
@@ -598,7 +598,7 @@ export class OFWCacheCore {
   }
 
   /**
-   * Batch read — one query for a whole page of drafts. On the Durable Object
+   * Batch read — one query for a whole page of drafts. Where the cache is remote
    * backend each cache call is a subrequest, so a per-draft lookup would spend
    * the caller's sync budget on bookkeeping.
    */
@@ -743,7 +743,7 @@ export class OFWCacheCore {
 
 /**
  * Adapts a synchronous {@link OFWCacheCore} to the async {@link CacheStore}
- * interface. Used by the in-process node backend; the Durable Object backend
+ * interface. Used by the in-process node backend; a remote backend
  * implements CacheStore over a real RPC boundary instead.
  */
 export class LocalCacheStore implements CacheStore {

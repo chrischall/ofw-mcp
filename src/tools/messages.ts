@@ -100,7 +100,7 @@ const FolderCountsSchema = z.looseObject({
 /**
  * Cap on per-id probes in one ofw_check_freshness call.
  *
- * Each id costs one OFW request, and on the hosted Worker every request counts
+ * Each id costs one OFW request, and under a request budget every one counts
  * against the subrequest cap (see OFW_SYNC_MAX_REQUESTS). The check has to stay
  * cheap enough that a caller reaches for it freely — that is the entire point
  * of it existing — so it truncates loudly rather than turning into a sync.
@@ -1003,7 +1003,7 @@ export function registerMessageTools(
         const { freshness, serverConfirmed, cacheStatus } = await draftsFreshness(cache);
         const rows = await cache.listDrafts({ page, size });
         const total = await cache.countDrafts();
-        // One batch lookup for the whole page — on the Durable Object backend a
+        // One batch lookup for the whole page — where the cache is remote a
         // per-draft lineage read would be a subrequest each.
         const keyById = new Map(
           (await cache.getDraftLineageByIds(rows.map((d) => d.id))).map((l) => [l.id, l.draftKey]),
