@@ -598,8 +598,8 @@ export class OFWCacheCore {
   }
 
   /**
-   * Batch read — one query for a whole page of drafts. Where the cache is remote
-   * backend each cache call is a subrequest, so a per-draft lookup would spend
+   * Batch read — one query for a whole page of drafts. Where the cache is
+   * remote each cache call is a subrequest, so a per-draft lookup would spend
    * the caller's sync budget on bookkeeping.
    */
   getDraftLineageByIds(ids: number[]): DraftLineageRow[] {

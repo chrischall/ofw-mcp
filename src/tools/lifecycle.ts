@@ -228,10 +228,10 @@ export async function probeIds(
   ids: number[],
   opts: { allowMarkRead: boolean },
 ): Promise<{ items: LifecycleItem[]; requests: number }> {
-  // THREE cache reads for the whole batch, not three per id. Where the
-  // Object backend every cache call is a subrequest counting against the same
-  // hosting cap as the OFW fetches, so a per-id lookup would spend the caller's
-  // budget on bookkeeping before a single probe ran.
+  // THREE cache reads for the whole batch, not three per id. Where the cache
+  // is remote every call is a subrequest counting against the same hosting cap
+  // as the OFW fetches, so a per-id lookup would spend the caller's budget on
+  // bookkeeping before a single probe ran.
   const draftsById = new Map((await store.getDrafts(ids)).map((d) => [d.id, d]));
   const messagesById = new Map((await store.getMessages(ids)).map((m) => [m.id, m]));
 
@@ -370,9 +370,9 @@ export async function resolveDraftKey(
 }
 
 /**
- * Mint a new stable draft identity. Uses the Web Crypto global, which both
- * Node ≥19 provides natively — a `node:crypto` import would not
- * bundle for a hosted deployment.
+ * Mint a new stable draft identity. Uses the Web Crypto global, which Node ≥19
+ * provides natively — a `node:crypto` import would not bundle for a hosted
+ * deployment.
  */
 export function newDraftKey(): string {
   return `dk_${crypto.randomUUID()}`;
