@@ -4,7 +4,7 @@
 // only ofw_sync_messages walks OFW for new content. The SQL lives here ONCE,
 // over a tiny synchronous {@link SqlDriver}, so the same schema/queries back
 // both engines: `node:sqlite` on the stdio/desktop server (src/cache/node.ts)
-// and a Durable Object's SQLite on the hosted Cloudflare connector (a later
+// and a Durable Object's SQLite on a hosted deployment (a later
 // task). This module imports nothing platform-specific.
 
 export interface Recipient {

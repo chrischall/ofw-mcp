@@ -25,7 +25,7 @@ import type { CacheStore } from './cache/store.js';
 // The stdio server backs the message cache with a local `node:sqlite` file,
 // opened lazily on first use (so the server still boots and answers the host's
 // install-time tools/list probe when no cache path is configured). The hosted
-// Cloudflare connector (a later task) injects a Durable-Object-backed
+// hosted deployment (a later task) injects a Durable-Object-backed
 // CacheStore + a filesystem-free AttachmentIO into the same registrar instead.
 let nodeCache: CacheStore | undefined;
 const nodeCacheProvider = (): CacheStore => (nodeCache ??= OFWCache.open(getCacheDbPath()));

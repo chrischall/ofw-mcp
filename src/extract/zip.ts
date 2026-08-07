@@ -5,7 +5,7 @@
 // deliberately not a general ZIP library: it reads the central directory,
 // slices an entry's bytes, and inflates DEFLATE members via the WHATWG
 // `DecompressionStream` — which exists in BOTH Node ≥18 and workerd, so the
-// same code runs on the stdio server and the hosted connector. Using
+// same code runs on the stdio server and a hosted deployment. Using
 // `node:zlib` here would break the Worker build; adding a userland inflate
 // dependency would bloat it. Neither is necessary.
 

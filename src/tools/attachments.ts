@@ -32,7 +32,7 @@ export interface ResolvedUpload {
 export interface AttachmentIO {
   /**
    * Whether this deployment can persist downloads to a local filesystem. False
-   * on the hosted connector, where inline is the ONLY channel to the bytes —
+   * on a hosted deployment, where inline is the ONLY channel to the bytes —
    * the download tool forces inline mode instead of erroring on a disk write
    * that would fail, so the caller is never left with neither a render nor bytes.
    */

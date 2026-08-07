@@ -3,7 +3,7 @@
   "version": "2.10.1",
   "license": "MIT",
   "mcpName": "io.github.chrischall/ofw-mcp",
-  "description": "OurFamilyWizard MCP server for Claude — developed and maintained by AI (Claude Code)",
+  "description": "OurFamilyWizard MCP server for Claude \u2014 developed and maintained by AI (Claude Code)",
   "author": "Claude Code (AI) <https://www.anthropic.com/claude>",
   "repository": {
     "type": "git",
@@ -29,10 +29,7 @@
     "dev": "node --env-file=.env dist/index.js",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
-    "test:watch": "vitest",
-    "worker:dev": "wrangler dev",
-    "worker:deploy": "wrangler deploy",
-    "worker:test": "vitest run --config vitest.workers.config.ts"
+    "test:watch": "vitest"
   },
   "dependencies": {
     "@chrischall/mcp-utils": "^0.14.0",
@@ -42,16 +39,10 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "@chrischall/mcp-connector": "^1.1.1",
-    "@cloudflare/vitest-pool-workers": "^0.19.1",
-    "@cloudflare/workers-oauth-provider": "^0.8.1",
-    "@cloudflare/workers-types": "^5.20260708.1",
     "@types/node": "^26.0.0",
     "@vitest/coverage-v8": "^4.1.7",
-    "agents": "^0.19.0",
     "esbuild": "^0.28.0",
     "typescript": "^7.0.2",
-    "vitest": "^4.1.7",
-    "wrangler": "^4.110.0"
+    "vitest": "^4.1.7"
   }
 }

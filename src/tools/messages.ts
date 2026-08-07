@@ -1393,7 +1393,7 @@ export function registerMessageTools(
     },
   }, async (args) => {
     // Resolve the upload source through the injected attachment-I/O boundary
-    // (disk read on node; an in-memory source on the hosted connector).
+    // (disk read on node; an in-memory source on a hosted deployment).
     const { blob, fileName, mimeType: mime, sizeBytes } = await attachmentIO.resolveUpload(args.path);
 
     // Build the multipart payload matching the OFW web UI's request shape.
