@@ -161,7 +161,7 @@ export function getDefaultInlineAttachments(): boolean {
 /**
  * Per-invocation OFW-request budget for ofw_sync_messages.
  *
- * The hosted hosted deployment enforces a subrequest cap per request
+ * A hosted deployment may enforce a request cap per call
  * (every OFW API fetch and every Durable-Object cache RPC counts), so a deep
  * backfill must be bounded and resumable there. Set OFW_SYNC_MAX_REQUESTS to a
  * positive integer to cap the number of OFW requests one sync call may make

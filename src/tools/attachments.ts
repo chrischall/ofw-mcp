@@ -4,8 +4,8 @@
 // writes downloaded bytes to disk (and reads them back for the inline-reuse
 // path). Those are the ONLY node:fs touch points in the message tools — they
 // live behind this {@link AttachmentIO} interface so the stdio server can use
-// the disk-backed {@link NodeAttachmentIO} while the hosted Cloudflare
-// connector (a later task) injects an inline, filesystem-free implementation.
+// the disk-backed {@link NodeAttachmentIO} while a deployment with no usable
+// disk injects an inline, filesystem-free implementation.
 // Keeping the interface here means src/tools/messages.ts imports nothing from
 // node:fs.
 

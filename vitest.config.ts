@@ -29,7 +29,6 @@ export default defineConfig({
       include: ['src/**/*.ts'],
       exclude: [
         'src/index.ts', // stdio entry point — not unit-testable
-        'src/cache/durable.ts',
       ],
       thresholds: {
         lines: 100,

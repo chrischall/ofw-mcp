@@ -1450,7 +1450,7 @@ export function registerMessageTools(
     const fileId = args.fileId;
     const cache = cacheProvider();
     const requestedInline = args.inline ?? getDefaultInlineAttachments();
-    // When the deployment has no filesystem (hosted connector), inline is the
+    // When the deployment has no filesystem, inline is the
     // ONLY path to the bytes — force it rather than erroring on a disk write.
     // `forcedInline` records that we overrode an explicit `inline:false` so the
     // response is honest about it instead of silently ignoring the argument.
