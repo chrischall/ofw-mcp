@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.10.2](https://github.com/chrischall/ofw-mcp/compare/v2.10.1...v2.10.2) (2026-08-07)
+
+
+### Refactor
+
+* **connector:** retire the standalone Cloudflare Worker connector ([#218](https://github.com/chrischall/ofw-mcp/issues/218)) ([d7fb155](https://github.com/chrischall/ofw-mcp/commit/d7fb155b1606d812ed4a63cac853a9bdca443c24))
+
+
+### Documentation
+
+* repair sentences the connector de-naming left behind ([#223](https://github.com/chrischall/ofw-mcp/issues/223)) ([ffdd4ec](https://github.com/chrischall/ofw-mcp/commit/ffdd4ec91db64c1602419ac07051e794db80812d))
+
 ## [2.10.1](https://github.com/chrischall/ofw-mcp/compare/v2.10.0...v2.10.1) (2026-08-06)
 
 
