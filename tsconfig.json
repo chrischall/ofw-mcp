@@ -11,5 +11,5 @@
     "skipLibCheck": true
   },
   "include": ["src/**/*"],
-  "exclude": ["node_modules", "dist", "src/cache/durable.ts", "src/worker.ts"]
+  "exclude": ["node_modules", "dist"]
 }

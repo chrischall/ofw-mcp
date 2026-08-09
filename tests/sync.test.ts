@@ -443,6 +443,31 @@ describe('syncDrafts', () => {
     expect(getDraft(1)?.replyToId).toBeNull();
   });
 
+  it('stores the reply target from inReplyTo when the list item\'s replyToId is null', async () => {
+    // OFW reports the threading echo inconsistently: list payloads have been
+    // observed carrying inReplyTo (with showContext) while replyToId is null.
+    // The cached row must derive the same value ofw_save_draft derives from
+    // the detail echo, or the content revision drifts between a save and the
+    // next sync — a self-inflicted STALE.
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce({
+        data: [{
+          id: 1,
+          subject: 'Threaded draft',
+          date: { dateTime: '2026-07-29T00:00:00Z' },
+          replyToId: null,
+          inReplyTo: 538672434,
+          showContext: true,
+          recipients: [],
+        }],
+      })
+      .mockResolvedValueOnce({ body: 'body', subject: 'Threaded draft', recipientIds: [] });
+
+    await syncDrafts(client, '333', store());
+    expect(getDraft(1)?.replyToId).toBe(538672434);
+  });
+
   it('handles drafts where OFW omits the date field entirely', async () => {
     const client = new OFWClient();
     vi.spyOn(client, 'request')
@@ -823,6 +848,30 @@ describe('syncMessageFolder — bounded + resumable (budget)', () => {
       .filter((c) => /\/pub\/v3\/messages\?/.test(c[1] as string))
       .map((c) => /[?&]page=([0-9]+)\b/.exec(c[1] as string)?.[1]);
     expect(listPages).toEqual(['1', '2', '3']);
+  });
+
+  it('writes nothing for an all-cached page, so a deep re-walk spends no cache RPC', async () => {
+    // On the Worker every store call is a Durable-Object RPC, counted against
+    // the same subrequest budget as an OFW fetch. A deep re-walk crosses page
+    // after page of already-cached messages; an unconditional "empty array is a
+    // no-op" write spends that budget to store nothing.
+    seedCachedSent(1);
+    seedCachedSent(2);
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce(listResponse([{ id: 1 }, { id: 2 }])) // page 1: all cached
+      .mockResolvedValueOnce(listResponse([]));                    // page 2: empty
+    const upsertSpy = vi.spyOn(cache, 'upsertMessages');
+
+    const result = await syncMessageFolder(
+      client, 'sent', '222',
+      { fetchUnreadBodies: false, deep: true, budget: makeBudget(Number.POSITIVE_INFINITY) },
+      store(),
+    );
+
+    expect(result.done).toBe(true);
+    expect(result.synced).toBe(0);
+    expect(upsertSpy).not.toHaveBeenCalled();
   });
 
   it('pauses MID-page and resumes the same page, skipping the rows it already cached', async () => {

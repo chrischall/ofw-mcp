@@ -69,7 +69,7 @@ export async function loginWithPassword(
     // OFW rejects bad credentials by re-serving its HTML login page (Spring
     // Security re-renders the form rather than returning 401/JSON). Surface a
     // clean, actionable message instead of dumping the HTML page — this is what
-    // the hosted connector's login page shows the user on a failed sign-in.
+    // a hosted deployment's login page shows the user on a failed sign-in.
     if (contentType.includes('text/html')) {
       throw new Error(
         'OFW login failed — your OurFamilyWizard email or password was not accepted. Check them and try again.',

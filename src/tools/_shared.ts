@@ -3,10 +3,20 @@ import { z } from 'zod';
 import type { MessageRow, Recipient } from '../cache/store.js';
 import type { OFWClient } from '../client.js';
 import { parseLenient } from '@chrischall/mcp-utils';
+import { normalizeTimestampsInValue } from '../timestamps.js';
 
 // Pretty-printed JSON tool result. Thin wrapper over @chrischall/mcp-utils'
-// `textResult` so the rest of the codebase keeps the local name.
-export const jsonResponse = textResult;
+// `textResult`, with one addition: every timestamp in the payload is rewritten
+// to ISO-8601 with an explicit offset and paired with a `<field>Display`
+// sibling in the operator's zone.
+//
+// This is the single seam every structured tool response passes through, which
+// is the point — normalizing here rather than at each call site is what makes
+// it impossible for a tool to reintroduce the naive-local values that had
+// `sentAt` and `fetchedBodyAt` silently disagreeing by the UTC offset.
+export function jsonResponse(data: unknown): ReturnType<typeof textResult> {
+  return textResult(normalizeTimestampsInValue(data));
+}
 
 // Raw-string tool result. Wrapper over @chrischall/mcp-utils' `rawTextResult`.
 export const textResponse = rawTextResult;
@@ -16,7 +26,11 @@ export const textResponse = rawTextResult;
 // we declined to overwrite) without being mistaken for a successful write.
 // mcp-utils' `errorResult` only carries a string.
 export function jsonErrorResponse(data: unknown): ReturnType<typeof textResult> {
-  return { ...textResult(data), isError: true };
+  // Routed through jsonResponse, not textResult: a refusal payload carries the
+  // same freshness block as the success path, and emitting it unnormalized made
+  // an UNVERIFIED_EMPTY response report `asOf` in UTC while every successful
+  // response reported it with an offset.
+  return { ...jsonResponse(data), isError: true };
 }
 
 // OFW API shape for `recipients[]` on message/draft list and detail
@@ -65,6 +79,50 @@ export function mapRecipients(items: ApiRecipient[] | undefined | null): Recipie
 // re-fetch detail and self-heal the stale row to the real timestamp.
 export function hasRealView(recipients: { viewedAt: string | null }[]): boolean {
   return recipients.some((r) => r.viewedAt !== null && !r.viewedAt.startsWith('1970-01-01'));
+}
+
+/**
+ * The threading echo OFW puts on a message/draft detail payload. OFW is
+ * inconsistent about WHERE it reports the reply target: some payloads carry a
+ * top-level `replyToId`, others report the same link as `inReplyTo` (with
+ * `showContext: true`) while `replyToId` is null/absent — observed live on
+ * nearly every threaded draft save. Reading only `replyToId` manufactured a
+ * false "OurFamilyWizard did not thread this draft" warning on drafts that WERE
+ * threaded, which trains callers to skim past warnings. Every reader of a
+ * detail/list payload's threading must go through {@link threadedReplyTo} so
+ * the derived value (and the revision hashed from it) is the same everywhere.
+ */
+export interface ThreadingEcho {
+  replyToId?: number | null;
+  inReplyTo?: number | null;
+  showContext?: boolean;
+}
+
+/** The reply target OFW actually reports, whichever field it chose to put it in. */
+export function threadedReplyTo(detail: ThreadingEcho): number | null {
+  return detail.replyToId ?? detail.inReplyTo ?? null;
+}
+
+/** True when the payload positively reports the message as threaded. */
+export function reportsThreaded(detail: ThreadingEcho): boolean {
+  return threadedReplyTo(detail) !== null || detail.showContext === true;
+}
+
+/**
+ * True when the payload POSITIVELY reports the message as unthreaded — the
+ * evidence bar a "reply linkage was dropped" warning must clear.
+ *
+ * Only `inReplyTo` and `showContext` count as evidence, because those are the
+ * fields OFW actually signals threading with. A present-but-null `replyToId`
+ * is NOT evidence: OFW routinely emits `replyToId: null` on items that ARE
+ * threaded (their linkage lives in `inReplyTo`), so treating it as a
+ * disconfirmation manufactures a false UNTHREADED warning on exactly OFW's
+ * normal shape. Total absence of all three fields is "not echoed", never
+ * "dropped".
+ */
+export function reportsUnthreaded(detail: ThreadingEcho): boolean {
+  if (reportsThreaded(detail)) return false;
+  return detail.inReplyTo !== undefined || detail.showContext !== undefined;
 }
 
 // Just the read-relevant slice of a MessageRow — so deriveRead/withReadState can

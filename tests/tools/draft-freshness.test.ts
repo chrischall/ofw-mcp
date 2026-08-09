@@ -3,6 +3,7 @@ import { OFWClient } from '../../src/client.js';
 import {
   draftRevision,
   fetchServerDraft,
+  fetchMessageSnapshot,
   checkDraftFreshness,
   staleDraftPayload,
   DraftFreshnessError,
@@ -71,6 +72,45 @@ describe('fetchServerDraft', () => {
       replyToId: 12,
       recipients: [{ userId: 42, name: 'Co Parent', viewedAt: null }],
     });
+  });
+
+  it('derives the reply target from inReplyTo when replyToId is null (both spellings of the threading echo)', async () => {
+    // OFW reports the reply target as replyToId on some payloads and as
+    // inReplyTo on others. The snapshot must derive ONE value from whichever
+    // is present, so the revision hashed here matches the one ofw_save_draft
+    // computed from the same server state.
+    const c = new OFWClient();
+    vi.spyOn(c, 'request').mockResolvedValue({
+      subject: 'Pickup', body: 'server body',
+      replyToId: null, inReplyTo: 538672434, recipients: [],
+    });
+    await expect(fetchServerDraft(c, 5)).resolves.toMatchObject({ replyToId: 538672434 });
+  });
+
+  it('does not hard-fail on either spelling of folder.id (strict boundary)', async () => {
+    // This schema is parsed strict — a throw here ABORTS ofw_save_draft /
+    // ofw_delete_draft. OFW types this id as a string on the folders listing
+    // and a number on message detail, so both must parse, and both must
+    // normalize to the same string for comparison.
+    for (const id of ['3', 3]) {
+      const c = new OFWClient();
+      vi.spyOn(c, 'request').mockResolvedValue({
+        subject: 'Pickup', body: 'server body', replyToId: null, recipients: [],
+        folder: { id, name: 'Drafts' },
+      });
+      const snap = await fetchMessageSnapshot(c, 5);
+      expect(snap?.folderId).toBe('3');
+      expect(snap?.folderName).toBe('Drafts');
+    }
+  });
+
+  it('reports a null folderId when OFW omits the folder entirely', async () => {
+    const c = new OFWClient();
+    vi.spyOn(c, 'request').mockResolvedValue({ subject: 'S', body: 'B' });
+    const snap = await fetchMessageSnapshot(c, 5);
+    expect(snap?.folderId).toBeNull();
+    expect(snap?.folderName).toBeNull();
+    expect(snap?.dateTime).toBeNull();
   });
 
   it('treats an empty/null response body as missing rather than throwing', async () => {
@@ -208,6 +248,65 @@ describe('checkDraftFreshness', () => {
       expectedRevision: draftRevision(content()),
     });
     expect(v.verdict).toBe('FRESH');
+  });
+
+  it('does NOT refuse when only connector-authored metadata (replyToId) drifted, token path', () => {
+    // The false positive this fix targets: a caller captured its revision from
+    // its own save, then OFW normalized the draft's replyToId. The body/subject/
+    // recipients are untouched, so this is the connector's own mutation, not a
+    // third-party edit — it must not read as STALE.
+    const cached = content({ replyToId: 537280390 });
+    const v = checkDraftFreshness({
+      server: content({ replyToId: null }), // OFW dropped the reply link
+      cached,
+      expectedRevision: draftRevision(cached), // the pre-normalization revision
+    });
+    expect(v.verdict).toBe('FRESH');
+    expect(v.metadataOnly).toBe(true);
+    expect(v.changedFields).toEqual(['replyToId']);
+  });
+
+  it('does NOT refuse a metadata-only drift on the no-token path either', () => {
+    const v = checkDraftFreshness({
+      server: content({ replyToId: 99 }),
+      cached: content({ replyToId: null }),
+    });
+    expect(v.verdict).toBe('FRESH');
+    expect(v.metadataOnly).toBe(true);
+    expect(v.changedFields).toEqual(['replyToId']);
+  });
+
+  it('STILL refuses when a substantive field diverges alongside metadata (token path)', () => {
+    // Regression guard: relaxing metadata must not weaken the real protection.
+    const cached = content();
+    const v = checkDraftFreshness({
+      server: content({ body: 'edited elsewhere', replyToId: 99 }),
+      cached,
+      expectedRevision: draftRevision(cached),
+    });
+    expect(v.verdict).toBe('STALE');
+    expect(v.metadataOnly).toBeUndefined();
+    expect(v.changedFields).toContain('body');
+  });
+
+  it('STILL refuses a substantive divergence on the no-token path', () => {
+    const v = checkDraftFreshness({
+      server: content({ body: 'edited elsewhere', replyToId: 99 }),
+      cached: content(),
+    });
+    expect(v.verdict).toBe('STALE');
+    expect(v.changedFields).toContain('body');
+  });
+
+  it('does not grant a metadata pass when the token is not the cached revision', () => {
+    // A token that does not match our cache is not evidence of what the caller
+    // edited from, so we cannot prove the drift is metadata-only — refuse.
+    const v = checkDraftFreshness({
+      server: content({ replyToId: 99 }),
+      cached: content({ replyToId: null }),
+      expectedRevision: 'r1:someothervalue',
+    });
+    expect(v.verdict).toBe('STALE');
   });
 });
 

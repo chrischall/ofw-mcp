@@ -4,7 +4,7 @@ import type {
   MessageRow, DraftRow, FolderName,
 } from './cache/store.js';
 import { z } from 'zod';
-import { ApiRecipientSchema, hasRealView, mapRecipients } from './tools/_shared.js';
+import { ApiRecipientSchema, hasRealView, mapRecipients, threadedReplyTo } from './tools/_shared.js';
 import { parseLenient } from '@chrischall/mcp-utils';
 
 // Each OFW message detail returns `files: [fileId, ...]`. We fetch the metadata
@@ -143,6 +143,10 @@ export async function resolveFolderIds(client: OFWClient, store: CacheStore): Pr
   // label an uncached message sent-vs-inbox from the detail payload's own folder
   // id, instead of hard-defaulting to inbox.
   await store.setMeta('sent_folder_id', ids.sent);
+  // And inbox, which completes the map a lifecycle probe needs to turn a detail
+  // payload's own folder id into "draft" / "sent" / "received" (see
+  // tools/lifecycle.ts). Without all three, a probe can only say "unknown".
+  await store.setMeta('inbox_folder_id', ids.inbox);
   return ids;
 }
 
@@ -359,8 +363,12 @@ async function walkPages(
       }
     }
 
-    // Flush the page's rows in one transaction/RPC. Empty array is a no-op.
-    await store.upsertMessages(toUpsert);
+    // Flush the page's rows in one transaction/RPC. Skipped entirely when the
+    // page held nothing new: where the cache is remote this call is a round
+    // trip, counting against the same subrequest budget as an OFW fetch.
+    // A deep re-walk crosses page after page of already-cached messages, so an
+    // unconditional "no-op" write spends the caller's budget to store nothing.
+    if (toUpsert.length > 0) await store.upsertMessages(toUpsert);
 
     if (pageBudgetHit) {
       // Paused mid-page. Resume at THIS page: the partial rows are cached, so
@@ -434,7 +442,7 @@ export async function syncMessageFolder(
       // This was a real starvation bug. `fwd.nextPage` is just the start page
       // (1) when nothing was fetched, so the `Math.min` below would silently
       // reset a deep backfill — e.g. resumePage 87 → 1 — discarding 86 pages
-      // of progress. On the hosted Worker (OFW_SYNC_MAX_REQUESTS=40) a user
+      // of progress. Under a request budget (OFW_SYNC_MAX_REQUESTS) a user
       // with enough drafts to consume the whole budget, with drafts running
       // first, hit this on EVERY call: inbox/sent never got budget, their
       // cursor was reset every time, and the backfill could never advance.
@@ -485,7 +493,12 @@ const DraftListItemSchema = z.looseObject({
   id: z.number(),
   subject: z.string(),
   date: z.looseObject({ dateTime: z.string() }),
+  // Both spellings of the threading echo — OFW reports the reply target as
+  // `inReplyTo` (with showContext) on list payloads where `replyToId` is null.
+  // The cached row must derive the SAME value ofw_save_draft derived from the
+  // detail, or the content revision drifts between a save and the next sync.
   replyToId: z.number().nullable().optional(),
+  inReplyTo: z.number().nullable().optional(),
   recipients: z.array(ApiRecipientSchema).optional(),
 });
 type DraftListItem = z.infer<typeof DraftListItemSchema>;
@@ -623,7 +636,7 @@ export async function syncDrafts(
       subject: detail.subject ?? item.subject ?? '(no subject)',
       body: detail.body ?? '',
       recipients: mapRecipients(item.recipients),
-      replyToId: item.replyToId ?? null,
+      replyToId: threadedReplyTo(item),
       modifiedAt: item.date?.dateTime ?? new Date().toISOString(),
       listData: item,
     });
@@ -711,7 +724,7 @@ export async function syncAll(client: OFWClient, opts: SyncAllOptions, store: Ca
   // Drafts go FIRST. They are the only folder a destructive tool
   // (ofw_save_draft / ofw_delete_draft) reads as its base, and they are cheap
   // and bounded — one list page plus one detail per draft. Running them last,
-  // behind inbox and sent, meant a bounded call (the Worker's
+  // behind inbox and sent, meant a bounded call (the
   // OFW_SYNC_MAX_REQUESTS=40) spent its whole budget backfilling history and
   // deferred drafts on every single call, so server-side draft edits stayed
   // invisible indefinitely while the response reported `drafts: 0`.

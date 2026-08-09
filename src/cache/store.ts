@@ -3,9 +3,9 @@
 // All message reads (list/get/drafts/unread-sent) are served from this cache;
 // only ofw_sync_messages walks OFW for new content. The SQL lives here ONCE,
 // over a tiny synchronous {@link SqlDriver}, so the same schema/queries back
-// both engines: `node:sqlite` on the stdio/desktop server (src/cache/node.ts)
-// and a Durable Object's SQLite on the hosted Cloudflare connector (a later
-// task). This module imports nothing platform-specific.
+// any engine: `node:sqlite` is the one that ships (src/cache/node.ts), and
+// another deployment can adapt a different driver to the same surface. This
+// module imports nothing platform-specific.
 
 export interface Recipient {
   userId: number;
@@ -38,6 +38,30 @@ export interface DraftRow {
 }
 
 export type FolderName = 'inbox' | 'sent' | 'drafts';
+
+/**
+ * One link in a draft's identity chain.
+ *
+ * `ofw_save_draft` replaces a draft by CREATE-then-DELETE (OFW's update-in-place
+ * endpoint silently no-ops — see the tool's docstring), so every edit mints a new
+ * OFW id. Ten edits of one message produced ten ids in a single real session,
+ * with nothing tying them together: the only question the API could answer was
+ * "does id N exist?", never "what happened to the thing I was editing?".
+ *
+ * A `draftKey` is minted once and carried across every replacement, and is
+ * retained when the draft is finally SENT — so the row for the sent message id
+ * still points back at the key. Resolving a key yields the chain's current id,
+ * whatever folder it now lives in.
+ */
+export interface DraftLineageRow {
+  /** The OFW message/draft id this row is about. Unique — one key per id. */
+  id: number;
+  /** Stable logical identity, surviving the create-then-delete churn. */
+  draftKey: string;
+  /** The id this one replaced, or null for the first link in the chain. */
+  previousId: number | null;
+  recordedAt: string;
+}
 
 export interface SyncState {
   lastSyncAt: string;
@@ -100,7 +124,7 @@ export interface SqlDriver {
 
 /**
  * The async cache surface the sync logic and MCP tools depend on. Async because
- * the hosted Worker backend answers over a Durable Object RPC boundary; the node
+ * a remote backend would answer over an RPC boundary; the node
  * backend fulfils it synchronously behind resolved promises.
  */
 export interface CacheStore {
@@ -120,8 +144,16 @@ export interface CacheStore {
   /** Batch read: returns the present drafts only (absent ids omitted), in one query/RPC. Empty ids → []. */
   getDrafts(ids: number[]): Promise<DraftRow[]>;
   listDrafts(opts: { page: number; size: number }): Promise<DraftRow[]>;
+  /** Total cached drafts, so a paged read can say whether it returned the whole set. */
+  countDrafts(): Promise<number>;
   deleteDraft(id: number): Promise<void>;
   listDraftIds(): Promise<number[]>;
+  recordDraftLineage(row: DraftLineageRow): Promise<void>;
+  getDraftLineageById(id: number): Promise<DraftLineageRow | null>;
+  /** Batch read: present rows only, absent ids omitted, one query/RPC. Empty ids → []. */
+  getDraftLineageByIds(ids: number[]): Promise<DraftLineageRow[]>;
+  /** Every id ever recorded under this key, oldest first. Empty when unknown. */
+  getDraftLineage(draftKey: string): Promise<DraftLineageRow[]>;
   getSyncState(folder: FolderName): Promise<SyncState | null>;
   setSyncState(folder: FolderName, state: SyncState): Promise<void>;
   getMeta(key: string): Promise<string | null>;
@@ -158,6 +190,13 @@ interface DraftDbRow {
   reply_to_id: number | null;
   modified_at: string;
   list_data_json: string;
+}
+
+interface DraftLineageDbRow {
+  id: number;
+  draft_key: string;
+  previous_id: number | null;
+  recorded_at: string;
 }
 
 interface AttachmentDbRow {
@@ -198,6 +237,15 @@ function draftFromDb(r: DraftDbRow): DraftRow {
     replyToId: r.reply_to_id,
     modifiedAt: r.modified_at,
     listData: JSON.parse(r.list_data_json),
+  };
+}
+
+function lineageFromDb(r: DraftLineageDbRow): DraftLineageRow {
+  return {
+    id: r.id,
+    draftKey: r.draft_key,
+    previousId: r.previous_id,
+    recordedAt: r.recorded_at,
   };
 }
 
@@ -264,6 +312,17 @@ export const SCHEMA_STATEMENTS = [
      key TEXT PRIMARY KEY,
      value TEXT NOT NULL
    )`,
+  // v3: draft identity chain. One row per OFW id, all the ids of one logical
+  // document sharing a `draft_key`. Survives ofw_save_draft's create-then-delete
+  // replacement AND the transition to a sent message, so "what happened to the
+  // draft I was editing?" is answerable without guessing which id is current.
+  `CREATE TABLE IF NOT EXISTS draft_lineage (
+     id INTEGER PRIMARY KEY,
+     draft_key TEXT NOT NULL,
+     previous_id INTEGER,
+     recorded_at TEXT NOT NULL
+   )`,
+  `CREATE INDEX IF NOT EXISTS idx_draft_lineage_key ON draft_lineage(draft_key, recorded_at, id)`,
   // v2: attachments table. Idempotent — IF NOT EXISTS.
   `CREATE TABLE IF NOT EXISTS attachments (
      file_id INTEGER PRIMARY KEY,
@@ -284,7 +343,7 @@ export const SCHEMA_STATEMENTS = [
  * every open. SQLite has no `ADD COLUMN IF NOT EXISTS`, so each statement runs
  * inside a try/catch — re-running against an already-migrated DB throws
  * "duplicate column name", which is swallowed. Driver-agnostic: both
- * `node:sqlite` and the Durable Object's SQLite raise synchronously.
+ * `node:sqlite` raises synchronously, as any conforming driver must.
  */
 export const MIGRATIONS = [
   // Resumable deep-sync cursor. Absent/NULL → SyncState.resumePage null.
@@ -292,7 +351,7 @@ export const MIGRATIONS = [
 ];
 
 /** The schema version stamped into the `meta` table on open. */
-export const SCHEMA_VERSION = '2';
+export const SCHEMA_VERSION = '3';
 
 // Build the WHERE clause + bound params for message queries. listMessages and
 // countMessages share this so the filter semantics can't drift.
@@ -382,7 +441,7 @@ export class OFWCacheCore {
 
   /**
    * Batch upsert every row in a single transaction — one round-trip's worth of
-   * work (crucial on the Durable Object backend, where each RPC is a subrequest).
+   * work (crucial where each round trip is a billed request).
    * Empty array is a no-op (no transaction opened).
    */
   upsertMessages(rows: MessageRow[]): void {
@@ -501,6 +560,12 @@ export class OFWCacheCore {
     return rows.map(draftFromDb);
   }
 
+  countDrafts(): number {
+    const r = this.db.get('SELECT COUNT(*) as n FROM drafts', []) as { n: number } | undefined;
+    /* v8 ignore next -- SELECT COUNT(*) always returns exactly one row; the ?./?? are defensive */
+    return r?.n ?? 0;
+  }
+
   deleteDraft(id: number): void {
     this.db.run('DELETE FROM drafts WHERE id = ?', [id]);
   }
@@ -508,6 +573,57 @@ export class OFWCacheCore {
   listDraftIds(): number[] {
     const rows = this.db.all('SELECT id FROM drafts', []) as Array<{ id: number }>;
     return rows.map((r) => r.id);
+  }
+
+  /**
+   * Link an id into a draft's identity chain. Upserts on id: re-recording the
+   * same id (e.g. a retried save) rewrites its link rather than duplicating it,
+   * so `getDraftLineage` can never report one id twice.
+   */
+  recordDraftLineage(row: DraftLineageRow): void {
+    this.db.run(
+      `INSERT INTO draft_lineage (id, draft_key, previous_id, recorded_at) VALUES (?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         draft_key=excluded.draft_key,
+         previous_id=excluded.previous_id,
+         recorded_at=excluded.recorded_at`,
+      [row.id, requireString('draft_lineage.draftKey', row.draftKey), nullish(row.previousId),
+        requireString('draft_lineage.recordedAt', row.recordedAt)],
+    );
+  }
+
+  getDraftLineageById(id: number): DraftLineageRow | null {
+    const r = this.db.get('SELECT * FROM draft_lineage WHERE id = ?', [id]) as DraftLineageDbRow | undefined;
+    return r ? lineageFromDb(r) : null;
+  }
+
+  /**
+   * Batch read — one query for a whole page of drafts. Where the cache is
+   * remote each cache call is a subrequest, so a per-draft lookup would spend
+   * the caller's sync budget on bookkeeping.
+   */
+  getDraftLineageByIds(ids: number[]): DraftLineageRow[] {
+    if (ids.length === 0) return [];
+    const placeholders = ids.map(() => '?').join(', ');
+    const rows = this.db.all(
+      `SELECT * FROM draft_lineage WHERE id IN (${placeholders})`,
+      ids,
+    ) as unknown as DraftLineageDbRow[];
+    return rows.map(lineageFromDb);
+  }
+
+  /**
+   * Every link in one chain, OLDEST FIRST — so the last element is the chain's
+   * current id. Ordered by recorded_at then id: two links written inside the
+   * same millisecond tie-break on id, and OFW mints ids monotonically, so the
+   * newer replacement always sorts last.
+   */
+  getDraftLineage(draftKey: string): DraftLineageRow[] {
+    const rows = this.db.all(
+      'SELECT * FROM draft_lineage WHERE draft_key = ? ORDER BY recorded_at ASC, id ASC',
+      [draftKey],
+    ) as unknown as DraftLineageDbRow[];
+    return rows.map(lineageFromDb);
   }
 
   getSyncState(folder: FolderName): SyncState | null {
@@ -627,7 +743,7 @@ export class OFWCacheCore {
 
 /**
  * Adapts a synchronous {@link OFWCacheCore} to the async {@link CacheStore}
- * interface. Used by the in-process node backend; the Durable Object backend
+ * interface. Used by the in-process node backend; a remote backend
  * implements CacheStore over a real RPC boundary instead.
  */
 export class LocalCacheStore implements CacheStore {
@@ -668,11 +784,26 @@ export class LocalCacheStore implements CacheStore {
   async listDrafts(opts: { page: number; size: number }): Promise<DraftRow[]> {
     return this.core.listDrafts(opts);
   }
+  async countDrafts(): Promise<number> {
+    return this.core.countDrafts();
+  }
   async deleteDraft(id: number): Promise<void> {
     this.core.deleteDraft(id);
   }
   async listDraftIds(): Promise<number[]> {
     return this.core.listDraftIds();
+  }
+  async recordDraftLineage(row: DraftLineageRow): Promise<void> {
+    this.core.recordDraftLineage(row);
+  }
+  async getDraftLineageById(id: number): Promise<DraftLineageRow | null> {
+    return this.core.getDraftLineageById(id);
+  }
+  async getDraftLineageByIds(ids: number[]): Promise<DraftLineageRow[]> {
+    return this.core.getDraftLineageByIds(ids);
+  }
+  async getDraftLineage(draftKey: string): Promise<DraftLineageRow[]> {
+    return this.core.getDraftLineage(draftKey);
   }
   async getSyncState(folder: FolderName): Promise<SyncState | null> {
     return this.core.getSyncState(folder);

@@ -124,17 +124,6 @@ Environment variables always take priority over the `.env` file. You can also pa
 OFW_USERNAME=you@example.com OFW_PASSWORD=yourpass node dist/index.js
 ```
 
-## Hosted connector (Cloudflare Worker)
-
-Instead of running `ofw-mcp` locally, you can add it to [claude.ai](https://claude.ai) as a **remote MCP connector** — a hosted Cloudflare Worker you reach from Settings → Connectors on Claude web, desktop, or mobile (connectors sync across all three). The same tool registrars back both targets, so the tools and behaviour are identical to the local stdio install; the Worker just wraps them with [`@chrischall/mcp-connector`](https://www.npmjs.com/package/@chrischall/mcp-connector) (the shared OAuth + streamable-HTTP harness) and a per-user [Durable Object](src/cache/durable.ts) cache in place of the local SQLite file.
-
-- **How you connect.** Each person you share the connector URL with logs in through the connector's own OAuth page with their **own** OurFamilyWizard email and password. Those credentials are stored (encrypted at rest) per user because OFW bearer tokens expire after ~6h with no refresh token, so the connector must be able to re-login on its own. One user can never see another's account or cache.
-- **Attachments are inline-only.** The Worker has no local filesystem, so `ofw_download_attachment` always returns bytes as MCP content blocks (`OFW_INLINE_ATTACHMENTS=true`) rather than writing to disk.
-- **Write mode defaults to `all`.** The hosted connector registers every tool by default, configurable per deployment via `OFW_WRITE_MODE` / `OFW_CALENDAR_WRITES` in `wrangler.jsonc` — see [Write protection](#write-protection-ofw_write_mode).
-- **Message sync is bounded and resumable.** To stay under Cloudflare's per-request subrequest cap, `ofw_sync_messages` on the hosted connector caps how many OFW requests one call makes (`OFW_SYNC_MAX_REQUESTS` in `wrangler.jsonc`, default `40`) and resumes across calls, so a large mailbox backfills over multiple `ofw_sync_messages` calls rather than one; the local stdio server is unbounded. See [`docs/DEPLOY-CONNECTOR.md`](docs/DEPLOY-CONNECTOR.md#sync--the-subrequest-limit).
-
-Standing this up requires a Cloudflare account and is a one-time setup for whoever hosts it; after that the `deploy-connector` job in `release-please.yml` deploys each release automatically (and **Actions → deploy-connector → Run workflow** deploys any ref on demand) — see [`docs/DEPLOY-CONNECTOR.md`](docs/DEPLOY-CONNECTOR.md) for the full runbook. `wrangler.jsonc` serves the Worker at a custom domain (`https://connector.ofw.nullnet.app/mcp`) plus the account's `*.workers.dev` URL; whoever hosts it uses their own domain. The local stdio / `.mcpb` install above remains the desktop-only alternative if you'd rather run it against just your own account.
-
 ## Available tools
 
 Read-only tools run automatically. Write tools ask for your confirmation first. The *Write mode* column shows the minimum `OFW_WRITE_MODE` a tool needs to be available at all — see [Write protection](#write-protection-ofw_write_mode) below.
@@ -148,8 +137,9 @@ Read-only tools run automatically. Write tools ask for your confirmation first. 
 | `ofw_get_message` | Full content of a single message | Auto | any |
 | `ofw_sync_messages` | Sync messages into the local cache (unread bodies left unfetched to avoid read receipts) | Auto | any |
 | `ofw_get_unread_sent` | Sent messages a recipient hasn't read yet (from local cache) | Auto | any |
-| `ofw_check_freshness` | Cheap live check that the cache still matches OFW — confirm a draft still exists unsent, without a full sync | Auto | any |
-| `ofw_download_attachment` | Download a message attachment to disk (or inline as MCP content) | Auto | any |
+| `ofw_check_freshness` | Cheap live check that the cache still matches OFW — per id, whether it is still a `draft` or was `sent`/`deleted`, without a full sync | Auto | any |
+| `ofw_status` | **One live call for "where does everything stand?"** — the full verified draft inventory, and the current state of any ids or draft keys | Auto | any |
+| `ofw_download_attachment` | Download a message attachment to disk, or inline as extracted content / bytes | Auto | any |
 | `ofw_send_message` | Send a message | Confirm | `all` |
 | `ofw_list_drafts` | Draft messages | Auto | any |
 | `ofw_save_draft` | Create or update a draft | Confirm | `drafts` |
@@ -188,9 +178,49 @@ So every read tool (`ofw_list_messages`, `ofw_list_drafts`, `ofw_get_message`, `
 
 Drafts additionally carry per-item `cacheStatus`, `asOf`, and **`serverConfirmed`** — true only when a completed drafts walk verified them inside the threshold. `serverConfirmed: false` means a draft's existence and unsent status are *remembered*, not known, and should not be stated as current fact without calling `ofw_check_freshness` first.
 
-`ofw_check_freshness` is the cheap way to re-verify: one request for a folder count comparison plus one per message id, no bodies, no full sync. Draft ids are compared by **content revision**, not timestamp, for the reason above. By default it only probes ids that are in the drafts cache — fetching any other id would mark an unread inbox message as read on OurFamilyWizard, an irreversible change to a court-visible record, so those are skipped unless you pass `allowMarkRead: true`.
+`ofw_check_freshness` is the cheap way to re-verify: one request for a folder count comparison plus one per message id, no bodies, no full sync. Draft ids are compared by **content revision**, not timestamp, for the reason above. It probes ids that are cached as drafts, as sent messages, or as already-read inbox messages freely, because none of those can change anything; any other id would mark an unread inbox message as read on OurFamilyWizard — an irreversible change to a court-visible record — so those are skipped unless you pass `allowMarkRead: true`.
 
 Set `OFW_FRESHNESS_TTL_SECONDS` to tune the threshold (default `300`, i.e. 5 minutes). Unusable values fall back to the default rather than widening the window.
+
+### Is it still what I think it is? (`ofw_status`)
+
+Freshness answers *how old is this data*. It does not answer *is this entity still what I think it is* — and that is a different failure. A draft that has been **sent** still exists on the server, so "does this id exist?" comes back `true` for the one case where the answer matters most.
+
+`ofw_status` is the call that should back any status summary:
+
+```json
+{
+  "checkedAt": "2026-07-28T09:12:00.000Z",
+  "requested": [
+    { "id": 538279699, "state": "sent", "sentAt": "2026-07-27T23:31:09", "inSync": false },
+    { "id": 538086428, "state": "draft", "inSync": true }
+  ],
+  "complete": true
+}
+```
+
+- `state` is `draft`, `sent`, `received`, `deleted` or `unknown`, read live from OFW. `unknown` means the question was **not** answered — it is not a synonym for "fine".
+- With no arguments it returns the **full** draft inventory, verified against OFW first.
+- `complete: true` means every part of the snapshot was confirmed live. If it is false, `incompleteReasons` says what wasn't, and the payload is not a basis for stating a count.
+
+**Draft keys.** Editing a draft mints a new OFW id every time (`ofw_save_draft` replaces by create-then-delete, because OFW's update-in-place endpoint silently no-ops). `ofw_save_draft` therefore also returns a `draftKey` that stays constant across every edit *and* follows the message into Sent. `ofw_status(draftKeys: ["dk_…"])` resolves it to the current id and state — including `state: "sent"` with `sentMessageId` — so "what happened to the draft I was working on?" is one call, not a guess about which id is current.
+
+### Absence is never reported from a stale cache
+
+A cached read that comes back **empty** is shaped identically to a verified "nothing there". `ofw_list_messages`, `ofw_list_drafts` and `ofw_get_unread_sent` therefore refuse rather than answer when the result is empty *and* the backing cache is not `fresh`:
+
+```json
+{
+  "result": "UNVERIFIED_EMPTY",
+  "reason": "No drafts were found, but the backing cache is \"unverified\" — it was last verified 207 min ago. Refusing to report absence from unverified data…",
+  "remedy": "Call ofw_sync_messages(folders:[\"drafts\"]) and retry, re-call with autoRefresh:true, or use ofw_status(includeDraftInventory:true) for a single live answer.",
+  "complete": false
+}
+```
+
+A false negative ("no, that was never sent") is more dangerous than a refusal, because it reads as a definitive answer. Non-empty results are never withheld — a stale cache that *did* find something is still evidence of presence, labelled with its age as before. Pass `autoRefresh: true` (or set `OFW_AUTO_REFRESH=true`) to have the tool sync and answer instead of refusing; a refresh that still cannot make the read verifiable refuses anyway.
+
+Every list read also carries an explicit **`complete`** boolean describing the *result set* — "this is every matching item on OurFamilyWizard as of `asOf`" — with a `completeNote` naming what is missing when it is false. Check it before stating a count.
 
 ### Write protection (`OFW_WRITE_MODE`)
 
@@ -203,6 +233,19 @@ The "Confirm" permission above is a *hint* to the MCP host — a host configured
 | `all` | Everything (send, calendar/expense/journal writes). Opt in deliberately — on a court-of-record account, prefer `drafts`. |
 
 Unrecognized values fail closed to `none`, with a warning on stderr — a typo never silently grants write access.
+
+### Reading is a write, too (`OFW_ALLOW_MARK_READ`)
+
+Fetching a message body for the first time marks it read on OurFamilyWizard and stamps a **"First Viewed" timestamp your co-parent can see**. That is part of the record and cannot be undone — and it happens as a side effect of an ordinary read, so `OFW_WRITE_MODE` does not govern it.
+
+By default nothing changes: reads behave exactly as they always have. Two controls exist if you want them:
+
+| Setting | Effect |
+|---|---|
+| `ofw_get_message(allowMarkRead: false)` | Refuses a fetch that would stamp an unread inbox message, returning a structured `MARK_READ_BLOCKED` payload instead. Cached bodies, sent messages and already-read messages still return normally — none of them can stamp anything. |
+| `OFW_ALLOW_MARK_READ=false` | Deployment-wide ceiling. No tool may stamp: `ofw_get_message` refuses, `ofw_check_freshness` / `ofw_status` ignore `allowMarkRead:true`, `ofw_sync_messages` ignores `fetchUnreadBodies:true`. A per-call argument cannot raise it. |
+
+`OFW_FETCH_UNREAD_BODIES=true` flips `ofw_sync_messages` to fetch unread bodies by default (off unless set) — useful where read receipts are routine. It is capped by `OFW_ALLOW_MARK_READ`.
 
 #### Calendar opt-in (`OFW_CALENDAR_WRITES`)
 

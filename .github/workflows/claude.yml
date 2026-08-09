@@ -1,9 +1,10 @@
 name: Claude Code
 
-# Ad-hoc dispatch: @claude mentions in issues, PR review threads, or
-# issue comments invoke anthropics/claude-code-action interactively.
-# Automated PR review lives in pr-auto-review.yml; this workflow is the
-# manual escape hatch ("@claude can you look at this specific thing?").
+# Thin stub — the job lives in chrischall/workflows.
+#
+# Ad-hoc dispatch: @claude mentions in issues, PR review threads, or issue
+# comments. Automated PR review lives in pr-auto-review.yml; this workflow is
+# the manual escape hatch, and the only review path available for fork PRs.
 
 on:
   issue_comment:
@@ -15,31 +16,15 @@ on:
   pull_request_review:
     types: [submitted]
 
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  id-token: write
+  actions: read
+
 jobs:
   claude:
-    if: |
-      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
-      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
-      (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude')) ||
-      (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')))
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      pull-requests: write
-      issues: write
-      id-token: write
-      actions: read # Required for Claude to read CI results on PRs
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v7
-        with:
-          fetch-depth: 1
-
-      - name: Run Claude Code
-        id: claude
-        uses: anthropics/claude-code-action@v1
-        with:
-          # Auth via the user's Claude Max plan (OAuth token from
-          # `claude setup-token`). Counts against the Max subscription's
-          # quota instead of pay-per-token API billing.
-          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+    uses: chrischall/workflows/.github/workflows/reusable-claude.yml@main
+    secrets:
+      claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}

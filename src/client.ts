@@ -7,15 +7,15 @@ import { BASE_URL, OFW_PROTOCOL_HEADERS, OFW_TOKEN_TTL_MS, OFW_TOKEN_EXPIRY_SKEW
 
 // Load .env for local dev; silently skip if dotenv is unavailable (e.g. mcpb
 // bundle). loadDotenvSafely applies override:false + quiet:true and swallows a
-// missing dotenv module. The try/catch additionally guards the Cloudflare
-// Worker runtime, where `import.meta.url` is undefined and
-// `fileURLToPath(undefined)` would otherwise throw at module init (Worker
+// missing dotenv module. The try/catch additionally guards a runtime where
+// `import.meta.url` is undefined and `fileURLToPath(undefined)` would
+// otherwise throw at module init (a failure at
 // startup validation) — there is no filesystem / .env to load there anyway.
 try {
   const dir = dirname(fileURLToPath(import.meta.url));
   await loadDotenvSafely({ path: join(dir, '..', '.env') });
 } catch {
-  /* v8 ignore next -- only reached in a non-Node runtime (Workers): no .env to load */
+  /* v8 ignore next -- only reached in a non-Node runtime: no .env to load */
 }
 
 export interface BinaryResponse {
@@ -76,7 +76,7 @@ export class OFWClient {
   // Optional injected auth resolver. When set, the refresh callback uses it
   // instead of the module-level global `resolveAuth` (env-var → fetchproxy
   // priority). A hosted per-user deployment injects its own resolver so each
-  // request carries that user's credentials — see the Cloudflare Worker
+  // request carries that user's credentials — see the per-user
   // deployment. Left undefined by the stdio path, which falls back to the
   // global resolver, keeping that behaviour byte-for-byte identical.
   private readonly authResolver: (() => Promise<ResolvedAuth>) | undefined;
