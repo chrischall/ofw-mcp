@@ -26,6 +26,18 @@ function setup(client: OFWClient) {
 
 afterEach(() => vi.restoreAllMocks());
 
+// Default write mode is now fail-safe 'none'; these tests exercise the write
+// tools, so opt into 'all'. The OFW_WRITE_MODE gating describe overrides.
+let originalWriteMode: string | undefined;
+beforeEach(() => {
+  originalWriteMode = process.env.OFW_WRITE_MODE;
+  process.env.OFW_WRITE_MODE = 'all';
+});
+afterEach(() => {
+  if (originalWriteMode === undefined) delete process.env.OFW_WRITE_MODE;
+  else process.env.OFW_WRITE_MODE = originalWriteMode;
+});
+
 describe('ofw_get_expense_totals', () => {
   it('calls /pub/v2/expense/expenses/totals', async () => {
     const totals = { owed: 100, paid: 50 };

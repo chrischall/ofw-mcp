@@ -18,7 +18,7 @@ npm run dev          # node --env-file=.env dist/index.js (requires built dist)
 ```
 src/
   index.ts          MCP server entry — SQLite-warning shim, then runMcp() from @chrischall/mcp-utils (builds McpServer, applies registrars with client as deps, prints banner, wires shutdown + stdio transport)
-  protocol.ts       Wire-level constants (BASE_URL, OFW_PROTOCOL_HEADERS, token TTL). Leaf module to break the client→auth→auth-password import cycle
+  protocol.ts       Wire-level constants (BASE_URL, OFW_PROTOCOL_HEADERS, token TTL) + assertOfwUrl() egress allowlist. Leaf module to break the client→auth→auth-password import cycle
   client.ts         OFWClient (Bearer token, 401/429 retry, JSON + binary). Delegates auth to ./auth.ts
   auth.ts           resolveAuth(): three-path priority (env vars → fetchproxy fallback → error). Template for sibling MCPs
   auth-password.ts  loginWithPassword(): legacy OFW Spring Security form login (kept as own module so auth.ts can mock it cleanly)
@@ -61,7 +61,7 @@ OFW_ATTACHMENTS_DIR       Optional. Where ofw_download_attachment writes (defaul
 OFW_INLINE_ATTACHMENTS    Optional. "1|true|yes|on" → return attachments as MCP content blocks by default
 OFW_DEBUG_LOG             Optional. "1|true|yes|on" → log every OFW request/response to stderr (Authorization redacted). Diagnostic only.
 OFW_FRESHNESS_TTL_SECONDS Optional. How long a verified-against-OFW folder stays labelled `fresh` in read tools' `freshness` block (default 300). Unusable values fall back to the default — a typo must never widen the window in which stale data reads as current.
-OFW_WRITE_MODE            Optional. "none" = no write tools registered; "drafts" = draft-level writes only (ofw_save_draft, ofw_delete_draft, ofw_upload_attachment — never send or calendar/expense/journal writes); "all" = everything (default). Unrecognized values fail closed to "none". Structural gate: gated tools are not registered at all, so no host setting or injected instruction can invoke them.
+OFW_WRITE_MODE            Optional. "none" = no write tools registered (DEFAULT — fail-safe); "drafts" = draft-level writes only (ofw_save_draft, ofw_delete_draft, ofw_upload_attachment — never send or calendar/expense/journal writes); "all" = everything. Unrecognized values fail closed to "none". Structural gate: gated tools are not registered at all, so no host setting or injected instruction can invoke them.
 OFW_ALLOW_MARK_READ       Optional. Default true (= the long-standing behaviour). "0|false|no|off" makes it a deployment-wide CEILING on reads that stamp the record: ofw_get_message refuses a fetch that would mark an unread inbox message read, ofw_check_freshness ignores allowMarkRead:true, ofw_sync_messages ignores fetchUnreadBodies:true. Unrecognized values fail closed to false (a typo must never keep stamping the record while looking configured)
 OFW_FETCH_UNREAD_BODIES   Optional. "1|true|yes|on" → ofw_sync_messages fetches unread inbox bodies by default (default false). Capped by OFW_ALLOW_MARK_READ
 OFW_AUTO_REFRESH          Optional. "1|true|yes|on" → when a cached read comes back EMPTY from a non-fresh cache, the read tools sync the backing folders and answer from the refreshed cache instead of refusing with UNVERIFIED_EMPTY (default false, i.e. refuse). Per-call `autoRefresh` overrides it. A refresh that does not make the read verifiable still refuses
