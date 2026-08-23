@@ -249,15 +249,8 @@ describe('ofw_list_messages (cache-backed)', () => {
     const spy = vi.spyOn(client, 'request');
     setup(client);
 
-    // Truncated pages carry a trailing truncation sentinel; this test is about
-    // WHICH messages come back, so filter it out and assert on it separately.
-    const call = async (args: Record<string, unknown>) => {
-      const parsed = JSON.parse((await handlers.get('ofw_list_messages')!(args)).content[0].text);
-      return {
-        ...parsed,
-        messages: parsed.messages.filter((m: { _truncated?: boolean }) => m._truncated !== true),
-      };
-    };
+    const call = async (args: Record<string, unknown>) =>
+      JSON.parse((await handlers.get('ofw_list_messages')!(args)).content[0].text);
 
     const oldest = await call({ folderId: 'inbox', since: '2025-10-01', until: '2025-11-14', size: 5, sort: 'oldest' });
     const newest = await call({ folderId: 'inbox', since: '2025-10-01', until: '2025-11-14', size: 5 });
@@ -4732,30 +4725,17 @@ describe('pagination state survives lossy consumption', () => {
     expect(parsed.note).toMatch(/Showing 1–60 of 391/);
     expect(parsed.freshness).toBeDefined();
 
-    // The honest record count is a SCALAR, ahead of the array — the number to
-    // read instead of `messages.length`, which the sentinel makes 61.
+    // The honest record count is a SCALAR, ahead of the array, so a consumer
+    // never has to reach `messages` to learn how many records came back.
     expect(parsed.returned).toBe(60);
     expect(keys.indexOf('returned')).toBeLessThan(keys.indexOf('messages'));
 
-    // And the array itself carries the marker, so a consumer that only ever
-    // touches `messages` still trips over the truncation.
-    expect(parsed.messages).toHaveLength(61);
-    const sentinel = parsed.messages.at(-1);
-    expect(sentinel._truncated).toBe(true);
-    expect(sentinel.shown).toBe(60);
-    expect(sentinel.total).toBe(391);
-    expect(sentinel.nextPage).toBe(2);
-    expect(sentinel.hint).toMatch(/page:2/);
-    // Its `subject` IS the warning, so a consumer that renders subject lines
-    // displays it rather than a blank row.
-    expect(sentinel.subject).toMatch(/NOT THE FULL RESULT SET/);
-    // But it still cannot be keyed or sorted as a record.
-    expect(sentinel.id).toBeUndefined();
-    expect(sentinel.sentAt).toBeUndefined();
-    expect(parsed.messages.filter((m: { id?: number }) => m.id !== undefined)).toHaveLength(60);
+    // `messages` holds records and nothing else — its length IS the count.
+    expect(parsed.messages).toHaveLength(60);
+    expect(parsed.messages.every((m: { id?: number }) => typeof m.id === 'number')).toBe(true);
   });
 
-  it('a COMPLETE result set reports nextPage:null and carries no sentinel', async () => {
+  it('a COMPLETE result set reports nextPage:null', async () => {
     seedRange(3);
     setup(makeClient({}));
 
@@ -4766,7 +4746,6 @@ describe('pagination state survives lossy consumption', () => {
     expect(parsed.hasMore).toBe(false);
     expect(parsed.nextPage).toBeNull();
     expect(parsed.messages).toHaveLength(3);
-    expect(parsed.messages.every((m: { _truncated?: boolean }) => m._truncated === undefined)).toBe(true);
     // Key order holds on the complete path too.
     expect(Object.keys(parsed).at(-1)).toBe('messages');
   });
@@ -4785,7 +4764,7 @@ describe('pagination state survives lossy consumption', () => {
     expect(parsed.nextPage).toBeNull();
   });
 
-  it('ofw_list_drafts leads with paging state and never puts a sentinel among write-bearing drafts', async () => {
+  it('ofw_list_drafts leads with paging state, drafts last', async () => {
     for (let i = 0; i < 3; i++) {
       upsertDraft({
         id: 700 + i, subject: `D${i}`, body: 'b', recipients: [],
@@ -4806,13 +4785,11 @@ describe('pagination state survives lossy consumption', () => {
     expect(keys.indexOf('freshness')).toBeLessThan(keys.indexOf('drafts'));
     expect(parsed.nextPage).toBe(2);
     expect(parsed.complete).toBe(false);
-    // Every element is a real draft: these ids/revisions are what the write
-    // tools are called with, so a marker among them could reach a delete.
     expect(parsed.drafts).toHaveLength(2);
     expect(parsed.drafts.every((d: { id?: number }) => typeof d.id === 'number')).toBe(true);
   });
 
-  it('ofw_get_unread_sent leads with paging state and never inflates an empty `unread`', async () => {
+  it('ofw_get_unread_sent leads with paging state, unread last', async () => {
     for (let i = 0; i < 3; i++) {
       upsertMessage(sampleMessageRow({
         id: 800 + i, folder: 'sent', fetchedBodyAt: '2026-05-04T12:00:00Z',
@@ -4831,8 +4808,7 @@ describe('pagination state survives lossy consumption', () => {
     expect(keys.at(-1)).toBe('unread');
     expect(keys.indexOf('freshness')).toBeLessThan(keys.indexOf('unread'));
     expect(parsed.nextPage).toBe(2);
-    // Truncated scan, but every recipient had read — `unread` must stay empty.
-    // A sentinel here would turn "nobody has unread mail" into a count of 1.
+    // Truncated scan, but every recipient had read — `unread` stays empty.
     expect(parsed.unread).toHaveLength(0);
     expect(parsed.scanned).toBe(2);
     expect(parsed.total).toBe(3);
@@ -4851,10 +4827,7 @@ describe('explicit `complete` on list reads (requirement 5)', () => {
     );
 
     expect(parsed.total).toBe(2);
-    // 1 message + the truncation sentinel. The extra element is the point: a
-    // consumer that iterates or slices the array cannot miss that it is a slice.
-    expect(parsed.messages).toHaveLength(2);
-    expect(parsed.messages.filter((m: { _truncated?: boolean }) => m._truncated !== true)).toHaveLength(1);
+    expect(parsed.messages).toHaveLength(1);
     expect(parsed.complete).toBe(false);
     expect(parsed.completeNote).toMatch(/1 of 2/);
   });

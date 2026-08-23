@@ -19,11 +19,9 @@
  *  - **The remedy is a value, not an inference.** `complete:false` tells a
  *    reader something is wrong; `nextPage: 2` tells it what to do. A reader that
  *    understands neither prose nor booleans can still act on an integer.
- *  - **Truncation is in the data's own path.** {@link truncationSentinel} puts a
- *    marker in the array itself, so a consumer that iterates or slices the
- *    array — precisely what a field-extracting script does — trips over it.
- *    Applied only where an extra element cannot be mistaken for a record; see
- *    the callers for the per-tool judgement.
+ *  - **The honest count is a scalar, not the array's length.** `returned` sits
+ *    in the header beside `total`, so a consumer never has to reach the array
+ *    to learn how many records came back.
  */
 
 /** Paging state for a `page`/`size` tool, derived from what the read returned. */
@@ -44,51 +42,6 @@ export interface PageState {
 export function pageState(input: { page: number; size: number; total: number }): PageState {
   const hasMore = input.page * input.size < input.total;
   return { hasMore, nextPage: hasMore ? input.page + 1 : null };
-}
-
-/** The marker appended to a truncated array. Shaped so no field of it reads as a record's own. */
-export interface TruncationSentinel {
-  _truncated: true;
-  shown: number;
-  total: number;
-  nextPage: number;
-  hint: string;
-  /** Carries the warning text, so a consumer that renders subject lines shows it. */
-  subject: string;
-}
-
-/**
- * Build the sentinel element for a truncated array.
- *
- * It carries no `id` and no `sentAt`, so a consumer that keys or sorts records
- * by those skips it rather than half-reading it as a message. It DOES carry a
- * `subject`, and that subject is the warning itself: the consumer this exists
- * to catch is a naive one that prints subject lines, and the choice there is
- * between showing it the warning and showing it a blank row. `_truncated` leads
- * with an underscore so it sorts and reads as metadata, not content.
- *
- * Note that this element makes the array one longer than the record count.
- * That is the mechanism, not a side effect — a marker that cannot change the
- * length is a marker that a `.length` or a slice can drop. The honest record
- * count is published as `returned` in the response header, ahead of the array.
- */
-export function truncationSentinel(input: {
-  shown: number;
-  total: number;
-  nextPage: number;
-  what: string;
-  argsHint: string;
-}): TruncationSentinel {
-  const hint = `NOT THE FULL RESULT SET: ${input.shown} of ${input.total} ${input.what} are in this array. `
-    + `Re-call with ${input.argsHint} to continue. Do not state a total, a date coverage, or an absence from this array alone.`;
-  return {
-    _truncated: true,
-    shown: input.shown,
-    total: input.total,
-    nextPage: input.nextPage,
-    hint,
-    subject: `[ofw-mcp] ${hint}`,
-  };
 }
 
 /** Paging state for an offset/limit tool (`start`/`max`). */

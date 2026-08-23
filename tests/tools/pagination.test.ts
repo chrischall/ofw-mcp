@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
-  offsetState, pageState, readUpstreamPaging, truncationSentinel, withPaginationFirst,
+  offsetState, pageState, readUpstreamPaging, withPaginationFirst,
 } from '../../src/tools/pagination.js';
 
 describe('pageState', () => {
@@ -12,24 +12,6 @@ describe('pageState', () => {
     // also be empty, forever.
     expect(pageState({ page: 9, size: 60, total: 3 })).toEqual({ hasMore: false, nextPage: null });
     expect(pageState({ page: 1, size: 60, total: 0 })).toEqual({ hasMore: false, nextPage: null });
-  });
-});
-
-describe('truncationSentinel', () => {
-  it('carries the remedy, and a subject that IS the warning', () => {
-    const s = truncationSentinel({ shown: 60, total: 391, nextPage: 2, what: 'messages', argsHint: 'page:2' });
-    expect(s._truncated).toBe(true);
-    expect(s.shown).toBe(60);
-    expect(s.total).toBe(391);
-    expect(s.nextPage).toBe(2);
-    expect(s.hint).toMatch(/NOT THE FULL RESULT SET/);
-    expect(s.hint).toMatch(/page:2/);
-    // A naive consumer that prints subject lines shows the warning rather than
-    // a blank row.
-    expect(s.subject).toMatch(/NOT THE FULL RESULT SET/);
-    // But it still cannot be keyed or sorted as a record.
-    expect((s as Record<string, unknown>).id).toBeUndefined();
-    expect((s as Record<string, unknown>).sentAt).toBeUndefined();
   });
 });
 
