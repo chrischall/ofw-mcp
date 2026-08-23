@@ -23,7 +23,7 @@ import {
 import { basename, join } from 'node:path';
 import { ApiRecipientSchema, deriveRead, expandPath, hasRealView, jsonErrorResponse, jsonResponse, mapRecipients, postMessageAndRefetch, reportsThreaded, reportsUnthreaded, textResponse, threadedReplyTo, verifyWriteLanded, withReadState } from './_shared.js';
 import { parseLenient } from '@chrischall/mcp-utils';
-import { pageState, truncationSentinel } from './pagination.js';
+import { pageState } from './pagination.js';
 
 // Schemas for the load-bearing fields of each /pub/v3 response this file
 // reads (issue #83). Loose: unknown keys pass through into cached listData.
@@ -406,9 +406,8 @@ export function registerMessageTools(
       complete,
       hasMore,
       nextPage,
-      // The honest record count, as a scalar and ahead of the array. A
-      // truncated `messages` array is one longer than this (the truncation
-      // sentinel), so this is the number to read — never `messages.length`.
+      // The honest record count, as a scalar and ahead of the array — a
+      // consumer never has to reach `messages` to learn how many came back.
       returned: messages.length,
       total,
       page,
@@ -434,22 +433,7 @@ export function registerMessageTools(
     }
     payload.freshness = freshness;
 
-    // The marker rides INSIDE the array, because iterating or slicing the array
-    // is exactly what a field-extracting consumer does — the one code path
-    // guaranteed to touch it. Only when items genuinely remain: appending to a
-    // page that is past the end (empty array, large `total`) would turn a
-    // length-0 result into a length-1 one and corrupt the very count it is
-    // meant to protect. It carries no `id`/`subject`/`sentAt`, so a consumer
-    // that keys records by id skips it rather than half-reading it.
-    payload.messages = hasMore && messages.length > 0
-      ? [...messages, truncationSentinel({
-        shown: messages.length,
-        total,
-        nextPage: nextPage as number,
-        what: `messages matching these filters (${sort} first)`,
-        argsHint: `page:${nextPage}`,
-      })]
-      : messages;
+    payload.messages = messages;
 
     return jsonResponse(payload);
   });
@@ -1086,10 +1070,7 @@ export function registerMessageTools(
     const { hasMore, nextPage } = pageState({ page, size, total });
 
     // Paging state and freshness ahead of the bulk — see the note in
-    // ofw_list_messages. No in-array sentinel here: `drafts[]` elements feed
-    // the WRITE tools (their `id`, `draftKey` and `revision` are what
-    // ofw_save_draft / ofw_delete_draft / ofw_send_message are called with), so
-    // a non-record element in that array can reach a destructive call site.
+    // ofw_list_messages.
     const payload: Record<string, unknown> = {
       complete,
       hasMore,
@@ -1432,11 +1413,10 @@ export function registerMessageTools(
 
     const { hasMore, nextPage } = pageState({ page, size, total });
 
-    // Paging state ahead of the bulk — see the note in ofw_list_messages. No
-    // in-array sentinel here: `unread` is a VERDICT list, not the scanned set,
-    // and it is routinely empty while the scan itself is truncated. Appending a
-    // marker to an empty `unread` would turn "nobody has unread mail" into a
-    // length-1 array — corrupting the count in the direction that matters most.
+    // Paging state ahead of the bulk — see the note in ofw_list_messages. Note
+    // `unread` is a VERDICT list, not the scanned set: it is routinely empty
+    // while the scan itself is truncated, which is what `scanned`/`total`/
+    // `complete` are for.
     const payload: Record<string, unknown> = {
       complete,
       hasMore,
