@@ -28,7 +28,8 @@ afterEach(() => vi.restoreAllMocks());
 
 describe('ofw_list_journal_entries', () => {
   it('calls /pub/v1/journals with default pagination', async () => {
-    const entries = { entries: [{ id: 1, title: 'Today' }] };
+    // The envelope OFW actually returns, captured live.
+    const entries = { data: [{ id: 1, title: 'Today' }], metadata: { currentPage: 1, totalPages: 1, totalElements: 1, perPage: 10, first: true, last: true } };
     const client = makeClient(entries);
     setup(client);
     const result = await handlers.get('ofw_list_journal_entries')!({});
@@ -42,7 +43,9 @@ describe('ofw_list_journal_entries', () => {
     expect(parsed.hasMore).toBe(false);
     expect(parsed.nextStart).toBeNull();
     // Paging state must precede the records in the serialized JSON.
-    expect(Object.keys(parsed).indexOf('hasMore')).toBeLessThan(Object.keys(parsed).indexOf('entries'));
+    expect(parsed.returned).toBe(1);
+    expect(parsed.total).toBe(1);
+    expect(Object.keys(parsed).indexOf('hasMore')).toBeLessThan(Object.keys(parsed).indexOf('data'));
   });
 
   it('reports zero returned when the response carries no record array at all', async () => {

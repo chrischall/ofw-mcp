@@ -30,7 +30,7 @@ export function registerJournalTools(server: McpServer, client: OFWClient): void
     // rather than inferred from a full page (verified live).
     const { returned, total, last } = readUpstreamPaging(data);
     const wrapped = withPaginationFirst({
-      state: offsetState({ start, max, returned, total, last }),
+      state: offsetState({ start, max, returned, total, last, base: 1 }),
       start, max, returned, total,
       hint: `Re-call ofw_list_journal_entries with start:${start + max}.`,
       payload: data,

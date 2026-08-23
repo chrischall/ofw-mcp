@@ -37,7 +37,7 @@ export function registerExpenseTools(server: McpServer, client: OFWClient): void
     // rather than inferred from a full page (verified live).
     const { returned, total, last } = readUpstreamPaging(data);
     const wrapped = withPaginationFirst({
-      state: offsetState({ start, max, returned, total, last }),
+      state: offsetState({ start, max, returned, total, last, base: 0 }),
       start, max, returned, total,
       hint: `Re-call ofw_list_expenses with start:${start + max}.`,
       payload: data,

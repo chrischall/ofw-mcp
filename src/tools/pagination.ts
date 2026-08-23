@@ -80,9 +80,22 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 }
 
 /** Read the paging facts out of an OFW `{data, metadata}` list envelope. */
+function recordArray(root: Record<string, unknown>): unknown[] | null {
+  // `data` is the envelope both endpoints actually use, so it wins outright.
+  // Falling back to the first array-valued key matters because the alternative
+  // is silently publishing `returned: 0` and a "reaches the end of the list"
+  // note ALONGSIDE real records — the precise shape of lie this file exists to
+  // prevent, reintroduced by a backend rename.
+  if (Array.isArray(root.data)) return root.data;
+  for (const value of Object.values(root)) {
+    if (Array.isArray(value)) return value;
+  }
+  return null;
+}
+
 export function readUpstreamPaging(payload: unknown): UpstreamPaging {
   const root = asRecord(payload);
-  const rows = root !== null && Array.isArray(root.data) ? root.data : null;
+  const rows = root === null ? null : recordArray(root);
   const meta = root === null ? null : asRecord(root.metadata);
   const total = meta !== null && typeof meta.totalElements === 'number' && Number.isFinite(meta.totalElements)
     ? meta.totalElements
@@ -107,12 +120,22 @@ export function offsetState(input: {
   returned: number;
   total: number | null;
   last?: boolean | null;
+  /**
+   * The `start` value that addresses the FIRST record: 0 for
+   * `ofw_list_expenses`, 1 for `ofw_list_journal_entries`. Required to turn
+   * `start` into a consumed count — assuming 0 for a 1-based tool overstates
+   * consumption by one and hides the final record at the exactly-one-remaining
+   * boundary (start:1, max:10, returned:10, total:11 reported "no more" while
+   * record 11 existed).
+   */
+  base: 0 | 1;
 }): OffsetState {
   const last = input.last ?? null;
+  const consumed = input.start - input.base + input.returned;
   const hasMore = last !== null
     ? !last
     : input.total !== null
-      ? input.start + input.returned < input.total
+      ? consumed < input.total
       : input.returned >= input.max;
   return { hasMore, nextStart: hasMore ? input.start + input.max : null };
 }
@@ -122,6 +145,12 @@ export function offsetState(input: {
  *
  * The upstream object is spread in BEHIND the paging keys, so every key it had
  * stays exactly where a caller expects to find it — only the order changes.
+ * The head is then spread a SECOND time: a plain `{...head, ...body}` lets an
+ * upstream `hasMore`/`nextStart`/`paginationNote` overwrite the computed value
+ * while keeping the head's key position, which is worse than either — a paging
+ * field sitting in the paging slot, reading as ours, sourced from elsewhere.
+ * Re-spreading restores our values; keys keep their first-insertion position,
+ * so the order is unchanged.
  * Returns null when the payload is not a plain object and therefore cannot
  * carry sibling keys at all; the caller then passes it through untouched rather
  * than relocating it, so this can never change a response's top-level shape.
@@ -139,7 +168,7 @@ export function withPaginationFirst(input: {
   if (body === null) return null;
 
   const scope = input.total !== null ? ` of ${input.total}` : '';
-  return {
+  const head: Record<string, unknown> = {
     hasMore: input.state.hasMore,
     nextStart: input.state.nextStart,
     start: input.start,
@@ -150,6 +179,6 @@ export function withPaginationFirst(input: {
       ? `PARTIAL: this response holds ${input.returned} record(s) starting at ${input.start}${scope}. `
         + `${input.hint} Do not state a total or an absence from this response alone.`
       : `This response reaches the end of the list${scope === '' ? '' : ` (${input.total} record(s) in total)`}.`,
-    ...body,
   };
+  return { ...head, ...body, ...head };
 }
