@@ -38,7 +38,7 @@ src/
     _shared.ts      recipient mapping, response helpers, path expansion
     delivery.ts     the attachment delivery ladder (image → extracted → raw bytes)
     freshness.ts    buildFreshness() — the `freshness` block every read tool returns (source/asOf/ageSeconds/staleness/warning)
-    pagination.ts   paging state that survives a lossy reader: pageState/offsetState/truncationSentinel/withPaginationFirst
+    pagination.ts   paging state that survives a lossy reader: pageState/offsetState/readUpstreamPaging/withPaginationFirst
     lifecycle.ts    "is this entity still what I think it is?" — classifyState/probeIds/resolveDraftKey/newDraftKey
     user.ts         ofw_get_profile, ofw_get_notifications
     messages.ts     folders, list, get, send, drafts, get_unread_sent, upload/download_attachment, sync_messages, check_freshness, status

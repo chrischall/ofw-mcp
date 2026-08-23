@@ -34,12 +34,22 @@ describe('readUpstreamPaging', () => {
     })).toEqual({ returned: 0, total: null, last: true });
   });
 
+  it('counts records under a NON-`data` key rather than publishing returned:0 beside them', () => {
+    // A backend rename must not produce `returned: 0` and a "reaches the end
+    // of the list" note sitting next to real records.
+    expect(readUpstreamPaging({ entries: [{ id: 1 }, { id: 2 }] }))
+      .toEqual({ returned: 2, total: null, last: null });
+    // `data` still wins outright when both are present.
+    expect(readUpstreamPaging({ other: [1, 2, 3], data: [1] }).returned).toBe(1);
+  });
+
   it('counts the records it did find, and degrades to nulls on an unrecognised shape', () => {
     expect(readUpstreamPaging({ data: [1, 2, 3], metadata: { last: false } }))
       .toEqual({ returned: 3, total: null, last: false });
     expect(readUpstreamPaging({ data: [1], metadata: { totalElements: 'nine', last: 'yes' } }))
       .toEqual({ returned: 1, total: null, last: null });
     expect(readUpstreamPaging({ data: 'not an array' })).toEqual({ returned: 0, total: null, last: null });
+    expect(readUpstreamPaging({ metadata: { last: true } })).toEqual({ returned: 0, total: null, last: true });
     expect(readUpstreamPaging({ message: 'no records' })).toEqual({ returned: 0, total: null, last: null });
     expect(readUpstreamPaging([1, 2])).toEqual({ returned: 0, total: null, last: null });
     expect(readUpstreamPaging(null)).toEqual({ returned: 0, total: null, last: null });
@@ -50,22 +60,36 @@ describe('offsetState', () => {
   it("trusts OFW's own `last` over any inference", () => {
     // A FULL page that the server calls the last one is the last one — the
     // heuristic below would have said "probably more" and been wrong.
-    expect(offsetState({ start: 0, max: 20, returned: 20, total: null, last: true }))
+    expect(offsetState({ start: 0, max: 20, returned: 20, total: null, last: true, base: 0 }))
       .toEqual({ hasMore: false, nextStart: null });
     // And a SHORT page the server does not call last still continues.
-    expect(offsetState({ start: 0, max: 20, returned: 3, total: null, last: false }))
+    expect(offsetState({ start: 0, max: 20, returned: 3, total: null, last: false, base: 0 }))
       .toEqual({ hasMore: true, nextStart: 20 });
   });
 
   it('falls back to the total when there is no `last`', () => {
-    expect(offsetState({ start: 0, max: 20, returned: 20, total: 55, last: null })).toEqual({ hasMore: true, nextStart: 20 });
-    expect(offsetState({ start: 40, max: 20, returned: 15, total: 55, last: null })).toEqual({ hasMore: false, nextStart: null });
+    expect(offsetState({ start: 0, max: 20, returned: 20, total: 55, last: null, base: 0 })).toEqual({ hasMore: true, nextStart: 20 });
+    expect(offsetState({ start: 40, max: 20, returned: 15, total: 55, last: null, base: 0 })).toEqual({ hasMore: false, nextStart: null });
+  });
+
+  it('respects the offset BASE at the exactly-one-remaining boundary, for both tools', () => {
+    // ofw_list_expenses is 0-based: page 1 is start:0, covering records 0..9.
+    // ofw_list_journal_entries is 1-based: page 1 is start:1, covering 1..10.
+    // Assuming 0 for the 1-based tool overstates consumption by one and hides
+    // the final record. `last` is absent here so the total fallback decides.
+    const args = { max: 10, returned: 10, last: null };
+    expect(offsetState({ ...args, start: 0, total: 11, base: 0 })).toEqual({ hasMore: true, nextStart: 10 });
+    expect(offsetState({ ...args, start: 1, total: 11, base: 1 })).toEqual({ hasMore: true, nextStart: 11 });
+    // And exactly-none-remaining stays false on both, so the fix does not
+    // trade a dropped record for an endless empty page.
+    expect(offsetState({ ...args, start: 0, total: 10, base: 0 })).toEqual({ hasMore: false, nextStart: null });
+    expect(offsetState({ ...args, start: 1, total: 10, base: 1 })).toEqual({ hasMore: false, nextStart: null });
   });
 
   it('with neither, treats a FULL page as probably-more and a short page as the end', () => {
     // The bias is one-directional on purpose: a wasted call beats a hidden page.
-    expect(offsetState({ start: 0, max: 20, returned: 20, total: null })).toEqual({ hasMore: true, nextStart: 20 });
-    expect(offsetState({ start: 0, max: 20, returned: 3, total: null })).toEqual({ hasMore: false, nextStart: null });
+    expect(offsetState({ start: 0, max: 20, returned: 20, total: null, base: 0 })).toEqual({ hasMore: true, nextStart: 20 });
+    expect(offsetState({ start: 0, max: 20, returned: 3, total: null, base: 0 })).toEqual({ hasMore: false, nextStart: null });
   });
 });
 
@@ -73,7 +97,7 @@ describe('withPaginationFirst', () => {
   it('spreads the envelope in behind the paging keys, renaming and dropping nothing', () => {
     const payload = { data: [{ id: 1 }], metadata: { last: false, totalElements: 55 } };
     const out = withPaginationFirst({
-      state: offsetState({ start: 0, max: 20, returned: 1, total: 55, last: false }),
+      state: offsetState({ start: 0, max: 20, returned: 1, total: 55, last: false, base: 0 }),
       start: 0, max: 20, returned: 1, total: 55,
       hint: 'Re-call with start:20.', payload,
     }) as Record<string, unknown>;
@@ -93,7 +117,7 @@ describe('withPaginationFirst', () => {
 
   it('says plainly when the response reaches the end, with and without a total', () => {
     const withTotal = withPaginationFirst({
-      state: offsetState({ start: 0, max: 20, returned: 3, total: 3, last: true }),
+      state: offsetState({ start: 0, max: 20, returned: 3, total: 3, last: true, base: 0 }),
       start: 0, max: 20, returned: 3, total: 3, hint: 'x', payload: { data: [] },
     }) as Record<string, unknown>;
     expect(withTotal.hasMore).toBe(false);
@@ -102,18 +126,40 @@ describe('withPaginationFirst', () => {
     expect(withTotal.total).toBe(3);
 
     const noTotal = withPaginationFirst({
-      state: offsetState({ start: 0, max: 20, returned: 3, total: null, last: true }),
+      state: offsetState({ start: 0, max: 20, returned: 3, total: null, last: true, base: 0 }),
       start: 0, max: 20, returned: 3, total: null, hint: 'x', payload: { data: [] },
     }) as Record<string, unknown>;
     expect(noTotal.paginationNote).toMatch(/reaches the end/);
     expect(noTotal.total).toBeUndefined();
   });
 
+  it('never lets an upstream key overwrite a COMPUTED paging value', () => {
+    // {...head, ...body} would leave an upstream `hasMore` sitting in the
+    // paging slot, reading as ours but sourced from elsewhere — worse than
+    // either losing the field or moving it.
+    const out = withPaginationFirst({
+      state: offsetState({ start: 0, max: 20, returned: 1, total: null, last: false, base: 0 }),
+      start: 0, max: 20, returned: 1, total: null, hint: 'x',
+      payload: { hasMore: false, nextStart: 999, paginationNote: 'upstream lies', returned: 4242, data: [{ id: 1 }] },
+    }) as Record<string, unknown>;
+
+    expect(out.hasMore).toBe(true);
+    expect(out.nextStart).toBe(20);
+    expect(out.returned).toBe(1);
+    expect(out.paginationNote).toMatch(/PARTIAL/);
+    // Values are ours; key ORDER is still paging-first.
+    const keys = Object.keys(out);
+    expect(keys[0]).toBe('hasMore');
+    expect(keys.indexOf('paginationNote')).toBeLessThan(keys.indexOf('data'));
+    // Non-colliding upstream keys are untouched.
+    expect(out.data).toEqual([{ id: 1 }]);
+  });
+
   it('returns null for a payload that cannot carry sibling keys, so the caller passes it through', () => {
     // Never relocate records to add a field: a bare array or a scalar keeps
     // its exact top-level shape instead.
     const args = {
-      state: offsetState({ start: 0, max: 20, returned: 0, total: null }),
+      state: offsetState({ start: 0, max: 20, returned: 0, total: null, base: 0 }),
       start: 0, max: 20, returned: 0, total: null, hint: 'x',
     };
     expect(withPaginationFirst({ ...args, payload: [{ id: 1 }] })).toBeNull();
