@@ -53,15 +53,24 @@ export interface TruncationSentinel {
   total: number;
   nextPage: number;
   hint: string;
+  /** Carries the warning text, so a consumer that renders subject lines shows it. */
+  subject: string;
 }
 
 /**
  * Build the sentinel element for a truncated array.
  *
- * Deliberately carries no `id`/`subject`/`sentAt`: a consumer that keys records
- * by id skips it rather than half-reading it as a message, while a consumer
- * that counts or prints elements sees it. `_truncated` leads with an underscore
- * so it sorts and reads as metadata, not content.
+ * It carries no `id` and no `sentAt`, so a consumer that keys or sorts records
+ * by those skips it rather than half-reading it as a message. It DOES carry a
+ * `subject`, and that subject is the warning itself: the consumer this exists
+ * to catch is a naive one that prints subject lines, and the choice there is
+ * between showing it the warning and showing it a blank row. `_truncated` leads
+ * with an underscore so it sorts and reads as metadata, not content.
+ *
+ * Note that this element makes the array one longer than the record count.
+ * That is the mechanism, not a side effect — a marker that cannot change the
+ * length is a marker that a `.length` or a slice can drop. The honest record
+ * count is published as `returned` in the response header, ahead of the array.
  */
 export function truncationSentinel(input: {
   shown: number;
@@ -70,17 +79,19 @@ export function truncationSentinel(input: {
   what: string;
   argsHint: string;
 }): TruncationSentinel {
+  const hint = `NOT THE FULL RESULT SET: ${input.shown} of ${input.total} ${input.what} are in this array. `
+    + `Re-call with ${input.argsHint} to continue. Do not state a total, a date coverage, or an absence from this array alone.`;
   return {
     _truncated: true,
     shown: input.shown,
     total: input.total,
     nextPage: input.nextPage,
-    hint: `NOT THE FULL RESULT SET: ${input.shown} of ${input.total} ${input.what} are in this array. `
-      + `Re-call with ${input.argsHint} to continue. Do not state a total, a date coverage, or an absence from this array alone.`,
+    hint,
+    subject: `[ofw-mcp] ${hint}`,
   };
 }
 
-/** Paging state for an offset/limit tool (`start`/`max`), where the server may not report a total. */
+/** Paging state for an offset/limit tool (`start`/`max`). */
 export interface OffsetState {
   hasMore: boolean;
   /** The `start` value to pass to fetch the next slice. Null when nothing remains. */
@@ -88,59 +99,79 @@ export interface OffsetState {
 }
 
 /**
- * Compute paging state for a `start`/`max` read.
+ * The paging facts OFW's own `metadata` envelope carries, if any.
  *
- * When the upstream response carries no total there is no way to KNOW whether
- * more remain, so a full page is treated as "probably more". The bias is
- * deliberate and one-directional: a `nextStart` that turns out to return an
- * empty page costs one wasted call, while a null that hides a further page
- * reproduces the exact bug this file is about — a slice narrated as the whole.
+ * Verified against live `/pub/v2/expense/expenses` and `/pub/v1/journals`
+ * responses: both return `{data: [...], metadata: {...}}`, and both metadata
+ * blocks carry a `last` boolean. Journal additionally reports `totalElements`;
+ * expenses does not.
+ *
+ * `count` is deliberately NOT read as a total. A live expenses response came
+ * back `{data: [], metadata: {count: 20, perPage: 20, ...}}` — `count` tracks
+ * the PAGE SIZE, not the result count, so trusting it would report "20
+ * expenses" for an empty page.
  */
-export function offsetState(input: { start: number; max: number; returned: number; total: number | null }): OffsetState {
-  const hasMore = input.total === null
-    ? input.returned >= input.max
-    : input.start + input.returned < input.total;
+export interface UpstreamPaging {
+  /** Records in this page. */
+  returned: number;
+  /** Total across all pages, when the upstream reports one. */
+  total: number | null;
+  /** OFW's own "this is the final page" verdict, when present. */
+  last: boolean | null;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+/** Read the paging facts out of an OFW `{data, metadata}` list envelope. */
+export function readUpstreamPaging(payload: unknown): UpstreamPaging {
+  const root = asRecord(payload);
+  const rows = root !== null && Array.isArray(root.data) ? root.data : null;
+  const meta = root === null ? null : asRecord(root.metadata);
+  const total = meta !== null && typeof meta.totalElements === 'number' && Number.isFinite(meta.totalElements)
+    ? meta.totalElements
+    : null;
+  const last = meta !== null && typeof meta.last === 'boolean' ? meta.last : null;
+  return { returned: rows?.length ?? 0, total, last };
+}
+
+/**
+ * Compute paging state for a `start`/`max` read, best evidence first.
+ *
+ * OFW's own `metadata.last` is authoritative and used whenever present. Failing
+ * that, a reported total settles it. Failing both, a FULL page is treated as
+ * probably-more: the bias is one-directional on purpose, because a `nextStart`
+ * that returns an empty page costs one wasted call, while a null that hides a
+ * further page reproduces the bug this file exists for — a slice narrated as
+ * the whole.
+ */
+export function offsetState(input: {
+  start: number;
+  max: number;
+  returned: number;
+  total: number | null;
+  last?: boolean | null;
+}): OffsetState {
+  const last = input.last ?? null;
+  const hasMore = last !== null
+    ? !last
+    : input.total !== null
+      ? input.start + input.returned < input.total
+      : input.returned >= input.max;
   return { hasMore, nextStart: hasMore ? input.start + input.max : null };
 }
 
 /**
- * Count the records in a raw upstream list payload, and find the array itself.
+ * Prepend paging state to an OFW list envelope, renaming and dropping nothing.
  *
- * OFW's list endpoints return an object wrapping the rows (`{data: [...]}` on
- * /pub/v3/messages, `{systemFolders: [...]}` on /pub/v1/messageFolders), but
- * the expense and journal endpoints are unvalidated passthroughs whose shape is
- * not recorded anywhere, so a bare array is handled too rather than assumed
- * away.
- */
-export function findRecordArray(payload: unknown): { key: string | null; rows: unknown[] } | null {
-  if (Array.isArray(payload)) return { key: null, rows: payload };
-  if (typeof payload !== 'object' || payload === null) return null;
-  for (const [key, value] of Object.entries(payload as Record<string, unknown>)) {
-    if (Array.isArray(value)) return { key, rows: value };
-  }
-  return null;
-}
-
-/** Read a numeric `total`-ish field off a raw upstream payload, if it has one. */
-export function findTotal(payload: unknown): number | null {
-  if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) return null;
-  const obj = payload as Record<string, unknown>;
-  for (const key of ['total', 'totalCount', 'totalResults', 'count']) {
-    const value = obj[key];
-    if (typeof value === 'number' && Number.isFinite(value)) return value;
-  }
-  return null;
-}
-
-/**
- * Wrap a raw upstream list payload so its paging state comes FIRST, without
- * renaming or dropping anything the upstream sent.
- *
- * An object payload is spread in behind the paging keys, so every key it had
- * stays exactly where a caller expects to find it — only the order changes. A
- * bare-array payload cannot carry sibling keys at all, so it is nested under
- * `dataKey` and the response says so; that is the one shape change here, and it
- * is the price of a bare array being unable to describe itself.
+ * The upstream object is spread in BEHIND the paging keys, so every key it had
+ * stays exactly where a caller expects to find it — only the order changes.
+ * Returns null when the payload is not a plain object and therefore cannot
+ * carry sibling keys at all; the caller then passes it through untouched rather
+ * than relocating it, so this can never change a response's top-level shape.
  */
 export function withPaginationFirst(input: {
   state: OffsetState;
@@ -150,9 +181,12 @@ export function withPaginationFirst(input: {
   total: number | null;
   hint: string;
   payload: unknown;
-  dataKey: string;
-}): Record<string, unknown> {
-  const head: Record<string, unknown> = {
+}): Record<string, unknown> | null {
+  const body = asRecord(input.payload);
+  if (body === null) return null;
+
+  const scope = input.total !== null ? ` of ${input.total}` : '';
+  return {
     hasMore: input.state.hasMore,
     nextStart: input.state.nextStart,
     start: input.start,
@@ -160,18 +194,9 @@ export function withPaginationFirst(input: {
     returned: input.returned,
     ...(input.total !== null ? { total: input.total } : {}),
     paginationNote: input.state.hasMore
-      ? `PARTIAL: this response holds ${input.returned} record(s) starting at ${input.start}`
-        + `${input.total !== null ? ` of ${input.total}` : ' and there are probably more (the page came back full)'}. `
+      ? `PARTIAL: this response holds ${input.returned} record(s) starting at ${input.start}${scope}. `
         + `${input.hint} Do not state a total or an absence from this response alone.`
-      : `This response reaches the end of the list${input.total !== null ? ` (${input.total} record(s) in total)` : ' (the page came back short, so there is nothing after it)'}.`,
-  };
-
-  if (typeof input.payload === 'object' && input.payload !== null && !Array.isArray(input.payload)) {
-    return { ...head, ...(input.payload as Record<string, unknown>) };
-  }
-  return {
-    ...head,
-    dataShapeNote: `OurFamilyWizard returned a bare array for this endpoint, which cannot carry the fields above alongside it. The records are under \`${input.dataKey}\`.`,
-    [input.dataKey]: input.payload,
+      : `This response reaches the end of the list${scope === '' ? '' : ` (${input.total} record(s) in total)`}.`,
+    ...body,
   };
 }

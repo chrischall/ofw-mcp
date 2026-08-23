@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
-  findRecordArray, findTotal, offsetState, pageState, truncationSentinel, withPaginationFirst,
+  offsetState, pageState, readUpstreamPaging, truncationSentinel, withPaginationFirst,
 } from '../../src/tools/pagination.js';
 
 describe('pageState', () => {
@@ -16,7 +16,7 @@ describe('pageState', () => {
 });
 
 describe('truncationSentinel', () => {
-  it('carries the remedy and nothing that could pass for a record', () => {
+  it('carries the remedy, and a subject that IS the warning', () => {
     const s = truncationSentinel({ shown: 60, total: 391, nextPage: 2, what: 'messages', argsHint: 'page:2' });
     expect(s._truncated).toBe(true);
     expect(s.shown).toBe(60);
@@ -24,109 +24,118 @@ describe('truncationSentinel', () => {
     expect(s.nextPage).toBe(2);
     expect(s.hint).toMatch(/NOT THE FULL RESULT SET/);
     expect(s.hint).toMatch(/page:2/);
-    expect(Object.keys(s)).toEqual(['_truncated', 'shown', 'total', 'nextPage', 'hint']);
+    // A naive consumer that prints subject lines shows the warning rather than
+    // a blank row.
+    expect(s.subject).toMatch(/NOT THE FULL RESULT SET/);
+    // But it still cannot be keyed or sorted as a record.
+    expect((s as Record<string, unknown>).id).toBeUndefined();
+    expect((s as Record<string, unknown>).sentAt).toBeUndefined();
+  });
+});
+
+describe('readUpstreamPaging', () => {
+  it('reads the live OFW envelope: journal reports totalElements and last', () => {
+    // Shape captured from a live /pub/v1/journals response.
+    expect(readUpstreamPaging({
+      metadata: { currentPage: 1, totalPages: 0, totalElements: 0, perPage: 1, first: true, last: true },
+      data: [],
+    })).toEqual({ returned: 0, total: 0, last: true });
+  });
+
+  it('reads the live OFW envelope: expenses reports last but NO total, and `count` is not one', () => {
+    // Shape captured from a live /pub/v2/expense/expenses response. `count`
+    // sat next to an EMPTY data array — it tracks page size, not the result
+    // count, so reading it as a total would report 20 expenses for 0 records.
+    expect(readUpstreamPaging({
+      data: [],
+      metadata: { perPage: 20, currentPage: 1, page: 1, count: 20, first: true, last: true },
+    })).toEqual({ returned: 0, total: null, last: true });
+  });
+
+  it('counts the records it did find, and degrades to nulls on an unrecognised shape', () => {
+    expect(readUpstreamPaging({ data: [1, 2, 3], metadata: { last: false } }))
+      .toEqual({ returned: 3, total: null, last: false });
+    expect(readUpstreamPaging({ data: [1], metadata: { totalElements: 'nine', last: 'yes' } }))
+      .toEqual({ returned: 1, total: null, last: null });
+    expect(readUpstreamPaging({ data: 'not an array' })).toEqual({ returned: 0, total: null, last: null });
+    expect(readUpstreamPaging({ message: 'no records' })).toEqual({ returned: 0, total: null, last: null });
+    expect(readUpstreamPaging([1, 2])).toEqual({ returned: 0, total: null, last: null });
+    expect(readUpstreamPaging(null)).toEqual({ returned: 0, total: null, last: null });
   });
 });
 
 describe('offsetState', () => {
-  it('uses the total when the upstream reports one', () => {
-    expect(offsetState({ start: 0, max: 20, returned: 20, total: 55 })).toEqual({ hasMore: true, nextStart: 20 });
-    expect(offsetState({ start: 40, max: 20, returned: 15, total: 55 })).toEqual({ hasMore: false, nextStart: null });
+  it("trusts OFW's own `last` over any inference", () => {
+    // A FULL page that the server calls the last one is the last one — the
+    // heuristic below would have said "probably more" and been wrong.
+    expect(offsetState({ start: 0, max: 20, returned: 20, total: null, last: true }))
+      .toEqual({ hasMore: false, nextStart: null });
+    // And a SHORT page the server does not call last still continues.
+    expect(offsetState({ start: 0, max: 20, returned: 3, total: null, last: false }))
+      .toEqual({ hasMore: true, nextStart: 20 });
   });
 
-  it('without a total, treats a FULL page as probably-more and a short page as the end', () => {
+  it('falls back to the total when there is no `last`', () => {
+    expect(offsetState({ start: 0, max: 20, returned: 20, total: 55, last: null })).toEqual({ hasMore: true, nextStart: 20 });
+    expect(offsetState({ start: 40, max: 20, returned: 15, total: 55, last: null })).toEqual({ hasMore: false, nextStart: null });
+  });
+
+  it('with neither, treats a FULL page as probably-more and a short page as the end', () => {
     // The bias is one-directional on purpose: a wasted call beats a hidden page.
     expect(offsetState({ start: 0, max: 20, returned: 20, total: null })).toEqual({ hasMore: true, nextStart: 20 });
     expect(offsetState({ start: 0, max: 20, returned: 3, total: null })).toEqual({ hasMore: false, nextStart: null });
-    expect(offsetState({ start: 0, max: 20, returned: 0, total: null })).toEqual({ hasMore: false, nextStart: null });
-  });
-});
-
-describe('findRecordArray', () => {
-  it('finds the rows whether the payload wraps them or IS them', () => {
-    expect(findRecordArray({ data: [1, 2] })).toEqual({ key: 'data', rows: [1, 2] });
-    expect(findRecordArray({ total: 9, entries: [1] })).toEqual({ key: 'entries', rows: [1] });
-    expect(findRecordArray([1, 2, 3])).toEqual({ key: null, rows: [1, 2, 3] });
-  });
-
-  it('returns null when there is no array to find', () => {
-    expect(findRecordArray({ total: 9 })).toBeNull();
-    expect(findRecordArray(null)).toBeNull();
-    expect(findRecordArray('nope')).toBeNull();
-  });
-});
-
-describe('findTotal', () => {
-  it('reads any of the common total spellings, and only numbers', () => {
-    expect(findTotal({ total: 55 })).toBe(55);
-    expect(findTotal({ totalCount: 12 })).toBe(12);
-    expect(findTotal({ totalResults: 7 })).toBe(7);
-    expect(findTotal({ count: 4 })).toBe(4);
-    expect(findTotal({ total: '55' })).toBeNull();
-    expect(findTotal({ total: Number.NaN })).toBeNull();
-    expect(findTotal({ entries: [] })).toBeNull();
-    expect(findTotal([1, 2])).toBeNull();
-    expect(findTotal(null)).toBeNull();
   });
 });
 
 describe('withPaginationFirst', () => {
-  it('spreads an OBJECT payload in behind the paging keys, renaming and dropping nothing', () => {
-    const payload = { total: 55, entries: [{ id: 1 }], someUpstreamExtra: true };
+  it('spreads the envelope in behind the paging keys, renaming and dropping nothing', () => {
+    const payload = { data: [{ id: 1 }], metadata: { last: false, totalElements: 55 } };
     const out = withPaginationFirst({
-      state: offsetState({ start: 0, max: 20, returned: 1, total: 55 }),
+      state: offsetState({ start: 0, max: 20, returned: 1, total: 55, last: false }),
       start: 0, max: 20, returned: 1, total: 55,
-      hint: 'Re-call with start:20.', payload, dataKey: 'entries',
-    });
+      hint: 'Re-call with start:20.', payload,
+    }) as Record<string, unknown>;
 
     // Paging first, records after — the property this whole change is for.
     const keys = Object.keys(out);
     expect(keys[0]).toBe('hasMore');
-    expect(keys.indexOf('nextStart')).toBeLessThan(keys.indexOf('entries'));
-    expect(keys.indexOf('paginationNote')).toBeLessThan(keys.indexOf('entries'));
-    // Every upstream key survives.
-    expect(out.entries).toEqual([{ id: 1 }]);
-    expect(out.someUpstreamExtra).toBe(true);
+    expect(keys.indexOf('nextStart')).toBeLessThan(keys.indexOf('data'));
+    expect(keys.indexOf('paginationNote')).toBeLessThan(keys.indexOf('data'));
+    // Every upstream key survives, untouched.
+    expect(out.data).toEqual([{ id: 1 }]);
+    expect(out.metadata).toEqual({ last: false, totalElements: 55 });
     expect(out.nextStart).toBe(20);
     expect(out.paginationNote).toMatch(/PARTIAL/);
     expect(out.paginationNote).toMatch(/of 55/);
-    expect(out.dataShapeNote).toBeUndefined();
-    // The upstream's own `total` wins the key — same value we computed with.
-    expect(out.total).toBe(55);
-  });
-
-  it('nests a BARE-ARRAY payload and says so, since an array cannot carry sibling keys', () => {
-    const out = withPaginationFirst({
-      state: offsetState({ start: 0, max: 20, returned: 20, total: null }),
-      start: 0, max: 20, returned: 20, total: null,
-      hint: 'Re-call with start:20.', payload: [{ id: 1 }], dataKey: 'expenses',
-    });
-
-    expect(out.expenses).toEqual([{ id: 1 }]);
-    expect(out.dataShapeNote).toMatch(/bare array/);
-    expect(out.total).toBeUndefined();
-    expect(out.paginationNote).toMatch(/probably more/);
-    expect(Object.keys(out).indexOf('hasMore')).toBeLessThan(Object.keys(out).indexOf('expenses'));
   });
 
   it('says plainly when the response reaches the end, with and without a total', () => {
     const withTotal = withPaginationFirst({
-      state: offsetState({ start: 0, max: 20, returned: 3, total: 3 }),
-      start: 0, max: 20, returned: 3, total: 3,
-      hint: 'x', payload: { data: [] }, dataKey: 'expenses',
-    });
+      state: offsetState({ start: 0, max: 20, returned: 3, total: 3, last: true }),
+      start: 0, max: 20, returned: 3, total: 3, hint: 'x', payload: { data: [] },
+    }) as Record<string, unknown>;
     expect(withTotal.hasMore).toBe(false);
     expect(withTotal.paginationNote).toMatch(/reaches the end/);
     expect(withTotal.paginationNote).toMatch(/3 record\(s\) in total/);
+    expect(withTotal.total).toBe(3);
 
     const noTotal = withPaginationFirst({
-      state: offsetState({ start: 0, max: 20, returned: 3, total: null }),
-      start: 0, max: 20, returned: 3, total: null,
-      hint: 'x', payload: null, dataKey: 'expenses',
-    });
-    expect(noTotal.hasMore).toBe(false);
-    expect(noTotal.paginationNote).toMatch(/came back short/);
-    // A non-object, non-array payload still round-trips under the data key.
-    expect(noTotal.expenses).toBeNull();
+      state: offsetState({ start: 0, max: 20, returned: 3, total: null, last: true }),
+      start: 0, max: 20, returned: 3, total: null, hint: 'x', payload: { data: [] },
+    }) as Record<string, unknown>;
+    expect(noTotal.paginationNote).toMatch(/reaches the end/);
+    expect(noTotal.total).toBeUndefined();
+  });
+
+  it('returns null for a payload that cannot carry sibling keys, so the caller passes it through', () => {
+    // Never relocate records to add a field: a bare array or a scalar keeps
+    // its exact top-level shape instead.
+    const args = {
+      state: offsetState({ start: 0, max: 20, returned: 0, total: null }),
+      start: 0, max: 20, returned: 0, total: null, hint: 'x',
+    };
+    expect(withPaginationFirst({ ...args, payload: [{ id: 1 }] })).toBeNull();
+    expect(withPaginationFirst({ ...args, payload: null })).toBeNull();
+    expect(withPaginationFirst({ ...args, payload: 'nope' })).toBeNull();
   });
 });

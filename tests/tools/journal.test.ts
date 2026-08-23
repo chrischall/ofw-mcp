@@ -58,6 +58,16 @@ describe('ofw_list_journal_entries', () => {
     expect(parsed.message).toBe('no records');
   });
 
+  it('passes a non-object payload straight through, unwrapped and unrelocated', async () => {
+    // OFW returns {data, metadata} here (verified live), so this is defensive.
+    // If it ever returned a bare array, adding a paging field would mean moving
+    // the records — never worth changing a response's top-level shape.
+    const client = makeClient([{ id: 1 }]);
+    setup(client);
+    const parsed = JSON.parse((await handlers.get('ofw_list_journal_entries')!({})).content[0].text);
+    expect(parsed).toEqual([{ id: 1 }]);
+  });
+
   it('passes custom start and max', async () => {
     const client = makeClient({ entries: [] });
     setup(client);

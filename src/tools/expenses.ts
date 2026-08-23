@@ -2,7 +2,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import type { OFWClient } from '../client.js';
 import { jsonResponse } from './_shared.js';
-import { findRecordArray, findTotal, offsetState, withPaginationFirst } from './pagination.js';
+import { offsetState, readUpstreamPaging, withPaginationFirst } from './pagination.js';
 import { getWriteMode } from '../config.js';
 
 export function registerExpenseTools(server: McpServer, client: OFWClient): void {
@@ -31,16 +31,21 @@ export function registerExpenseTools(server: McpServer, client: OFWClient): void
     // Paging state FIRST, records after — a partial read of a spilled response
     // must reach "there are more" before it reaches the records. See
     // src/tools/pagination.ts for why the order is load-bearing.
-    const found = findRecordArray(data);
-    const returned = found?.rows.length ?? 0;
-    const total = findTotal(data);
-    return jsonResponse(withPaginationFirst({
-      state: offsetState({ start, max, returned, total }),
+    //
+    // OFW wraps these listings as {data, metadata} and its metadata carries a
+    // `last` boolean, so "is there another page" is answered by the server
+    // rather than inferred from a full page (verified live).
+    const { returned, total, last } = readUpstreamPaging(data);
+    const wrapped = withPaginationFirst({
+      state: offsetState({ start, max, returned, total, last }),
       start, max, returned, total,
       hint: `Re-call ofw_list_expenses with start:${start + max}.`,
       payload: data,
-      dataKey: 'expenses',
-    }));
+    });
+    // A payload that is not a plain object cannot carry the paging keys at all.
+    // Pass it through untouched rather than relocating it — an added field is
+    // never worth changing a response's top-level shape.
+    return jsonResponse(wrapped ?? data);
   });
 
   if (allowWrites) server.registerTool('ofw_create_expense', {

@@ -4710,9 +4710,9 @@ describe('pagination state survives lossy consumption', () => {
     // Asserted explicitly because it is exactly what a refactor undoes silently.
     const keys = Object.keys(parsed);
     expect(keys[0]).toBe('complete');
-    expect(keys.slice(0, 4)).toEqual(['complete', 'hasMore', 'nextPage', 'total']);
+    expect(keys.slice(0, 5)).toEqual(['complete', 'hasMore', 'nextPage', 'returned', 'total']);
     expect(keys.at(-1)).toBe('messages');
-    for (const key of ['complete', 'hasMore', 'nextPage', 'total', 'page', 'size', 'completeNote', 'note', 'freshness']) {
+    for (const key of ['complete', 'hasMore', 'nextPage', 'returned', 'total', 'page', 'size', 'completeNote', 'note', 'freshness']) {
       expect(keys.indexOf(key)).toBeGreaterThanOrEqual(0);
       expect(keys.indexOf(key)).toBeLessThan(keys.indexOf('messages'));
     }
@@ -4732,6 +4732,11 @@ describe('pagination state survives lossy consumption', () => {
     expect(parsed.note).toMatch(/Showing 1–60 of 391/);
     expect(parsed.freshness).toBeDefined();
 
+    // The honest record count is a SCALAR, ahead of the array — the number to
+    // read instead of `messages.length`, which the sentinel makes 61.
+    expect(parsed.returned).toBe(60);
+    expect(keys.indexOf('returned')).toBeLessThan(keys.indexOf('messages'));
+
     // And the array itself carries the marker, so a consumer that only ever
     // touches `messages` still trips over the truncation.
     expect(parsed.messages).toHaveLength(61);
@@ -4741,9 +4746,12 @@ describe('pagination state survives lossy consumption', () => {
     expect(sentinel.total).toBe(391);
     expect(sentinel.nextPage).toBe(2);
     expect(sentinel.hint).toMatch(/page:2/);
-    // The sentinel must not be mistakable for a record.
+    // Its `subject` IS the warning, so a consumer that renders subject lines
+    // displays it rather than a blank row.
+    expect(sentinel.subject).toMatch(/NOT THE FULL RESULT SET/);
+    // But it still cannot be keyed or sorted as a record.
     expect(sentinel.id).toBeUndefined();
-    expect(sentinel.subject).toBeUndefined();
+    expect(sentinel.sentAt).toBeUndefined();
     expect(parsed.messages.filter((m: { id?: number }) => m.id !== undefined)).toHaveLength(60);
   });
 
@@ -4792,7 +4800,8 @@ describe('pagination state survives lossy consumption', () => {
     );
 
     const keys = Object.keys(parsed);
-    expect(keys.slice(0, 3)).toEqual(['complete', 'hasMore', 'nextPage']);
+    expect(keys.slice(0, 4)).toEqual(['complete', 'hasMore', 'nextPage', 'returned']);
+    expect(parsed.returned).toBe(2);
     expect(keys.at(-1)).toBe('drafts');
     expect(keys.indexOf('freshness')).toBeLessThan(keys.indexOf('drafts'));
     expect(parsed.nextPage).toBe(2);

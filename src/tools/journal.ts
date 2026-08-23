@@ -2,7 +2,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import type { OFWClient } from '../client.js';
 import { jsonResponse } from './_shared.js';
-import { findRecordArray, findTotal, offsetState, withPaginationFirst } from './pagination.js';
+import { offsetState, readUpstreamPaging, withPaginationFirst } from './pagination.js';
 import { getWriteMode } from '../config.js';
 
 export function registerJournalTools(server: McpServer, client: OFWClient): void {
@@ -21,19 +21,24 @@ export function registerJournalTools(server: McpServer, client: OFWClient): void
     const start = args.start ?? 1;
     const max = args.max ?? 10;
     const data = await client.request('GET', `/pub/v1/journals?start=${start}&max=${max}`);
-    // Paging state FIRST, records after — see src/tools/pagination.ts. The
-    // offset is 1-based here, so `nextStart` is start+max in this tool's own
-    // numbering; it is always the literal value to pass back, never a delta.
-    const found = findRecordArray(data);
-    const returned = found?.rows.length ?? 0;
-    const total = findTotal(data);
-    return jsonResponse(withPaginationFirst({
-      state: offsetState({ start, max, returned, total }),
+    // Paging state FIRST, records after — a partial read of a spilled response
+    // must reach "there are more" before it reaches the records. See
+    // src/tools/pagination.ts for why the order is load-bearing.
+    //
+    // OFW wraps these listings as {data, metadata} and its metadata carries a
+    // `last` boolean, so "is there another page" is answered by the server
+    // rather than inferred from a full page (verified live).
+    const { returned, total, last } = readUpstreamPaging(data);
+    const wrapped = withPaginationFirst({
+      state: offsetState({ start, max, returned, total, last }),
       start, max, returned, total,
       hint: `Re-call ofw_list_journal_entries with start:${start + max}.`,
       payload: data,
-      dataKey: 'journalEntries',
-    }));
+    });
+    // A payload that is not a plain object cannot carry the paging keys at all.
+    // Pass it through untouched rather than relocating it — an added field is
+    // never worth changing a response's top-level shape.
+    return jsonResponse(wrapped ?? data);
   });
 
   if (allowWrites) server.registerTool('ofw_create_journal_entry', {

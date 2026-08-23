@@ -406,6 +406,10 @@ export function registerMessageTools(
       complete,
       hasMore,
       nextPage,
+      // The honest record count, as a scalar and ahead of the array. A
+      // truncated `messages` array is one longer than this (the truncation
+      // sentinel), so this is the number to read — never `messages.length`.
+      returned: messages.length,
       total,
       page,
       size,
@@ -1090,6 +1094,7 @@ export function registerMessageTools(
       complete,
       hasMore,
       nextPage,
+      returned: drafts.length,
       total,
       page,
       size,
