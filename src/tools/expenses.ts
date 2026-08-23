@@ -2,6 +2,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import type { OFWClient } from '../client.js';
 import { jsonResponse } from './_shared.js';
+import { offsetState, readUpstreamPaging, withPaginationFirst } from './pagination.js';
 import { getWriteMode } from '../config.js';
 
 export function registerExpenseTools(server: McpServer, client: OFWClient): void {
@@ -17,17 +18,34 @@ export function registerExpenseTools(server: McpServer, client: OFWClient): void
   });
 
   server.registerTool('ofw_list_expenses', {
-    description: 'List OurFamilyWizard expenses with pagination',
+    description: 'List OurFamilyWizard expenses. Offset-paged via start/max. The response leads with its paging state — `hasMore` and `nextStart` (null when the list is exhausted) — BEFORE the records, so a truncated or partially-read response still says whether more remain. Never state an expense total or an absence from one page.',
     annotations: { readOnlyHint: true },
     inputSchema: {
-      start: z.number().int().min(0).describe('Start offset (default 0)').optional(),
+      start: z.number().int().min(0).describe('Start offset, 0-based (default 0). To continue a listing, pass the `nextStart` from the previous response.').optional(),
       max: z.number().int().min(1).describe('Max results (default 20)').optional(),
     },
   }, async (args) => {
     const start = args.start ?? 0;
     const max = args.max ?? 20;
     const data = await client.request('GET', `/pub/v2/expense/expenses?start=${start}&max=${max}`);
-    return jsonResponse(data);
+    // Paging state FIRST, records after — a partial read of a spilled response
+    // must reach "there are more" before it reaches the records. See
+    // src/tools/pagination.ts for why the order is load-bearing.
+    //
+    // OFW wraps these listings as {data, metadata} and its metadata carries a
+    // `last` boolean, so "is there another page" is answered by the server
+    // rather than inferred from a full page (verified live).
+    const { returned, total, last } = readUpstreamPaging(data);
+    const wrapped = withPaginationFirst({
+      state: offsetState({ start, max, returned, total, last }),
+      start, max, returned, total,
+      hint: `Re-call ofw_list_expenses with start:${start + max}.`,
+      payload: data,
+    });
+    // A payload that is not a plain object cannot carry the paging keys at all.
+    // Pass it through untouched rather than relocating it — an added field is
+    // never worth changing a response's top-level shape.
+    return jsonResponse(wrapped ?? data);
   });
 
   if (allowWrites) server.registerTool('ofw_create_expense', {

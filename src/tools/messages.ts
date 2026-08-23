@@ -23,6 +23,7 @@ import {
 import { basename, join } from 'node:path';
 import { ApiRecipientSchema, deriveRead, expandPath, hasRealView, jsonErrorResponse, jsonResponse, mapRecipients, postMessageAndRefetch, reportsThreaded, reportsUnthreaded, textResponse, threadedReplyTo, verifyWriteLanded, withReadState } from './_shared.js';
 import { parseLenient } from '@chrischall/mcp-utils';
+import { pageState, truncationSentinel } from './pagination.js';
 
 // Schemas for the load-bearing fields of each /pub/v3 response this file
 // reads (issue #83). Loose: unknown keys pass through into cached listData.
@@ -311,7 +312,7 @@ export function registerMessageTools(
   });
 
   server.registerTool('ofw_list_messages', {
-    description: 'List messages from the local OurFamilyWizard cache. Supports filtering by folder, date range, and a substring query on subject+body. Pagination is offset-based but if you know what you want (a date range, a topic), prefer the filters over walking pages — the cache may have 1000+ messages. Returns an explicit `complete` boolean describing the RESULT SET: true means "this is every message on OurFamilyWizard matching these filters as of freshness.asOf" — check it before asserting a count. An empty result from a cache that is not verified-fresh is REFUSED (result:"UNVERIFIED_EMPTY") rather than reported as an absence; pass autoRefresh:true to sync and answer instead.',
+    description: 'List messages from the local OurFamilyWizard cache. Supports filtering by folder, date range, and a substring query on subject+body. Pagination is offset-based (1-based `page`) but if you know what you want (a date range, a topic), prefer the filters over walking pages — the cache may have 1000+ messages. Results are newest-first by default; `sort:"oldest"` starts at the old end of a range instead of paging to it. Returns an explicit `complete` boolean describing the RESULT SET: true means "this is every message on OurFamilyWizard matching these filters as of freshness.asOf" — check it before asserting a count. An empty result from a cache that is not verified-fresh is REFUSED (result:"UNVERIFIED_EMPTY") rather than reported as an absence; pass autoRefresh:true to sync and answer instead.',
     annotations: { readOnlyHint: false },
     inputSchema: {
       folderId: z.string().describe('Folder name: "inbox", "sent", or "both" (default "both")').optional(),
@@ -320,11 +321,13 @@ export function registerMessageTools(
       since: z.string().describe('ISO date or datetime — only messages with sent_at >= since (inclusive)').optional(),
       until: z.string().describe('ISO date or datetime — only messages with sent_at < until (exclusive)').optional(),
       q: z.string().describe('Substring match on subject AND body (case-insensitive). Use to find messages on a specific topic.').optional(),
+      sort: z.enum(['newest', 'oldest']).describe('Result order: "newest" (default, newest first) or "oldest" (oldest first). This decides which end a truncated page keeps — with "newest" page 1 of a wide date range holds its most RECENT slice, with "oldest" its earliest. Use "oldest" to start at the old end of a range instead of paging to it.').optional(),
       autoRefresh: z.boolean().describe(AUTO_REFRESH_DESC).optional(),
     },
   }, async (args) => {
     const page = args.page ?? 1;
     const size = args.size ?? 50;
+    const sort = args.sort ?? 'newest';
     const folderArg = args.folderId ?? 'both';
 
     let folder: 'inbox' | 'sent' | undefined;
@@ -360,7 +363,7 @@ export function registerMessageTools(
         // can be stale (a message read after it was first scraped), so `read`
         // is derived from the record's own `viewedAt`/`fetchedBodyAt` and
         // `listData` is forced to agree — see withReadState.
-        const messages = (await cache.listMessages({ ...filter, page, size })).map((m) => withReadState(m));
+        const messages = (await cache.listMessages({ ...filter, page, size, sort })).map((m) => withReadState(m));
         // Served from the local cache, so the result must say how old it is and
         // whether anything vouches for it — a caller cannot state current state
         // from this payload without either re-reading or surfacing the caveat.
@@ -388,7 +391,30 @@ export function registerMessageTools(
     const fullSlice = page === 1 && messages.length === total;
     const complete = fullSlice && freshness.staleness === 'fresh' && freshness.historyComplete;
 
-    const payload: Record<string, unknown> = { messages, total, page, size, complete, freshness };
+    const { hasMore, nextPage } = pageState({ page, size, total });
+
+    // Key ORDER is load-bearing, not cosmetic. These responses are large enough
+    // that a client may spill them to a file and a script may pull out only the
+    // fields it thought to name — which is how a correct `complete:false` next
+    // to a correct `completeNote` was dropped, and a 60-of-391 slice was
+    // reported as "October 1-28 is unreachable". Paging state and freshness are
+    // emitted BEFORE `messages` so a head, a preview, or a truncated read hits
+    // "this is a slice, fetch page 2" before it hits the first message body.
+    // The bulk goes last. See tests asserting this order — a refactor that
+    // rebuilds this literal silently undoes it.
+    const payload: Record<string, unknown> = {
+      complete,
+      hasMore,
+      nextPage,
+      // The honest record count, as a scalar and ahead of the array. A
+      // truncated `messages` array is one longer than this (the truncation
+      // sentinel), so this is the number to read — never `messages.length`.
+      returned: messages.length,
+      total,
+      page,
+      size,
+      sort,
+    };
     if (!complete) {
       payload.completeNote = [
         !fullSlice ? `this page holds ${messages.length} of ${total} matching cached messages` : null,
@@ -401,11 +427,29 @@ export function registerMessageTools(
     if (total === 0) {
       payload.note = 'No messages match these filters, and the cache IS verified-fresh for these folders — so this is a real "nothing matched", not a stale-cache artefact. If you expected results, relax the filters.';
     } else if (page * size < total) {
-      payload.note = `Showing ${(page - 1) * size + 1}–${(page - 1) * size + messages.length} of ${total}. Increase 'page' to see more, or narrow with since/until/q.`;
+      payload.note = `Showing ${(page - 1) * size + 1}–${(page - 1) * size + messages.length} of ${total}, ${sort} first. Increase 'page' to see more, narrow with since/until/q, or set sort:"${sort === 'newest' ? 'oldest' : 'newest'}" to start from the other end.`;
     }
     if (refreshed) {
       payload.autoRefreshed = true;
     }
+    payload.freshness = freshness;
+
+    // The marker rides INSIDE the array, because iterating or slicing the array
+    // is exactly what a field-extracting consumer does — the one code path
+    // guaranteed to touch it. Only when items genuinely remain: appending to a
+    // page that is past the end (empty array, large `total`) would turn a
+    // length-0 result into a length-1 one and corrupt the very count it is
+    // meant to protect. It carries no `id`/`subject`/`sentAt`, so a consumer
+    // that keys records by id skips it rather than half-reading it.
+    payload.messages = hasMore && messages.length > 0
+      ? [...messages, truncationSentinel({
+        shown: messages.length,
+        total,
+        nextPage: nextPage as number,
+        what: `messages matching these filters (${sort} first)`,
+        argsHint: `page:${nextPage}`,
+      })]
+      : messages;
 
     return jsonResponse(payload);
   });
@@ -1039,7 +1083,22 @@ export function registerMessageTools(
     const fullSlice = page === 1 && drafts.length === total;
     const complete = serverConfirmed && fullSlice;
 
-    const payload: Record<string, unknown> = { drafts, total, page, size, complete, freshness };
+    const { hasMore, nextPage } = pageState({ page, size, total });
+
+    // Paging state and freshness ahead of the bulk — see the note in
+    // ofw_list_messages. No in-array sentinel here: `drafts[]` elements feed
+    // the WRITE tools (their `id`, `draftKey` and `revision` are what
+    // ofw_save_draft / ofw_delete_draft / ofw_send_message are called with), so
+    // a non-record element in that array can reach a destructive call site.
+    const payload: Record<string, unknown> = {
+      complete,
+      hasMore,
+      nextPage,
+      returned: drafts.length,
+      total,
+      page,
+      size,
+    };
     if (!complete) {
       payload.completeNote = [
         !fullSlice ? `this page holds ${drafts.length} of ${total} cached drafts` : null,
@@ -1060,6 +1119,8 @@ export function registerMessageTools(
     if (verifyNote !== null) {
       payload.verifyNote = verifyNote;
     }
+    payload.freshness = freshness;
+    payload.drafts = drafts;
     return jsonResponse(payload);
   });
 
@@ -1369,7 +1430,22 @@ export function registerMessageTools(
       }
     }
 
-    const payload: Record<string, unknown> = { unread, scanned: sent.length, total, complete, freshness };
+    const { hasMore, nextPage } = pageState({ page, size, total });
+
+    // Paging state ahead of the bulk — see the note in ofw_list_messages. No
+    // in-array sentinel here: `unread` is a VERDICT list, not the scanned set,
+    // and it is routinely empty while the scan itself is truncated. Appending a
+    // marker to an empty `unread` would turn "nobody has unread mail" into a
+    // length-1 array — corrupting the count in the direction that matters most.
+    const payload: Record<string, unknown> = {
+      complete,
+      hasMore,
+      nextPage,
+      total,
+      scanned: sent.length,
+      page,
+      size,
+    };
     if (!complete) {
       payload.completeNote = `This verdict covers the ${sent.length} of ${total} cached sent messages on this page${freshness.staleness === 'fresh' ? '' : `, from a cache that is "${freshness.staleness}"`}. It is not a statement about every message you have sent.`;
     }
@@ -1379,6 +1455,8 @@ export function registerMessageTools(
     if (refreshed) {
       payload.autoRefreshed = true;
     }
+    payload.freshness = freshness;
+    payload.unread = unread;
     return jsonResponse(payload);
   });
 
