@@ -99,16 +99,27 @@ export interface UpsertAttachmentInput {
   messageId: number;
 }
 
+/** Result order for a paged listing. `newest` is the long-standing default. */
+export type MessageSort = 'newest' | 'oldest';
+
 export interface ListMessagesOptions {
   folder?: 'inbox' | 'sent';   // omit to search both
   page: number;
   size: number;
+  /**
+   * Which end of the matching set a truncated page keeps. Defaults to
+   * 'newest' (sent_at descending), so every existing caller is unaffected.
+   * It reaches the ORDER BY rather than re-sorting the returned rows: sorting
+   * after the LIMIT only reorders the page you already got, leaving a wide
+   * date range still holding nothing but its most recent slice.
+   */
+  sort?: MessageSort;
   since?: string;              // ISO date or datetime, inclusive
   until?: string;              // ISO date or datetime, exclusive
   q?: string;                  // substring match on subject and body (case-insensitive)
 }
 
-export type MessageFilter = Omit<ListMessagesOptions, 'page' | 'size'>;
+export type MessageFilter = Omit<ListMessagesOptions, 'page' | 'size' | 'sort'>;
 
 export type SqlParam = string | number | null;
 type Row = Record<string, unknown>;
@@ -484,9 +495,14 @@ export class OFWCacheCore {
   listMessages(opts: ListMessagesOptions): MessageRow[] {
     const { where, params } = buildMessageFilter(opts);
     const offset = (opts.page - 1) * opts.size;
+    // Direction comes from a closed set of literals, never from caller input.
+    // `id` tiebreaks in the SAME direction as `sent_at` so paging stays a total
+    // order: rows sharing a timestamp keep a stable relative position, and none
+    // is skipped or repeated at a page boundary.
+    const dir = opts.sort === 'oldest' ? 'ASC' : 'DESC';
     const rows = this.db.all(
       `SELECT * FROM messages ${where}
-       ORDER BY sent_at DESC, id DESC
+       ORDER BY sent_at ${dir}, id ${dir}
        LIMIT ? OFFSET ?`,
       [...params, opts.size, offset],
     ) as unknown as MessageDbRow[];

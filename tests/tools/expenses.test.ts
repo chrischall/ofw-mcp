@@ -50,6 +50,19 @@ describe('ofw_list_expenses', () => {
     );
   });
 
+  it('reports zero returned when the response carries no record array at all', async () => {
+    // Defensive: these endpoints are unvalidated passthroughs, so an upstream
+    // shape with no array must still produce honest paging state rather than
+    // a crash or a confident "there is more".
+    const client = makeClient({ message: 'no records' });
+    setup(client);
+    const parsed = JSON.parse((await handlers.get('ofw_list_expenses')!({})).content[0].text);
+    expect(parsed.returned).toBe(0);
+    expect(parsed.hasMore).toBe(false);
+    expect(parsed.nextStart).toBeNull();
+    expect(parsed.message).toBe('no records');
+  });
+
   it('passes custom start and max', async () => {
     const client = makeClient([]);
     setup(client);

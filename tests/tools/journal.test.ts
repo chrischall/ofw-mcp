@@ -35,7 +35,27 @@ describe('ofw_list_journal_entries', () => {
     expect(client.request).toHaveBeenCalledWith('GET', '/pub/v1/journals?start=1&max=10');
     expect(result.content).toHaveLength(1);
     expect(result.content[0].type).toBe('text');
-    expect(JSON.parse(result.content[0].text)).toEqual(entries);
+    // Every upstream key survives untouched — the wrapper only prepends paging
+    // state, it never renames or drops what OurFamilyWizard sent.
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed).toMatchObject(entries);
+    expect(parsed.hasMore).toBe(false);
+    expect(parsed.nextStart).toBeNull();
+    // Paging state must precede the records in the serialized JSON.
+    expect(Object.keys(parsed).indexOf('hasMore')).toBeLessThan(Object.keys(parsed).indexOf('entries'));
+  });
+
+  it('reports zero returned when the response carries no record array at all', async () => {
+    // Defensive: these endpoints are unvalidated passthroughs, so an upstream
+    // shape with no array must still produce honest paging state rather than
+    // a crash or a confident "there is more".
+    const client = makeClient({ message: 'no records' });
+    setup(client);
+    const parsed = JSON.parse((await handlers.get('ofw_list_journal_entries')!({})).content[0].text);
+    expect(parsed.returned).toBe(0);
+    expect(parsed.hasMore).toBe(false);
+    expect(parsed.nextStart).toBeNull();
+    expect(parsed.message).toBe('no records');
   });
 
   it('passes custom start and max', async () => {

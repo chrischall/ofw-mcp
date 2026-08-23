@@ -232,6 +232,57 @@ describe('ofw_list_messages (cache-backed)', () => {
     expect(parsed.total).toBe(1);
   });
 
+  it('sort:"oldest" makes a TRUNCATED page hold the oldest messages, not a reshuffled newest page', async () => {
+    // 25 messages across a wide range, read 5 at a time. The point of the
+    // parameter is which 5 you get — re-sorting the returned page would give
+    // back the same newest 5 in a different order, which is the non-fix.
+    for (let i = 0; i < 25; i++) {
+      upsertMessage(sampleMessageRow({
+        id: 500 + i,
+        folder: 'inbox',
+        subject: `Msg ${i}`,
+        sentAt: new Date(Date.parse('2025-10-01T00:00:00Z') + i * 86400000).toISOString(),
+      }));
+    }
+    markFresh('inbox');
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request');
+    setup(client);
+
+    // Truncated pages carry a trailing truncation sentinel; this test is about
+    // WHICH messages come back, so filter it out and assert on it separately.
+    const call = async (args: Record<string, unknown>) => {
+      const parsed = JSON.parse((await handlers.get('ofw_list_messages')!(args)).content[0].text);
+      return {
+        ...parsed,
+        messages: parsed.messages.filter((m: { _truncated?: boolean }) => m._truncated !== true),
+      };
+    };
+
+    const oldest = await call({ folderId: 'inbox', since: '2025-10-01', until: '2025-11-14', size: 5, sort: 'oldest' });
+    const newest = await call({ folderId: 'inbox', since: '2025-10-01', until: '2025-11-14', size: 5 });
+
+    expect(oldest.total).toBe(25);
+    expect(oldest.messages.map((m: { id: number }) => m.id)).toEqual([500, 501, 502, 503, 504]);
+    // Disjoint from the default page — not the same rows in another order.
+    expect(newest.messages.map((m: { id: number }) => m.id)).toEqual([524, 523, 522, 521, 520]);
+
+    // Truncation is still reported honestly, and the order is named so the
+    // caller can tell WHICH 5 of 25 these are.
+    expect(oldest.sort).toBe('oldest');
+    expect(oldest.complete).toBe(false);
+    expect(oldest.note).toMatch(/oldest first/);
+    expect(oldest.note).toMatch(/sort:"newest"/);
+    // Omitting sort must not change what an existing caller sees.
+    expect(newest.sort).toBe('newest');
+    expect(newest.note).toMatch(/newest first/);
+    // Paging in the requested order stays a partition: no gaps, no repeats.
+    const page2 = await call({ folderId: 'inbox', since: '2025-10-01', until: '2025-11-14', size: 5, sort: 'oldest', page: 2 });
+    expect(page2.messages.map((m: { id: number }) => m.id)).toEqual([505, 506, 507, 508, 509]);
+    // Pure cache read throughout — sorting costs no OFW request.
+    expect(spy).not.toHaveBeenCalled();
+  });
+
   it('searches by q across subject and body', async () => {
     upsertMessage({
       id: 1, folder: 'inbox', subject: 'May trip to Boston with the Boys',
@@ -4621,6 +4672,164 @@ describe('UNVERIFIED_EMPTY: absence is never reported from a stale cache (Gap 2)
   });
 });
 
+describe('pagination state survives lossy consumption', () => {
+  /** Seed `count` inbox+sent messages spread across 2025-10-01 onward. */
+  function seedRange(count: number): void {
+    for (let i = 0; i < count; i++) {
+      upsertMessage(sampleMessageRow({
+        id: 2000 + i,
+        folder: i % 2 === 0 ? 'inbox' : 'sent',
+        subject: `Ranged ${i}`,
+        sentAt: new Date(Date.parse('2025-10-01T00:00:00Z') + i * 5 * 3600_000).toISOString(),
+      }));
+    }
+    markFresh('inbox');
+    markFresh('sent');
+  }
+
+  const listMessages = async (args: Record<string, unknown>) =>
+    JSON.parse((await handlers.get('ofw_list_messages')!(args)).content[0].text);
+
+  it('the reported call: 391 total, 60 returned, paging state ahead of the bulk', async () => {
+    seedRange(391);
+    setup(makeClient({}));
+
+    const parsed = await listMessages({
+      folderId: 'both', since: '2025-10-01', until: '2025-12-31', size: 60,
+    });
+
+    expect(parsed.total).toBe(391);
+    expect(parsed.complete).toBe(false);
+    expect(parsed.hasMore).toBe(true);
+    // The remedy is a VALUE, not something to infer from `complete:false`.
+    expect(parsed.nextPage).toBe(2);
+
+    // KEY ORDER. This is the whole point of the change: a `head` of a spilled
+    // response, a truncated preview, or a script that reads the first N keys
+    // must reach the paging state before it reaches a single message body.
+    // Asserted explicitly because it is exactly what a refactor undoes silently.
+    const keys = Object.keys(parsed);
+    expect(keys[0]).toBe('complete');
+    expect(keys.slice(0, 4)).toEqual(['complete', 'hasMore', 'nextPage', 'total']);
+    expect(keys.at(-1)).toBe('messages');
+    for (const key of ['complete', 'hasMore', 'nextPage', 'total', 'page', 'size', 'completeNote', 'note', 'freshness']) {
+      expect(keys.indexOf(key)).toBeGreaterThanOrEqual(0);
+      expect(keys.indexOf(key)).toBeLessThan(keys.indexOf('messages'));
+    }
+    // Order in the object literal is order in the wire format — assert on the
+    // serialized text, not just the parsed object.
+    const text = (await handlers.get('ofw_list_messages')!({
+      folderId: 'both', since: '2025-10-01', until: '2025-12-31', size: 60,
+    })).content[0].text;
+    expect(text.indexOf('"nextPage"')).toBeLessThan(text.indexOf('"messages"'));
+    expect(text.indexOf('"complete"')).toBeLessThan(text.indexOf('"messages"'));
+
+    // Nothing was renamed or removed: the fields the previous shape carried
+    // are all still present, with the same meanings.
+    expect(parsed.page).toBe(1);
+    expect(parsed.size).toBe(60);
+    expect(parsed.completeNote).toMatch(/60 of 391/);
+    expect(parsed.note).toMatch(/Showing 1–60 of 391/);
+    expect(parsed.freshness).toBeDefined();
+
+    // And the array itself carries the marker, so a consumer that only ever
+    // touches `messages` still trips over the truncation.
+    expect(parsed.messages).toHaveLength(61);
+    const sentinel = parsed.messages.at(-1);
+    expect(sentinel._truncated).toBe(true);
+    expect(sentinel.shown).toBe(60);
+    expect(sentinel.total).toBe(391);
+    expect(sentinel.nextPage).toBe(2);
+    expect(sentinel.hint).toMatch(/page:2/);
+    // The sentinel must not be mistakable for a record.
+    expect(sentinel.id).toBeUndefined();
+    expect(sentinel.subject).toBeUndefined();
+    expect(parsed.messages.filter((m: { id?: number }) => m.id !== undefined)).toHaveLength(60);
+  });
+
+  it('a COMPLETE result set reports nextPage:null and carries no sentinel', async () => {
+    seedRange(3);
+    setup(makeClient({}));
+
+    const parsed = await listMessages({ folderId: 'both', since: '2025-10-01', until: '2025-12-31', size: 60 });
+
+    expect(parsed.total).toBe(3);
+    expect(parsed.complete).toBe(true);
+    expect(parsed.hasMore).toBe(false);
+    expect(parsed.nextPage).toBeNull();
+    expect(parsed.messages).toHaveLength(3);
+    expect(parsed.messages.every((m: { _truncated?: boolean }) => m._truncated === undefined)).toBe(true);
+    // Key order holds on the complete path too.
+    expect(Object.keys(parsed).at(-1)).toBe('messages');
+  });
+
+  it('a page PAST the end reports nextPage:null rather than advertising a page that returns nothing', async () => {
+    seedRange(3);
+    setup(makeClient({}));
+
+    // `returned < total` is true here (0 < 3) but nothing remains — deciding
+    // hasMore from the offset instead is what keeps this from looping forever.
+    const parsed = await listMessages({ folderId: 'both', page: 9, size: 60 });
+
+    expect(parsed.total).toBe(3);
+    expect(parsed.messages).toHaveLength(0);
+    expect(parsed.hasMore).toBe(false);
+    expect(parsed.nextPage).toBeNull();
+  });
+
+  it('ofw_list_drafts leads with paging state and never puts a sentinel among write-bearing drafts', async () => {
+    for (let i = 0; i < 3; i++) {
+      upsertDraft({
+        id: 700 + i, subject: `D${i}`, body: 'b', recipients: [],
+        modifiedAt: `2026-05-0${i + 1}T00:00:00Z`, replyToId: null, listData: {},
+      });
+    }
+    markFresh('drafts');
+    setup(makeClient({}));
+
+    const parsed = JSON.parse(
+      (await handlers.get('ofw_list_drafts')!({ size: 2, verify: false })).content[0].text,
+    );
+
+    const keys = Object.keys(parsed);
+    expect(keys.slice(0, 3)).toEqual(['complete', 'hasMore', 'nextPage']);
+    expect(keys.at(-1)).toBe('drafts');
+    expect(keys.indexOf('freshness')).toBeLessThan(keys.indexOf('drafts'));
+    expect(parsed.nextPage).toBe(2);
+    expect(parsed.complete).toBe(false);
+    // Every element is a real draft: these ids/revisions are what the write
+    // tools are called with, so a marker among them could reach a delete.
+    expect(parsed.drafts).toHaveLength(2);
+    expect(parsed.drafts.every((d: { id?: number }) => typeof d.id === 'number')).toBe(true);
+  });
+
+  it('ofw_get_unread_sent leads with paging state and never inflates an empty `unread`', async () => {
+    for (let i = 0; i < 3; i++) {
+      upsertMessage(sampleMessageRow({
+        id: 800 + i, folder: 'sent', fetchedBodyAt: '2026-05-04T12:00:00Z',
+        recipients: [{ userId: 5, name: 'Bob', viewedAt: '2026-05-04T13:00:00Z' }],
+      }));
+    }
+    markFresh('sent');
+    setup(makeClient({}));
+
+    const parsed = JSON.parse(
+      (await handlers.get('ofw_get_unread_sent')!({ size: 2 })).content[0].text,
+    );
+
+    const keys = Object.keys(parsed);
+    expect(keys.slice(0, 3)).toEqual(['complete', 'hasMore', 'nextPage']);
+    expect(keys.at(-1)).toBe('unread');
+    expect(keys.indexOf('freshness')).toBeLessThan(keys.indexOf('unread'));
+    expect(parsed.nextPage).toBe(2);
+    // Truncated scan, but every recipient had read — `unread` must stay empty.
+    // A sentinel here would turn "nobody has unread mail" into a count of 1.
+    expect(parsed.unread).toHaveLength(0);
+    expect(parsed.scanned).toBe(2);
+    expect(parsed.total).toBe(3);
+  });
+});
+
 describe('explicit `complete` on list reads (requirement 5)', () => {
   it('ofw_list_messages: complete:false for a partial page even on a fresh cache', async () => {
     markFresh('inbox');
@@ -4633,7 +4842,10 @@ describe('explicit `complete` on list reads (requirement 5)', () => {
     );
 
     expect(parsed.total).toBe(2);
-    expect(parsed.messages).toHaveLength(1);
+    // 1 message + the truncation sentinel. The extra element is the point: a
+    // consumer that iterates or slices the array cannot miss that it is a slice.
+    expect(parsed.messages).toHaveLength(2);
+    expect(parsed.messages.filter((m: { _truncated?: boolean }) => m._truncated !== true)).toHaveLength(1);
     expect(parsed.complete).toBe(false);
     expect(parsed.completeNote).toMatch(/1 of 2/);
   });
