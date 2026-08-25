@@ -21,7 +21,8 @@
     ".claude-plugin",
     "skills",
     ".mcp.json",
-    "server.json"
+    "server.json",
+    "mint.yaml"
   ],
   "scripts": {
     "build": "tsc && npm run bundle",

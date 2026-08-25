@@ -1,0 +1,125 @@
+version: 1
+name: OurFamilyWizard
+slug: ofw
+summary: >-
+  OurFamilyWizard co-parenting tools for Claude — messages, calendar,
+  expenses, and journal
+#
+# Hosting note (a comment, not user-facing summary text): this is a
+# BROWSER-BRIDGE MCP — it reaches its site through the user's signed-in
+# tab via the fetchproxy bridge. A bridged registration also needs runtime
+# `fly-shared`, `bridge: true` and a `bridgePortEnv`, which are registration
+# fields this manifest has no schema for (set them over the control API).
+# `state.dataDir` below is required for `bridge`.
+env:
+  - name: OFW_USERNAME
+    required: false
+    help: >-
+      Your OurFamilyWizard login email address. Optional — if omitted, the
+      server falls back to the fetchproxy browser extension (requires being
+      signed in to ourfamilywizard.com).
+  - name: OFW_PASSWORD
+    secret: true
+    required: false
+    help: >-
+      Your OurFamilyWizard password. Optional — see OFW_USERNAME.
+  - name: OFW_WRITE_MODE
+    required: false
+    help: >-
+      Write-tool gate: "none" registers no write tools; "drafts" registers
+      draft-level writes only (save/delete drafts, upload attachments); "all"
+      registers everything (default). Unrecognized values fail closed to "none".
+  - name: OFW_CALENDAR_WRITES
+    required: false
+    help: >-
+      Set to "true" to register calendar write tools (create/update/delete
+      event) in "drafts" write mode. Events have no draft stage but are
+      reversible. Never overrides "none".
+  - name: OFW_ALLOW_MARK_READ
+    required: false
+    help: >-
+      Default "true". Set "false" to forbid any tool from marking a message read
+      on OurFamilyWizard - reading a body for the first time stamps a
+      co-parent-visible "First Viewed" time that cannot be undone. A ceiling: no
+      per-call argument can raise it.
+  - name: OFW_FETCH_UNREAD_BODIES
+    required: false
+    help: >-
+      Default "false". Whether ofw_sync_messages fetches unread inbox bodies by
+      default (each fetch stamps a First Viewed time). Capped by
+      OFW_ALLOW_MARK_READ.
+  - name: OFW_INLINE_ATTACHMENTS
+    required: false
+    help: >-
+      When on, ofw_download_attachment returns bytes inline as MCP content
+      (images render directly; other files come back as embedded resources)
+      instead of writing to disk. Recommended for sandboxed hosts like Claude
+      Desktop where the model cannot read files written to ~/Downloads. Callers
+      can still override per-call via the tool's `inline` argument.
+  - name: OFW_ATTACHMENTS_DIR
+    required: false
+    help: >-
+      Directory where ofw_download_attachment writes files when not returning
+      inline. Defaults to ~/Downloads/ofw-mcp/. Pick a directory that is
+      readable by your MCP host.
+  - name: DISPLAY_TZ
+    required: false
+    help: >-
+      IANA time zone (e.g. America/New_York) that every rendered *…Display*
+      field uses, and the zone a naive OFW timestamp is assumed to be in. Must
+      match the OFW account's own zone. Never a fixed offset — that would be an
+      hour wrong for half the year.
+  - name: OFW_AUTO_REFRESH
+    required: false
+    help: >-
+      Set to true and read tools sync the backing folders themselves and answer
+      from the refreshed cache, instead of refusing a stale read. The refusal
+      still fires if the refresh does not make the read verifiable.
+  - name: OFW_CACHE_DIR
+    required: false
+    help: >-
+      Directory for persisted session/cache state. Relates to state.dataDir
+      below; leave unset to use the default under $HOME.
+  - name: OFW_CACHE_IDENTITY
+    required: false
+    help: >-
+      Labels the per-user SQLite cache file. Useful when authenticating via the
+      browser bridge, where OFW_USERNAME is not set and the cache would
+      otherwise fall back to a shared default name.
+  - name: OFW_DISABLE_FETCHPROXY
+    required: false
+    help: >-
+      Set to 1 to disable the browser-bridge fallback, making missing
+      credentials a hard error. Recommended for a hosted registration, which has
+      no browser to fall back to.
+  - name: OFW_FRESHNESS_TTL_SECONDS
+    required: false
+    help: >-
+      Age in seconds past which a read result's freshness block downgrades to
+      "unverified" and grows a warning (default 300). Unset means never
+      downgrade.
+  - name: OFW_REQUEST_TIMEOUT_MS
+    required: false
+    help: >-
+      Per-request timeout in milliseconds. Raise it if calls time out on slow
+      upstream responses.
+  - name: OFW_SYNC_MAX_REQUESTS
+    required: false
+    help: >-
+      Caps the OFW requests one ofw_sync_messages call may make before pausing;
+      the next call resumes where it left off. Set a positive integer when
+      hosted, where a per-call request cap can otherwise truncate a deep
+      backfill.
+state:
+  dataDir: true
+  reason: >-
+    The fetchproxy identity lives at $HOME/.fetchproxy/identity/<name>.json
+    and the pair code derives from it. Without a persistent $HOME every cold
+    start mints a fresh identity and re-prompts pairing in the browser; the
+    API refuses bridge without it.
+egress:
+  allow:
+    # Only hosts the SERVER process actually fetches. Hosts that appear
+    # solely in a URL this server BUILDS and returns are excluded.
+    - ofw.ourfamilywizard.com
+    - ourfamilywizard.com
