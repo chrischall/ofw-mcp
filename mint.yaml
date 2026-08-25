@@ -69,6 +69,12 @@ env:
       field uses, and the zone a naive OFW timestamp is assumed to be in. Must
       match the OFW account's own zone. Never a fixed offset — that would be an
       hour wrong for half the year.
+  - name: OFW_DEBUG_LOG
+    required: false
+    help: >-
+      Set to 1 to write verbose request/response diagnostics to stderr. Off by
+      default; useful when a read is failing and you need to see the upstream
+      exchange.
   - name: OFW_AUTO_REFRESH
     required: false
     help: >-
@@ -122,4 +128,3 @@ egress:
     # Only hosts the SERVER process actually fetches. Hosts that appear
     # solely in a URL this server BUILDS and returns are excluded.
     - ofw.ourfamilywizard.com
-    - ourfamilywizard.com
