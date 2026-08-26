@@ -69,9 +69,9 @@ export class OFWClient {
   // Bearer-token lifecycle is delegated to the shared, race-safe TokenManager
   // (proactive refresh inside the skew window, single-flight refresh so a burst
   // of concurrent callers coalesces onto ONE `resolveAuth()`, and a 401-replay
-  // guarded against double-refresh). It is created lazily, seeded with an
-  // already-expired placeholder token so the first request drives the refresh
-  // callback — i.e. the original "log in on first request" behavior.
+  // guarded against double-refresh). It is created lazily, and mints on first
+  // use through the function form of `initial` — see `mint` below for why that
+  // form rather than a seeded placeholder.
   private tokenManager: TokenManager | undefined;
 
   // Optional injected auth resolver. When set, the refresh callback uses it
