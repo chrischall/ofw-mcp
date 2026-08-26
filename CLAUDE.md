@@ -6,7 +6,7 @@ MCP server for OurFamilyWizard (OFW). Reads/writes messages, calendar, expenses,
 
 ```bash
 npm run build        # tsc → dist/, then esbuild bundle → dist/bundle.js
-npm test             # vitest run (all tests)
+npm test             # tsc typecheck + vitest run (all tests)
 npm run test:watch   # vitest in watch mode
 npm run dev          # node --env-file=.env dist/index.js (requires built dist)
 ```
@@ -190,7 +190,9 @@ When adding a new endpoint call, define a loose schema next to the call site and
 ## Testing
 
 ```bash
-npm test           # vitest run
+npm test           # tsc typecheck + vitest run — a green suite is not a
+                   #   green typecheck on its own (vitest transpiles with
+                   #   esbuild and never invokes tsc)
 ```
 
 `vitest.config.ts` enforces 100% line/branch/function/statement coverage on `src/**` (excluding `src/index.ts`, the stdio entry point). Failing coverage fails CI. No real API calls — `OFWClient.request` is mocked via `vi.spyOn`.
