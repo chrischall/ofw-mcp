@@ -55,6 +55,14 @@ jobs:
         with:
           version: ${{ needs.release-please.outputs.version }}
           tag-name: ${{ needs.release-please.outputs.tag_name }}
+          # skill-path pins ONE skill in a repo that ships several: only that
+          # skill is packaged and published, and it keeps the repo-level slug.
+          # Without it mcp-publish publishes EVERY skills/*/SKILL.md, each under
+          # its own directory-name slug. It is NOT required to avoid a failure —
+          # that hard error was removed in #56 (see docs/fleet-conventions.md).
+          # The value comes from `skill_path` in fleet.json (issue #76), so
+          # re-rendering can't silently drop the pin and quietly start shipping
+          # the repo's other skills under new slugs.
           skill-path: skills/ofw/SKILL.md
           clawhub-token: ${{ secrets.CLAWHUB_TOKEN }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
