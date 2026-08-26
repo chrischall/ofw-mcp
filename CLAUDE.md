@@ -13,6 +13,31 @@ npm run dev          # node --env-file=.env dist/index.js (requires built dist)
 
 `dist/` is gitignored — it is produced at build/release time and shipped in the npm package (`package.json` `files`).
 
+## Session cache
+
+`src/session-cache.ts` caches the bearer token at
+`$MCP_DATA_DIR/.ofw-mcp/session.json` (0600, `OFW_SESSION_FILE` overrides) via
+`createFileStatePersistence` + `resolveStateFile` (`@chrischall/mcp-utils/session`).
+
+OFW has no refresh grant — renewing IS logging in — so `mint()` serves as both
+`initial` and `refresh` on the `TokenManager`, and `isRefreshRevoked: () => false`
+turns off the library's re-mint-after-a-failed-refresh recovery, which here would
+just repeat the call that failed. The token lasts six hours, so on a scale-to-zero
+host the cache turns most cold starts into zero-cost ones.
+
+The cache is **disabled** in three cases, each deliberate: `OFW_SESSION_CACHE=false`;
+an injected `resolveAuth` (the per-user hosted path — this registration declares no
+`identity.perUserChild`, so one process can serve several people and a shared file
+would hand one user's session to the next); and no env credentials (the fetchproxy
+path authenticates from a browser tab, with nothing stable to bind a record to).
+
+The record is `boundTo` a salted digest of username+password, so rotating either
+discards it; neither value is written. A failed write is reported to stderr and is
+NOT fatal — OFW tokens are re-mintable from the environment.
+
+`tests/_setup.ts` forces the cache off and pins its path into a temp dir for the
+whole suite, so no test can reach the developer's real `~/.ofw-mcp`.
+
 ## Architecture
 
 ```
