@@ -116,13 +116,26 @@ env:
       the next call resumes where it left off. Set a positive integer when
       hosted, where a per-call request cap can otherwise truncate a deep
       backfill.
+  - name: OFW_SESSION_CACHE
+    required: false
+    help: >-
+      Set to false to disable the on-disk session cache and re-authenticate on
+      every process start. Defaults to enabled.
+  - name: OFW_SESSION_FILE
+    required: false
+    help: >-
+      Absolute path for the session cache file. Defaults to
+      $MCP_DATA_DIR/.ofw-mcp/session.json.
 state:
   dataDir: true
   reason: >-
-    The fetchproxy identity lives at $HOME/.fetchproxy/identity/<name>.json
-    and the pair code derives from it. Without a persistent $HOME every cold
-    start mints a fresh identity and re-prompts pairing in the browser; the
-    API refuses bridge without it.
+    Two things live here. The fetchproxy identity is at
+    $HOME/.fetchproxy/identity/<name>.json and the pair code derives from it —
+    without a persistent $HOME every cold start mints a fresh identity and
+    re-prompts pairing in the browser, and the API refuses bridge without it.
+    The session token is cached at $MCP_DATA_DIR/.ofw-mcp/session.json (0600);
+    OFW has no refresh grant, so without it every cold start re-runs the full
+    login for a token that was still good for up to six hours.
 egress:
   allow:
     # Only hosts the SERVER process actually fetches. Hosts that appear
