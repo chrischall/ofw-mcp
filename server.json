@@ -52,6 +52,18 @@
           "description": "Default \"false\". Whether ofw_sync_messages fetches unread inbox bodies by default (each fetch stamps a First Viewed time). Capped by OFW_ALLOW_MARK_READ.",
           "isRequired": false,
           "format": "string"
+        },
+        {
+          "name": "OFW_SESSION_CACHE",
+          "description": "Set to false to disable the on-disk session cache and re-authenticate on every process start. Defaults to enabled.",
+          "isRequired": false,
+          "format": "string"
+        },
+        {
+          "name": "OFW_SESSION_FILE",
+          "description": "Absolute path for the session cache file. Defaults to $MCP_DATA_DIR/.ofw-mcp/session.json.",
+          "isRequired": false,
+          "format": "string"
         }
       ]
     }
