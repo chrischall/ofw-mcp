@@ -275,7 +275,7 @@ Calendar events sit between the two message tiers: they have no draft stage (a c
 ## Development
 
 ```bash
-npm test         # run the vitest suite
+npm test         # tsc typecheck, then the vitest suite
 npm run build    # tsc → dist/, then esbuild bundle → dist/bundle.js
 npm run dev      # node --env-file=.env dist/index.js (requires built dist)
 ```
