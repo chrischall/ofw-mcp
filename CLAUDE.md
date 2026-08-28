@@ -6,12 +6,37 @@ MCP server for OurFamilyWizard (OFW). Reads/writes messages, calendar, expenses,
 
 ```bash
 npm run build        # tsc → dist/, then esbuild bundle → dist/bundle.js
-npm test             # vitest run (all tests)
+npm test             # tsc typecheck + vitest run (all tests)
 npm run test:watch   # vitest in watch mode
 npm run dev          # node --env-file=.env dist/index.js (requires built dist)
 ```
 
 `dist/` is gitignored — it is produced at build/release time and shipped in the npm package (`package.json` `files`).
+
+## Session cache
+
+`src/session-cache.ts` caches the bearer token at
+`$MCP_DATA_DIR/.ofw-mcp/session.json` (0600, `OFW_SESSION_FILE` overrides) via
+`createFileStatePersistence` + `resolveStateFile` (`@chrischall/mcp-utils/session`).
+
+OFW has no refresh grant — renewing IS logging in — so `mint()` serves as both
+`initial` and `refresh` on the `TokenManager`, and `isRefreshRevoked: () => false`
+turns off the library's re-mint-after-a-failed-refresh recovery, which here would
+just repeat the call that failed. The token lasts six hours, so on a scale-to-zero
+host the cache turns most cold starts into zero-cost ones.
+
+The cache is **disabled** in three cases, each deliberate: `OFW_SESSION_CACHE=false`;
+an injected `resolveAuth` (the per-user hosted path — this registration declares no
+`identity.perUserChild`, so one process can serve several people and a shared file
+would hand one user's session to the next); and no env credentials (the fetchproxy
+path authenticates from a browser tab, with nothing stable to bind a record to).
+
+The record is `boundTo` a salted digest of username+password, so rotating either
+discards it; neither value is written. A failed write is reported to stderr and is
+NOT fatal — OFW tokens are re-mintable from the environment.
+
+`tests/_setup.ts` forces the cache off and pins its path into a temp dir for the
+whole suite, so no test can reach the developer's real `~/.ofw-mcp`.
 
 ## Architecture
 
@@ -38,6 +63,7 @@ src/
     _shared.ts      recipient mapping, response helpers, path expansion
     delivery.ts     the attachment delivery ladder (image → extracted → raw bytes)
     freshness.ts    buildFreshness() — the `freshness` block every read tool returns (source/asOf/ageSeconds/staleness/warning)
+    pagination.ts   paging state that survives a lossy reader: pageState/offsetState/readUpstreamPaging/withPaginationFirst
     lifecycle.ts    "is this entity still what I think it is?" — classifyState/probeIds/resolveDraftKey/newDraftKey
     user.ts         ofw_get_profile, ofw_get_notifications
     messages.ts     folders, list, get, send, drafts, get_unread_sent, upload/download_attachment, sync_messages, check_freshness, status
@@ -57,6 +83,8 @@ OFW_PASSWORD              Optional. OFW password (legacy env-var auth path)
 OFW_DISABLE_FETCHPROXY    Optional. "1|true|yes|on" → skip the fetchproxy fallback (missing creds become a hard error)
 OFW_CACHE_IDENTITY        Optional. Explicit cache-key label; overrides OFW_USERNAME for fetchproxy-only multi-account setups
 OFW_CACHE_DIR             Optional. Overrides cache dir (default ~/.cache/ofw-mcp)
+OFW_SESSION_CACHE         Optional. "0|false|no|off" → do not cache the session between runs (default: cached). A restart then re-authenticates every time
+OFW_SESSION_FILE          Optional. Where that session cache lives (0600 file, default $MCP_DATA_DIR/.ofw-mcp/session.json)
 OFW_ATTACHMENTS_DIR       Optional. Where ofw_download_attachment writes (default ~/Downloads/ofw-mcp)
 OFW_INLINE_ATTACHMENTS    Optional. "1|true|yes|on" → return attachments as MCP content blocks by default
 OFW_DEBUG_LOG             Optional. "1|true|yes|on" → log every OFW request/response to stderr (Authorization redacted). Diagnostic only.
@@ -94,15 +122,21 @@ The allowlist covers the freshness/sync bookkeeping fields (`lastServerSyncAt`, 
 
 `.env` (project root) is loaded by `client.ts` via dynamic `dotenv` import (silently skipped if unavailable, e.g. inside the mcpb bundle). Real env vars take precedence (`override: false`).
 
-## Auth resolution (Pattern A template)
+## Auth resolution (Pattern A, on the shared resolver)
 
-`src/auth.ts` is the canonical "browser-bootstrap + Node-direct" auth shape used across our MCP servers. Six sibling MCPs model their auth on this file — keep the structure flat, the path-selection explicit, the error messages actionable. Three paths in priority order:
+`src/auth.ts` used to BE the canonical "browser-bootstrap + Node-direct" shape, and this section told six sibling MCPs to model their auth on it. That shape now lives in **`resolveAuthPattern`** (`@chrischall/mcp-utils`), which owns the one thing every copy had to agree on — the priority order `token → oauth → sessionScrape → fetchproxy` — and nothing else. `resolveAuth()` declares which paths are *configured* and the shared resolver runs the first one; the precedence is no longer an if/else here.
+
+What stays local is what is genuinely OFW's: how each path obtains a token, and what to say when none can. In particular the "nothing configured" error is raised here rather than letting the shared resolver throw its generic one, because OFW's names both fixes side by side.
+
+The migration waited on somewhere to put the expiry: the shared result carried `{ credential, source }` only, so adopting it meant discarding the `tokenExpiry` this file reads from the browser tab — which is the whole reason it reads it. `PatternResult.expiresAt` closed that gap (mcp-utils#148). If you migrate a sibling MCP, that field is why it is now lossless.
+
+Three paths in priority order:
 
 1. **Env-var credentials** (`OFW_USERNAME` + `OFW_PASSWORD`) → `src/auth-password.ts` does the legacy Spring Security form login. Unchanged from pre-fetchproxy behavior.
 2. **fetchproxy fallback** → `@fetchproxy/bootstrap` snapshots `localStorage["auth"]` + `localStorage["tokenExpiry"]` from a signed-in `ourfamilywizard.com` tab in ~one round-trip, then closes the bridge. All subsequent OFW API calls go out via direct Node fetch — fetchproxy is NOT in the hot path.
 3. **Error** → tells the user how to fix it (set creds, OR install the extension and sign in).
 
-The split into `auth.ts` + `auth-password.ts` is deliberate: tests mock `auth-password.js` and `@fetchproxy/bootstrap` at the module boundary, so path-selection logic in `resolveAuth()` stays independent of either implementation. Sibling MCPs should copy this split.
+The split into `auth.ts` + `auth-password.ts` is deliberate: tests mock `auth-password.js` and `@fetchproxy/bootstrap` at the module boundary, so path-selection logic in `resolveAuth()` stays independent of either implementation. Sibling MCPs should copy this split — and take the ordering from `resolveAuthPattern` rather than re-deriving it.
 
 ## Message Cache
 
@@ -127,6 +161,12 @@ The split into `auth.ts` + `auth-password.ts` is deliberate: tests mock `auth-pa
   - **`serverConfirmed` is the draft-specific answer.** True only when a completed drafts walk verified inside the TTL. `ofw_list_drafts`/`ofw_get_message` reconcile the reported `cacheStatus` with `freshness.staleness` (downgrade-only, `draftsFreshness` in `tools/messages.ts`) so one payload can never contradict itself — the same rule `withReadState` applies to read flags.
   - **`ofw_list_drafts` auto-verifies by default** (`verify: true`): when the drafts cache is not verified-fresh, it runs the (cheap — one list page + one detail per draft) drafts sync first and answers server-confirmed in one call. `autoVerified: true` is derived from the POST-sync cache status — a budget-paused walk never claims it — and a sync that cannot reach OFW degrades to the labelled cache answer with a `verifyNote` instead of erroring the read. Drafts change rarely but INVISIBLY (a web-app edit bumps no timestamp), so the old behavior — a 12-minute-old cache answering "unverified, don't state a count" — forced a second call on every ordinary read. `verify:false` restores the pure cache read; a sync the budget pauses leaves the response honestly unverified.
   - **`ofw_check_freshness`** is the cheap re-verification primitive: one request for folder counts + one per id, no bodies, no sync, decoupled from the attachment path. Ids are compared by `draftRevision()` content hash, NOT `modifiedAt` — OFW's draft timestamp doesn't move on a web-app edit, so a timestamp precondition would compare equal across exactly the edit it exists to catch. It probes only ids present in the drafts cache unless `allowMarkRead: true`: any other id means a detail GET, which marks an unread inbox message read on OFW. Folder verdicts stay `inSync: null` while `historyComplete` is false or OFW reports no count — a partially backfilled folder legitimately holds fewer rows, and crying wolf for the whole backfill would desensitize the caller.
+- **Paging state is emitted BEFORE the data array** (`src/tools/pagination.ts`). A correct response is not the same as a response that survives being read. Three wide date-range reads returned `complete:false` with a `note` AND a `completeNote` spelling out "60 of 391, increase page" — every signal working — and the caller still reported a month as unreachable, because the responses were big enough that the client spilled them to a JSON file and a script pulled out only `total` and `messages`, discarding every field that said "slice". So:
+  - **Key order is load-bearing, not cosmetic.** `ofw_list_messages`, `ofw_list_drafts` and `ofw_get_unread_sent` emit `complete`/`hasMore`/`nextPage`/`total`/`page`/`size`, then the notes, then `freshness`, and the data array (`messages`/`drafts`/`unread`) LAST. A `head`, a truncated preview or a first-N-keys read then reaches "this is a slice" before it reaches the first message body. An object literal's insertion order is what `JSON.stringify` emits, so this costs nothing — and `tests/tools/messages.test.ts` asserts it on the serialized text, because rebuilding one of those literals undoes it silently.
+  - **`nextPage` states the remedy; `complete:false` only implies one.** Null when nothing remains. It is derived from the OFFSET (`page * size < total`), never from `returned < total` — on a page past the end those disagree, and the naive form advertises a next page that returns nothing forever.
+  - **`returned` is the record count, as a scalar beside `total`.** A consumer never has to reach the data array to learn how many records came back. The arrays hold records and nothing else — no marker elements, so `messages.length` is always the message count.
+  - **`ofw_list_expenses`/`ofw_list_journal_entries` get the same treatment through `withPaginationFirst`**, with `nextStart` rather than `nextPage` because they are `start`/`max` offset tools — it is always the literal value to pass back. Both endpoints return `{data: [...], metadata: {...}}` (verified live), and the metadata carries a **`last`** boolean, so "is there another page" is ANSWERED by OFW rather than inferred; `offsetState` uses it first, falls back to a reported total, and only then to "a full page probably means more" (one-directional on purpose — a wasted call beats a hidden page). `metadata.totalElements` is the total on journal; expenses reports none. **`metadata.count` is NOT a total** — a live expenses response carried `count: 20` next to `data: []`, so it tracks page size; reading it would report 20 expenses for an empty page. A payload that is not a plain object cannot carry the paging keys at all and is passed through untouched rather than relocated: adding a field is never worth changing a response's top-level shape. `ofw_list_events` is a date-range read with no paging at all and is untouched.
+
 - **Freshness answers "how old?"; it never answered "is this still what I think it is?"** (the sent-draft failure). An assistant tracked three draft ids across many turns and recited them as current; one had been SENT the night before. Every existing signal was working — it just was not re-read. Three closures, all of them structural:
   - **`state` in the cheap check** (`src/tools/lifecycle.ts`). `ofw_check_freshness` and `ofw_status` return a LIVE `state` per id — `draft` | `sent` | `received` | `deleted` | `unknown` — derived from the folder id in OFW's own detail payload (mapped through `inbox_folder_id`/`sent_folder_id`/`drafts_folder_id` in `meta`, which `resolveFolderIds` persists; `ensureFolderIdMap` resolves them live for one request when the cache has never held them). When the id is unreported or unmapped, the folder NAME OFW itself put on the payload ("Drafts"/"Sent"/"Sent Messages"/"Inbox", case-insensitive) is a fallback with the same authority — every live probe once answered `unknown` while echoing `it reported "Drafts"`, a refusal to read OFW's own answer. Only a folder unmappable by BOTH id and name is `unknown`. **`existsOnServer` cannot answer this and never could**: a draft that was sent still exists, as a sent message, so `existsOnServer: true` came back for exactly the id the whole question was about. For the same reason a cached draft whose state is no longer `draft` reports `inSync: false` even when its subject and body are byte-identical — a revision-only comparison votes "in sync" on precisely the case that matters. `inSync: null` means NOT COMPARED (no cached draft, or content matches but OFW reported no mappable folder) — never `false`, which claims a drift was detected. `unknown` is a refusal to answer, not a synonym for "fine".
   - **Probing is gated exactly like a body read, and plans its skips first.** A probe is `GET /pub/v3/messages/{id}`, which stamps an unread INBOX message. `probeWouldStamp` waves through what cannot stamp — a cached draft (no read state), a cached SENT message (view times belong to the recipient), an already-read inbox message (`deriveRead` is monotonic) — and refuses an id with no cached row, because whether it would stamp is what cannot be known without making the request that stamps it. `probeIds` decides every skip BEFORE fetching anything, so a call whose ids are all refused spends zero requests, including the folder-map resolve.
@@ -158,7 +198,9 @@ When adding a new endpoint call, define a loose schema next to the call site and
 ## Testing
 
 ```bash
-npm test           # vitest run
+npm test           # tsc typecheck + vitest run — a green suite is not a
+                   #   green typecheck on its own (vitest transpiles with
+                   #   esbuild and never invokes tsc)
 ```
 
 `vitest.config.ts` enforces 100% line/branch/function/statement coverage on `src/**` (excluding `src/index.ts`, the stdio entry point). Failing coverage fails CI. No real API calls — `OFWClient.request` is mocked via `vi.spyOn`.
@@ -173,7 +215,7 @@ Sanity-check before committing a description change:
 jq -r '.description | length' server.json
 ```
 
-**The `skill-path` input is mandatory here.** `chrischall/workflows`' `mcp-publish` action auto-discovers the skill to package as the `.skill` artifact (and to push to ClawHub): an explicit `skill-path`, else a root `SKILL.md`, else a *single* `skills/*/SKILL.md`. This repo has TWO (`skills/ofw` + `skills/ofw-fpx`), so auto-discovery hard-fails the publish job with `Multiple skills/*/SKILL.md found — set the skill-path input`. `.github/workflows/release-please.yml` therefore pins `skill-path: skills/ofw/SKILL.md`. If you add or rename a skill directory, that pin is what keeps releases publishing — don't drop it.
+**Both skills publish, and the directory name is the slug.** This repo ships TWO skills (`skills/ofw` + `skills/ofw-fpx`) and no root `SKILL.md`, so `release-please.yml` passes no `skill-path` and `mcp-publish` packages both — each under its directory name, as `ofw` and `ofw-fpx`. The resolution rules are fleet-wide; `chrischall/workflows`' `docs/fleet-conventions.md` is their canonical statement and they are not restated here. What matters locally: **renaming a skill directory renames its published slug** and strands the old ClawHub listing. The `ofw-mcp` slug is already such an orphan — it is what the old `skill-path: skills/ofw/SKILL.md` pin published under, before the pin was dropped to let `ofw-fpx` ship.
 
 This bit once: v2.6.0/2.6.1/2.6.2 were all tagged and had GitHub Releases created, but their publish jobs failed, so **npm sat at 2.5.0 while three releases looked done**. The release-please job and the publish job are separate — a green tag does not mean a green publish. After any release, confirm with `npm view ofw-mcp version`.
 

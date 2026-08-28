@@ -845,6 +845,28 @@ describe('OFWClient — config/auth fallback branches', () => {
     await client.request('GET', '/pub/v1/x');
     expect(spy).toHaveBeenCalled();
   });
+
+  it('does not re-mint after a failed renewal', async () => {
+    // OFW has no refresh grant: renewing IS logging in. So a failed renewal
+    // must surface, not trigger the library's re-mint-on-revoked recovery,
+    // which would repeat the exact call that just failed against a login
+    // endpoint. (`isRefreshRevoked: () => false` is what turns that off.)
+    const auth = await import('../src/auth.js');
+    // The bootstrap must SUCCEED first — a failed bootstrap never reaches the
+    // recovery path, so mocking a straight rejection would exercise nothing.
+    // Hand back an already-expired token so the next request forces a renewal,
+    // and fail that.
+    const spy = vi
+      .spyOn(auth, 'resolveAuth')
+      .mockResolvedValueOnce({ token: 'expired', expiresAt: new Date(Date.now() - 1) })
+      .mockRejectedValue(new Error('OFW login failed — check OFW_USERNAME/OFW_PASSWORD'));
+    mockFetch([]);
+    const client = new OFWClient();
+    await expect(client.request('GET', '/pub/v1/x')).rejects.toThrow(/OFW login failed/);
+    // Twice: the bootstrap, then the one failed renewal. A third would be the
+    // re-mint this deliberately turns off.
+    expect(spy).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe('OFWClient — injectable auth resolver', () => {

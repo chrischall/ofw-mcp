@@ -3,6 +3,7 @@ import { TokenManager } from '@chrischall/mcp-utils/session';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import { resolveAuth, type ResolvedAuth } from './auth.js';
+import { createSessionCache, reportCacheWriteFailure } from './session-cache.js';
 import { BASE_URL, OFW_PROTOCOL_HEADERS, OFW_TOKEN_TTL_MS, OFW_TOKEN_EXPIRY_SKEW_MS, assertOfwUrl } from './protocol.js';
 
 // Load .env for local dev; silently skip if dotenv is unavailable (e.g. mcpb
@@ -68,9 +69,9 @@ export class OFWClient {
   // Bearer-token lifecycle is delegated to the shared, race-safe TokenManager
   // (proactive refresh inside the skew window, single-flight refresh so a burst
   // of concurrent callers coalesces onto ONE `resolveAuth()`, and a 401-replay
-  // guarded against double-refresh). It is created lazily, seeded with an
-  // already-expired placeholder token so the first request drives the refresh
-  // callback — i.e. the original "log in on first request" behavior.
+  // guarded against double-refresh). It is created lazily, and mints on first
+  // use through the function form of `initial` — see `mint` below for why that
+  // form rather than a seeded placeholder.
   private tokenManager: TokenManager | undefined;
 
   // Optional injected auth resolver. When set, the refresh callback uses it
@@ -87,22 +88,38 @@ export class OFWClient {
 
   private getTokenManager(): TokenManager {
     if (!this.tokenManager) {
+      // Minting and renewing are the SAME operation here — OFW has no refresh
+      // grant — so one function serves as both `initial` and `refresh`. It has
+      // to be the function form: the eager object form skips persistence, so
+      // the expired placeholder that used to sit here would have meant the
+      // cache was written but never read.
+      const mint = async (): Promise<{
+        accessToken: string;
+        refreshToken: string;
+        expiresAt: number;
+      }> => {
+        const { token, expiresAt } = await (this.authResolver ?? resolveAuth)();
+        return {
+          accessToken: token,
+          refreshToken: OFW_REFRESH_SENTINEL,
+          expiresAt: (expiresAt ?? new Date(Date.now() + OFW_TOKEN_TTL_MS)).getTime(),
+        };
+      };
       this.tokenManager = new TokenManager({
-        initial: { accessToken: '', refreshToken: OFW_REFRESH_SENTINEL, expiresAt: 0 },
+        initial: mint,
+        persistence:
+          createSessionCache({ injectedResolver: this.authResolver !== undefined }) ?? undefined,
+        onPersistError: reportCacheWriteFailure,
+        // A failed renewal IS a failed login here, so the library's
+        // re-mint-on-revoked recovery would just repeat the call that failed.
+        isRefreshRevoked: () => false,
         skewMs: OFW_TOKEN_EXPIRY_SKEW_MS,
         // Map OFW's mint/refresh onto the refresh callback. `resolveAuth()`
         // returns a token and a best-effort expiry; when the fetchproxy path
         // can't supply one we fall back to the same 6h estimate the password
         // path uses (the 401-replay covers a wrong guess). We re-arm the
         // sentinel so the manager can refresh again later.
-        refresh: async () => {
-          const { token, expiresAt } = await (this.authResolver ?? resolveAuth)();
-          return {
-            accessToken: token,
-            refreshToken: OFW_REFRESH_SENTINEL,
-            expiresAt: (expiresAt ?? new Date(Date.now() + OFW_TOKEN_TTL_MS)).getTime(),
-          };
-        },
+        refresh: mint,
       });
     }
     return this.tokenManager;

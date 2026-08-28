@@ -1,6 +1,6 @@
 {
   "name": "ofw-mcp",
-  "version": "2.10.1",
+  "version": "2.11.0",
   "license": "MIT",
   "mcpName": "io.github.chrischall/ofw-mcp",
   "description": "OurFamilyWizard MCP server for Claude — developed and maintained by AI (Claude Code)",
@@ -21,18 +21,20 @@
     ".claude-plugin",
     "skills",
     ".mcp.json",
-    "server.json"
+    "server.json",
+    "mint.yaml"
   ],
   "scripts": {
     "build": "tsc && npm run bundle",
     "bundle": "esbuild src/index.ts --bundle --platform=node --format=esm --external:dotenv --banner:js='import { createRequire as __createRequire } from \"module\"; const require = __createRequire(import.meta.url);' --outfile=dist/bundle.js",
     "dev": "node --env-file=.env dist/index.js",
-    "test": "vitest run",
-    "test:coverage": "vitest run --coverage",
-    "test:watch": "vitest"
+    "test": "npm run typecheck && vitest run",
+    "test:coverage": "npm run typecheck && vitest run --coverage",
+    "test:watch": "vitest",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@chrischall/mcp-utils": "^0.14.0",
+    "@chrischall/mcp-utils": "^0.18.0",
     "@fetchproxy/bootstrap": "^2.0.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "dotenv": "^17.4.2",

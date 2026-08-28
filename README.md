@@ -280,7 +280,7 @@ Every outbound request is passed through a hard host check before `fetch` — th
 ## Development
 
 ```bash
-npm test         # run the vitest suite
+npm test         # tsc typecheck, then the vitest suite
 npm run build    # tsc → dist/, then esbuild bundle → dist/bundle.js
 npm run dev      # node --env-file=.env dist/index.js (requires built dist)
 ```

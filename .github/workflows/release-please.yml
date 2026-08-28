@@ -5,7 +5,10 @@ name: release-please
 # in THIS file (not a reusable workflow) because npm trusted publishing and
 # mcp-publisher bind to this repo's workflow identity via OIDC.
 #
-# The release PR is the human review gate: add `release-ready` to ship it.
+# The release PR ships via `release-ready`: adding it starts the auto-review,
+# and a passing review arms `ready-to-merge` → deferred CI → auto-merge. CI does
+# not run until the review passes, so `release-ready` is "review then ship", not
+# an instant CI arm.
 # The PAT (not GITHUB_TOKEN) so the release PR's events trigger CI/review.
 
 on:
@@ -52,11 +55,5 @@ jobs:
         with:
           version: ${{ needs.release-please.outputs.version }}
           tag-name: ${{ needs.release-please.outputs.tag_name }}
-          # This repo ships TWO skills — skills/ofw (the MCP skill) and
-          # skills/ofw-fpx (the fpx-CLI sibling) — so the action's
-          # single-skills/*/SKILL.md auto-discovery can't pick one and hard-
-          # fails the release. skills/ofw is the one that pairs with this npm
-          # package; ofw-fpx documents reaching OFW without the server.
-          skill-path: skills/ofw/SKILL.md
           clawhub-token: ${{ secrets.CLAWHUB_TOKEN }}
           github-token: ${{ secrets.GITHUB_TOKEN }}

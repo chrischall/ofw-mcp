@@ -64,6 +64,27 @@ describe('OFWCache (:memory:) messages', () => {
     expect((await store.listMessages({ page: 1, size: 50, q: 'boston' })).map((m) => m.id)).toEqual([2]);
   });
 
+  it('listMessages sorts oldest-first on request, tiebreaking id in the same direction', async () => {
+    await store.upsertMessage(sampleRow({ id: 1, folder: 'inbox', sentAt: '2026-05-01T00:00:00Z' }));
+    await store.upsertMessage(sampleRow({ id: 2, folder: 'inbox', sentAt: '2026-05-03T00:00:00Z' }));
+    await store.upsertMessage(sampleRow({ id: 3, folder: 'inbox', sentAt: '2026-05-02T00:00:00Z' }));
+
+    expect((await store.listMessages({ page: 1, size: 50, sort: 'oldest' })).map((m) => m.id)).toEqual([1, 3, 2]);
+    // Explicit 'newest' and an omitted sort are the same query — the default
+    // must not shift under existing callers.
+    expect((await store.listMessages({ page: 1, size: 50, sort: 'newest' })).map((m) => m.id)).toEqual([2, 3, 1]);
+    expect((await store.listMessages({ page: 1, size: 50 })).map((m) => m.id)).toEqual([2, 3, 1]);
+
+    // The id tiebreaker follows the timestamp direction, so a page boundary
+    // that falls inside a group of equal timestamps neither drops nor repeats.
+    await store.upsertMessage(sampleRow({ id: 10, folder: 'sent', sentAt: '2026-06-01T00:00:00Z' }));
+    await store.upsertMessage(sampleRow({ id: 11, folder: 'sent', sentAt: '2026-06-01T00:00:00Z' }));
+    await store.upsertMessage(sampleRow({ id: 12, folder: 'sent', sentAt: '2026-06-01T00:00:00Z' }));
+    const first = await store.listMessages({ folder: 'sent', page: 1, size: 2, sort: 'oldest' });
+    const second = await store.listMessages({ folder: 'sent', page: 2, size: 2, sort: 'oldest' });
+    expect([...first, ...second].map((m) => m.id)).toEqual([10, 11, 12]);
+  });
+
   it('countMessages counts matching rows', async () => {
     await store.upsertMessage(sampleRow({ id: 1, folder: 'inbox' }));
     await store.upsertMessage(sampleRow({ id: 2, folder: 'sent' }));
