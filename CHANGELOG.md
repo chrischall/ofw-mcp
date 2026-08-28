@@ -1,5 +1,33 @@
 # Changelog
 
+## [2.12.0](https://github.com/chrischall/ofw-mcp/compare/v2.11.0...v2.12.0) (2026-08-28)
+
+
+### Features
+
+* cache the session token so a restart skips re-authenticating ([#244](https://github.com/chrischall/ofw-mcp/issues/244)) ([40f7489](https://github.com/chrischall/ofw-mcp/commit/40f74893224e384d718ec5a21c44ff550393d90b))
+* **release:** publish ofw-fpx alongside ofw ([#243](https://github.com/chrischall/ofw-mcp/issues/243)) ([d9f0c55](https://github.com/chrischall/ofw-mcp/commit/d9f0c55eb14ab9c83159ad094e1ebc36cb4563f7))
+
+
+### Bug Fixes
+
+* **deps:** mirror package.json's caret range in the lockfile ([#257](https://github.com/chrischall/ofw-mcp/issues/257)) ([2b4c5c6](https://github.com/chrischall/ofw-mcp/commit/2b4c5c6991c9850eb70098fc70eb11d70499e18d))
+* narrow ofw mint.yaml egress and declare OFW_DEBUG_LOG ([#239](https://github.com/chrischall/ofw-mcp/issues/239)) ([599eae7](https://github.com/chrischall/ofw-mcp/commit/599eae74a96903a1fd7d8ba5188ec9c74982250e))
+
+
+### Refactor
+
+* **auth:** take the path ordering from resolveAuthPattern ([#255](https://github.com/chrischall/ofw-mcp/issues/255)) ([4b9daf8](https://github.com/chrischall/ofw-mcp/commit/4b9daf8f6b4c5a385215c81c5e61391eed7dd178))
+
+
+### Documentation
+
+* correct the tokenManager comment left stale by the session cache ([#246](https://github.com/chrischall/ofw-mcp/issues/246)) ([d0963f4](https://github.com/chrischall/ofw-mcp/commit/d0963f41cb41cc63716c95e8e73322535279b97d))
+* list the cache env vars in server.json and .env.example ([#253](https://github.com/chrischall/ofw-mcp/issues/253)) ([e326c45](https://github.com/chrischall/ofw-mcp/commit/e326c458261e9579faaea09a1849ca187d6a2c99))
+* list the session-cache env vars in the Environment block ([#258](https://github.com/chrischall/ofw-mcp/issues/258)) ([3577023](https://github.com/chrischall/ofw-mcp/commit/357702391ae5f98a10c3bf46773ff40bd1cb9813))
+* npm test now typechecks before running vitest ([#251](https://github.com/chrischall/ofw-mcp/issues/251)) ([f4513b9](https://github.com/chrischall/ofw-mcp/commit/f4513b99fd446dbcbf8fb49cd3c7da61d536d7ed))
+* **readme:** npm test now typechecks before running vitest ([#252](https://github.com/chrischall/ofw-mcp/issues/252)) ([8fe1930](https://github.com/chrischall/ofw-mcp/commit/8fe19304949818d895e02b446fcdc41f93b5af2d))
+
 ## [2.11.0](https://github.com/chrischall/ofw-mcp/compare/v2.10.2...v2.11.0) (2026-08-23)
 
 
