@@ -120,15 +120,21 @@ The allowlist covers the freshness/sync bookkeeping fields (`lastServerSyncAt`, 
 
 `.env` (project root) is loaded by `client.ts` via dynamic `dotenv` import (silently skipped if unavailable, e.g. inside the mcpb bundle). Real env vars take precedence (`override: false`).
 
-## Auth resolution (Pattern A template)
+## Auth resolution (Pattern A, on the shared resolver)
 
-`src/auth.ts` is the canonical "browser-bootstrap + Node-direct" auth shape used across our MCP servers. Six sibling MCPs model their auth on this file — keep the structure flat, the path-selection explicit, the error messages actionable. Three paths in priority order:
+`src/auth.ts` used to BE the canonical "browser-bootstrap + Node-direct" shape, and this section told six sibling MCPs to model their auth on it. That shape now lives in **`resolveAuthPattern`** (`@chrischall/mcp-utils`), which owns the one thing every copy had to agree on — the priority order `token → oauth → sessionScrape → fetchproxy` — and nothing else. `resolveAuth()` declares which paths are *configured* and the shared resolver runs the first one; the precedence is no longer an if/else here.
+
+What stays local is what is genuinely OFW's: how each path obtains a token, and what to say when none can. In particular the "nothing configured" error is raised here rather than letting the shared resolver throw its generic one, because OFW's names both fixes side by side.
+
+The migration waited on somewhere to put the expiry: the shared result carried `{ credential, source }` only, so adopting it meant discarding the `tokenExpiry` this file reads from the browser tab — which is the whole reason it reads it. `PatternResult.expiresAt` closed that gap (mcp-utils#148). If you migrate a sibling MCP, that field is why it is now lossless.
+
+Three paths in priority order:
 
 1. **Env-var credentials** (`OFW_USERNAME` + `OFW_PASSWORD`) → `src/auth-password.ts` does the legacy Spring Security form login. Unchanged from pre-fetchproxy behavior.
 2. **fetchproxy fallback** → `@fetchproxy/bootstrap` snapshots `localStorage["auth"]` + `localStorage["tokenExpiry"]` from a signed-in `ourfamilywizard.com` tab in ~one round-trip, then closes the bridge. All subsequent OFW API calls go out via direct Node fetch — fetchproxy is NOT in the hot path.
 3. **Error** → tells the user how to fix it (set creds, OR install the extension and sign in).
 
-The split into `auth.ts` + `auth-password.ts` is deliberate: tests mock `auth-password.js` and `@fetchproxy/bootstrap` at the module boundary, so path-selection logic in `resolveAuth()` stays independent of either implementation. Sibling MCPs should copy this split.
+The split into `auth.ts` + `auth-password.ts` is deliberate: tests mock `auth-password.js` and `@fetchproxy/bootstrap` at the module boundary, so path-selection logic in `resolveAuth()` stays independent of either implementation. Sibling MCPs should copy this split — and take the ordering from `resolveAuthPattern` rather than re-deriving it.
 
 ## Message Cache
 
