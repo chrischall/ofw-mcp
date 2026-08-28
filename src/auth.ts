@@ -1,16 +1,23 @@
 // ────────────────────────────────────────────────────────────────────────────
-// Auth resolution — Pattern A template
+// Auth resolution — Pattern A, on the shared resolver
 // ────────────────────────────────────────────────────────────────────────────
 //
-// This file is the canonical shape for "browser-bootstrap + Node-direct"
-// auth used across our MCP servers. The other six MCPs in this family
-// (resy-mcp, opentable-mcp, splitwise-mcp, …) will model their auth
-// resolution after this one — keep the structure flat, the path-selection
-// explicit, and the error messages actionable.
+// This file used to BE the canonical shape, and said so: the other MCPs in
+// this family were told to model their resolution on it. That shape now lives
+// in `resolveAuthPattern` (@chrischall/mcp-utils), which owns the one thing
+// every copy of it had to agree on — the priority order — and nothing else.
+// What stays here is what is genuinely OFW's: how each path gets a token, and
+// what to say when it cannot.
 //
-// THE THREE PATHS, in priority order:
+// The migration waited on somewhere to put the expiry. The shared result
+// carried `{ credential, source }` only, so adopting it meant discarding the
+// `tokenExpiry` this file reads from the browser tab — which is the whole
+// reason it reads it. `PatternResult.expiresAt` closed that (mcp-utils#148).
 //
-//   1. Env-var credentials (existing behavior)
+// THE THREE PATHS, in priority order — now expressed by which resolvers are
+// PROVIDED, since `resolveAuthPattern` runs the first configured one:
+//
+//   1. Env-var credentials (`sessionScrape`)
 //      OFW_USERNAME + OFW_PASSWORD set → POST the login form, get a token.
 //      This is the legacy path. It runs unchanged when both vars are set
 //      so existing users (Claude Desktop with mcpb env config, etc.) are
@@ -46,7 +53,7 @@
 //     specifically so it can be mocked here too. This keeps the
 //     selection logic independent of either implementation.
 
-import { parseBoolEnv, readEnvVar } from '@chrischall/mcp-utils';
+import { parseBoolEnv, readEnvVar, resolveAuthPattern, type AuthPattern } from '@chrischall/mcp-utils';
 import { bootstrap } from '@fetchproxy/bootstrap';
 import { classifyBridgeError, FetchproxyBridgeDownError } from '@chrischall/mcp-utils/fetchproxy';
 import { loginWithPassword } from './auth-password.js';
@@ -76,72 +83,97 @@ function fetchproxyDisabled(): boolean {
  * The field exists for logging / future cache-keying only.
  */
 export async function resolveAuth(): Promise<ResolvedAuth> {
-  // ── Path 1: env-var credentials (unchanged from pre-fetchproxy behavior).
+  // Which paths are CONFIGURED. `resolveAuthPattern` runs the first one
+  // provided, in the fleet's fixed priority order (token → oauth →
+  // sessionScrape → fetchproxy), so "env beats fetchproxy" is expressed by
+  // which keys exist rather than by an if/else here.
+  const pattern: AuthPattern = {};
+
+  // ── Path 1 (sessionScrape): env-var credentials.
   // `readEnvVar` trims and treats blank / `"undefined"` / `"null"` /
   // `${UNEXPANDED}` placeholders as unset — defends against MCP hosts that
   // pass `.mcp.json` env blocks through without variable expansion.
   const username = readEnvVar('OFW_USERNAME');
   const password = readEnvVar('OFW_PASSWORD');
   if (username && password) {
-    const { token, expiresAt } = await loginWithPassword(username, password);
-    return { token, expiresAt, source: 'env' };
+    pattern.sessionScrape = async () => {
+      const { token, expiresAt } = await loginWithPassword(username, password);
+      return { credential: token, source: 'env', expiresAt };
+    };
   }
 
-  // ── Path 2: fetchproxy fallback (new).
+  // ── Path 2 (fetchproxy): lift the session out of a signed-in browser tab.
   if (!fetchproxyDisabled()) {
-    try {
-      const session = await bootstrap({
-        serverName: pkg.name,
-        version: pkg.version,
-        // OFW serves both ofw.ourfamilywizard.com and www.ourfamilywizard.com;
-        // the API + auth token live on the apex. The extension matches on
-        // suffix, so listing the apex covers both.
-        domains: ['ourfamilywizard.com'],
-        declare: {
-          cookies: [],
-          // The web app stores the Bearer token in localStorage["auth"] and
-          // its expiry (ISO string) in localStorage["tokenExpiry"]. Mirroring
-          // both means our 401-replay logic can be slightly smarter, and the
-          // expiry surfaces correctly in diagnostics.
-          localStorage: ['auth', 'tokenExpiry'],
-          sessionStorage: [],
-          captureHeaders: [],
-        },
-      });
+    pattern.fetchproxy = async () => {
+      try {
+        const session = await bootstrap({
+          serverName: pkg.name,
+          version: pkg.version,
+          // OFW serves both ofw.ourfamilywizard.com and www.ourfamilywizard.com;
+          // the API + auth token live on the apex. The extension matches on
+          // suffix, so listing the apex covers both.
+          domains: ['ourfamilywizard.com'],
+          declare: {
+            cookies: [],
+            // The web app stores the Bearer token in localStorage["auth"] and
+            // its expiry (ISO string) in localStorage["tokenExpiry"]. Mirroring
+            // both means our 401-replay logic can be slightly smarter, and the
+            // expiry surfaces correctly in diagnostics.
+            localStorage: ['auth', 'tokenExpiry'],
+            sessionStorage: [],
+            captureHeaders: [],
+          },
+        });
 
-      const token = session.localStorage['auth'];
-      const expiryRaw = session.localStorage['tokenExpiry'];
-      if (!token) {
+        const token = session.localStorage['auth'];
+        const expiryRaw = session.localStorage['tokenExpiry'];
+        if (!token) {
+          throw new Error(
+            'localStorage["auth"] missing on ourfamilywizard.com. ' +
+              'Sign into OFW in your browser (with the fetchproxy extension installed) and retry.',
+          );
+        }
+        return {
+          credential: token,
+          source: 'fetchproxy',
+          ...(expiryRaw ? { expiresAt: new Date(expiryRaw) } : {}),
+        };
+      } catch (e) {
+        // FetchproxyBridgeDownError only escapes bootstrap() after the lazy-revive retry fails — surface .hint verbatim (actionable "click toolbar icon" copy).
+        if (classifyBridgeError(e) === 'bridge_down') {
+          const downErr = e as FetchproxyBridgeDownError;
+          throw new Error(
+            `OFW auth: fetchproxy bridge is down (extension service worker unreachable after retry). ${downErr.hint}`,
+          );
+        }
+        const msg = e instanceof Error ? e.message : String(e);
         throw new Error(
-          'localStorage["auth"] missing on ourfamilywizard.com. ' +
-            'Sign into OFW in your browser (with the fetchproxy extension installed) and retry.',
+          `OFW auth: no OFW_USERNAME/OFW_PASSWORD set, and fetchproxy fallback failed: ${msg}`,
         );
       }
-      return {
-        token,
-        expiresAt: expiryRaw ? new Date(expiryRaw) : undefined,
-        source: 'fetchproxy',
-      };
-    } catch (e) {
-      // FetchproxyBridgeDownError only escapes bootstrap() after the lazy-revive retry fails — surface .hint verbatim (actionable "click toolbar icon" copy).
-      if (classifyBridgeError(e) === 'bridge_down') {
-        const downErr = e as FetchproxyBridgeDownError;
-        throw new Error(
-          `OFW auth: fetchproxy bridge is down (extension service worker unreachable after retry). ${downErr.hint}`,
-        );
-      }
-      const msg = e instanceof Error ? e.message : String(e);
-      throw new Error(
-        `OFW auth: no OFW_USERNAME/OFW_PASSWORD set, and fetchproxy fallback failed: ${msg}`,
-      );
-    }
+    };
   }
 
-  // ── Path 3: nothing configured. Surface both fixes side-by-side so the
-  //    user can pick whichever fits their setup.
-  throw new Error(
-    'OFW auth: set OFW_USERNAME + OFW_PASSWORD, ' +
-      'or install the fetchproxy extension and sign into ourfamilywizard.com ' +
-      '(unset OFW_DISABLE_FETCHPROXY if it is set).',
-  );
+  // ── Path 3: nothing configured. Raised HERE rather than letting
+  // `resolveAuthPattern` throw its generic "no auth configured" message,
+  // because this one names OFW's own two fixes side-by-side and the generic
+  // one cannot.
+  if (!pattern.sessionScrape && !pattern.fetchproxy) {
+    throw new Error(
+      'OFW auth: set OFW_USERNAME + OFW_PASSWORD, ' +
+        'or install the fetchproxy extension and sign into ourfamilywizard.com ' +
+        '(unset OFW_DISABLE_FETCHPROXY if it is set).',
+    );
+  }
+
+  // Errors from the winning path propagate UNWRAPPED, which is what keeps the
+  // bridge-down `.hint` above intact.
+  const { credential, source, expiresAt } = await resolveAuthPattern(pattern);
+  return {
+    token: credential,
+    // The pattern's `source` is a free-form string; ours is a two-value union,
+    // and both resolvers above set it to a member of that union.
+    source: source as ResolvedAuth['source'],
+    ...(expiresAt ? { expiresAt } : {}),
+  };
 }
