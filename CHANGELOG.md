@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.13.0](https://github.com/chrischall/ofw-mcp/compare/v2.12.0...v2.13.0) (2026-08-29)
+
+
+### Features
+
+* **deps:** take @fetchproxy/server 2.2.0 so the concentrator can bind its sandbox address ([#259](https://github.com/chrischall/ofw-mcp/issues/259)) ([b0b7ef5](https://github.com/chrischall/ofw-mcp/commit/b0b7ef50cc69a09fd2f249ccb948bbffbba21c8a))
+
 ## [2.12.0](https://github.com/chrischall/ofw-mcp/compare/v2.11.0...v2.12.0) (2026-08-28)
 
 
