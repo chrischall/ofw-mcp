@@ -39,6 +39,23 @@ jobs:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
+      # A changelog line names the change and the PR, never the person. This
+      # amends the release PR's CHANGELOG so a contribution from outside the
+      # org reads "(thanks @user)". Runs after release-please and re-applies
+      # every run, because release-please regenerates the changelog and
+      # force-pushes its branch each time.
+      - uses: actions/checkout@v7
+        if: steps.release.outputs.pr != ''
+        with:
+          token: ${{ secrets.RELEASE_PAT }}
+          fetch-depth: 0
+
+      - uses: chrischall/workflows/.github/actions/credit-contributors@main
+        if: steps.release.outputs.pr != ''
+        with:
+          token: ${{ secrets.RELEASE_PAT }}
+          pr: ${{ steps.release.outputs.pr }}
+
   publish:
     needs: release-please
     if: needs.release-please.outputs.release_created == 'true'
