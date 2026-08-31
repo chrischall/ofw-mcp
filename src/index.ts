@@ -13,6 +13,7 @@ type EmitFn = (event: string | symbol, ...args: unknown[]) => boolean;
 import { runMcp } from '@chrischall/mcp-utils';
 import { client } from './client.js';
 import { registerUserTools } from './tools/user.js';
+import { registerHealthcheckTools } from './tools/healthcheck.js';
 import { registerMessageTools } from './tools/messages.js';
 import { registerCalendarTools } from './tools/calendar.js';
 import { registerExpenseTools } from './tools/expenses.js';
@@ -42,6 +43,7 @@ await runMcp({
   version: '2.13.0', // x-release-please-version
   deps: client,
   tools: [
+    registerHealthcheckTools,
     registerUserTools,
     (server, deps) => registerMessageTools(server, deps, nodeCacheProvider, nodeAttachmentIO),
     registerCalendarTools,
