@@ -1,7 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { registerCredentialHealthcheckTool } from '@chrischall/mcp-utils/healthcheck';
 import type { OFWClient } from '../client.js';
-import { resolveAuth, type ResolvedAuth } from '../auth.js';
+import { resolveAuth, isNoAuthConfigured, type ResolvedAuth } from '../auth.js';
 
 /**
  * `ofw_healthcheck` — the one call that answers "is this connector working?".
@@ -47,10 +47,11 @@ export function registerHealthcheckTools(
         // failure and must keep its own message rather than being flattened
         // into "no credential", which would send someone to set variables
         // that are already set.
-        const msg = e instanceof Error ? e.message : String(e);
-        if (msg.startsWith('OFW auth: set OFW_USERNAME + OFW_PASSWORD')) {
-          return { source: null };
-        }
+        // `isNoAuthConfigured` rather than a prefix match on a copy of the
+        // message: the copy would pass this module's own test while silently
+        // stopping matching the day auth.ts reworded it, and the failure mode
+        // is giving a rejected password the advice meant for a blank setup.
+        if (isNoAuthConfigured(e)) return { source: null };
         throw e;
       }
     },

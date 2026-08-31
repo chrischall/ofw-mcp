@@ -1,8 +1,8 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { createTestHarness, parseToolResult } from '@chrischall/mcp-utils/test';
 import { registerHealthcheckTools } from '../../src/tools/healthcheck.js';
 import type { OFWClient } from '../../src/client.js';
-import type { ResolvedAuth } from '../../src/auth.js';
+import { NO_AUTH_CONFIGURED, resolveAuth, type ResolvedAuth } from '../../src/auth.js';
 
 interface Result {
   ok: boolean;
@@ -11,8 +11,10 @@ interface Result {
   hint: string;
 }
 
-const UNCONFIGURED =
-  'OFW auth: set OFW_USERNAME + OFW_PASSWORD, or install the fetchproxy extension and sign into ourfamilywizard.com (unset OFW_DISABLE_FETCHPROXY if it is set).';
+// Imported, never copied: a local copy of this string would keep this file
+// green on the day auth.ts reworded it, while production silently stopped
+// recognising the case.
+const UNCONFIGURED = NO_AUTH_CONFIGURED;
 
 async function call(
   resolve: () => Promise<ResolvedAuth>,
@@ -86,5 +88,33 @@ describe('ofw_healthcheck', () => {
     );
     expect(r.ok).toBe(false);
     expect(r.credential.resolved).toBe(true);
+  });
+});
+
+// The strings agreeing is not enough — the REAL resolver has to actually raise
+// this case, or the pair could agree perfectly about a message nothing throws.
+describe('the unconfigured case is what resolveAuth really raises', () => {
+  const VARS = ['OFW_USERNAME', 'OFW_PASSWORD', 'OFW_DISABLE_FETCHPROXY'] as const;
+  const saved: Record<string, string | undefined> = {};
+  beforeEach(() => {
+    for (const k of VARS) {
+      saved[k] = process.env[k];
+      delete process.env[k];
+    }
+    // Fetchproxy off, so path 2 cannot be the one that answers.
+    process.env.OFW_DISABLE_FETCHPROXY = '1';
+  });
+  afterEach(() => {
+    for (const k of VARS) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+  });
+
+  it('raises exactly NO_AUTH_CONFIGURED, which the healthcheck then recognises', async () => {
+    await expect(resolveAuth()).rejects.toThrow(NO_AUTH_CONFIGURED);
+    const r = await call(() => resolveAuth());
+    expect(r.credential.source).toBeNull();
+    expect(r.error?.kind).toBe('no_credential');
   });
 });
