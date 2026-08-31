@@ -5,6 +5,18 @@ name: PR auto-review
 on:
   pull_request:
     types: [opened, reopened, ready_for_review, synchronize, labeled]
+  # Fork PRs cannot be reviewed on `pull_request`: GitHub withholds secrets from
+  # fork runs, so the review has no credential, and `pull_request_target` — the
+  # usual answer — is rejected by Anthropic's OIDC backend
+  # (anthropics/claude-code-action#713). `issue_comment` fires in the BASE repo
+  # with secrets intact, which is the same mechanism claude.yml already uses to
+  # reach forks.
+  #
+  # It is human-gated by construction: a maintainer has to type the command, and
+  # the reusable workflow checks `author_association`. That is the gate — a fork
+  # review never starts on its own.
+  issue_comment:
+    types: [created]
 
 permissions:
   contents: read
@@ -17,8 +29,30 @@ permissions:
 # would let the labeled event displace the queued review, leaving the PR
 # with no verdict and no label.
 concurrency:
+  # Keyed so an `issue_comment` run can never cancel another review.
+  #
+  # `issue_comment` fires on EVERY comment — the body filter lives in the
+  # `context` job, which runs after concurrency is resolved. So a comment that
+  # is not `/auto-review` still starts a run and still takes a queue slot. With
+  # `cancel-in-progress: false` GitHub keeps at most ONE pending run per group
+  # and cancels the previously pending one, which produced this:
+  #
+  #   1. `/auto-review` posted        → run queued behind the pull_request review
+  #   2. the reviewer's own "Claude Code is working…" progress comment
+  #                                   → a second issue_comment run
+  #   3. that new run displaced the queued one — the bot CANCELLED the very
+  #      review it was reporting progress on (chrischall/workflows#182)
+  #
+  # Giving each comment its own group removes the collision entirely: a
+  # `/auto-review` is an explicitly requested action, not a duplicate of the
+  # automatic review, and two of them are rare enough that not de-duplicating
+  # them costs nothing. The `pull_request` group is unchanged.
   group: |
-    pr-auto-review-${{ github.event.pull_request.number }}${{
+    pr-auto-review-${{ github.event.pull_request.number || github.event.issue.number }}${{
+      github.event_name == 'issue_comment'
+        && format('-comment-{0}', github.event.comment.id)
+        || ''
+    }}${{
       github.event.action == 'labeled'
         && format('-labeled-{0}', github.event.label.name)
         || ''
