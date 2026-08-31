@@ -17,12 +17,13 @@ name: CI fork status
 # footgun: it has a write token and is triggered by an untrusted fork. This
 # workflow is safe ONLY because it never fetches, checks out, builds or
 # executes anything from the head repository. It reads five scalars off the
-# event payload and nothing else — `event` and `head_repository.full_name` to
-# gate the job, then `head_sha`, `conclusion` and `html_url` to post the
-# status. Do NOT add `actions/checkout` here, and do not pass any
-# fork-controlled string into a shell: `head_sha` and `head_repository` are
-# named by the fork, which is why they reach the composite action through an
-# `env:` block rather than the script body.
+# event payload and nothing else: `event` and `head_repository.full_name` gate
+# the job below and go no further, while `head_sha`, `conclusion` and
+# `html_url` are handed to the composite action through `with:`. Do NOT add
+# `actions/checkout` here. Of the three that travel onward only `head_sha` is
+# named by the fork, and inside the action every input is bound to an `env:`
+# var and referenced as "$SHA" rather than interpolated into the script body —
+# keep it that way.
 #
 # What this DOES weaken, stated plainly: a fork PR can now satisfy `ci-gated`,
 # so the merge no longer waits for a maintainer to post one by hand. Two human
