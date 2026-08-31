@@ -1,0 +1,59 @@
+name: CI fork status
+
+# Thin stub. Posts the `ci-gated` commit status for FORK pull requests, which
+# cannot post it themselves.
+#
+# Why this exists: GitHub caps `GITHUB_TOKEN` to read-only for `pull_request`
+# runs from a fork, whatever the CI stub's `permissions:` block asks for — so
+# the `ci-gated` POST 403s. Before this, `ci / ci` carried a real pass/fail but
+# `ci-gated` was never reported, leaving the required context permanently
+# unsatisfied: an external contribution could never be merged without a
+# maintainer hand-posting a status.
+#
+# `workflow_run` fires in the BASE repo's context, so its token really does
+# have `statuses: write`.
+#
+# SECURITY — read before editing. `workflow_run` is the classic "pwn request"
+# footgun: it has a write token and is triggered by an untrusted fork. This
+# workflow is safe ONLY because it never fetches, checks out, builds or
+# executes anything from the head repository. It reads two fields off the
+# event payload and posts a status. Do NOT add `actions/checkout` here, and do
+# not pass any fork-controlled string into a shell.
+#
+# What this DOES weaken, stated plainly: a fork PR can now satisfy `ci-gated`,
+# so the merge no longer waits for a maintainer to post one by hand. Two human
+# gates remain and are what this relies on:
+#
+#   1. GitHub holds fork workflow runs at `action_required` until a maintainer
+#      approves them, so CI never runs on unreviewed external code — and this
+#      workflow only ever reports a run that a human already approved.
+#   2. `pr-auto-review` SKIPS fork PRs, so `ready-to-merge` is never applied
+#      automatically to one. A human must arm it.
+#
+# The status posted is exactly the conclusion of the run: this reports CI, it
+# does not vouch for it.
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+
+permissions:
+  contents: read
+  statuses: write
+
+jobs:
+  report:
+    # Fork PRs only. A same-repo PR posts its own `ci-gated` from the CI run,
+    # and posting a second one here would race it.
+    if: >-
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.head_repository.full_name != github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: chrischall/workflows/.github/actions/fork-ci-status@main
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          sha: ${{ github.event.workflow_run.head_sha }}
+          conclusion: ${{ github.event.workflow_run.conclusion }}
+          run-url: ${{ github.event.workflow_run.html_url }}
