@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.14.0](https://github.com/chrischall/ofw-mcp/compare/v2.13.0...v2.14.0) (2026-08-31)
+
+
+### Features
+
+* **tools:** add ofw_healthcheck ([#264](https://github.com/chrischall/ofw-mcp/issues/264)) ([f26a154](https://github.com/chrischall/ofw-mcp/commit/f26a15432289c8b183599e5df71145ba0674e9dc)), closes [#265](https://github.com/chrischall/ofw-mcp/issues/265)
+* **tools:** classify a downed bridge as transport, not a missing credential ([#267](https://github.com/chrischall/ofw-mcp/issues/267)) ([cf7b6ac](https://github.com/chrischall/ofw-mcp/commit/cf7b6ace056273624bf55629be70f7521d96c3b8))
+
 ## [2.13.0](https://github.com/chrischall/ofw-mcp/compare/v2.12.0...v2.13.0) (2026-08-29)
 
 
