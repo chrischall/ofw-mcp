@@ -1,7 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { registerCredentialHealthcheckTool } from '@chrischall/mcp-utils/healthcheck';
 import type { OFWClient } from '../client.js';
-import { resolveAuth, isNoAuthConfigured, type ResolvedAuth } from '../auth.js';
+import { resolveAuth, isNoAuthConfigured, isBridgeDown, type ResolvedAuth } from '../auth.js';
 
 /**
  * `ofw_healthcheck` — the one call that answers "is this connector working?".
@@ -56,19 +56,30 @@ export function registerHealthcheckTools(
       }
     },
     probeFn: () => client.request('GET', '/pub/v2/profiles'),
+    // A downed bridge is not a missing credential, and since mcp-utils 0.19.3
+    // the helper consults this for a `resolveCredential` failure too — so it
+    // gets its own arm instead of the `no_credential` copy. That copy could
+    // previously only hedge across both cases and point at `error.message`;
+    // now each answer names one cause and one fix.
+    classifyThrown: (err: unknown) =>
+      isBridgeDown(err)
+        ? {
+            kind: 'transport',
+            // The upstream `.hint` rides along in `error.message` — it carries
+            // the actionable "click the toolbar icon" copy this cannot know.
+            hint:
+              'The fetchproxy bridge is down, so the browser path could not be tried. This is ' +
+              'not a credential problem: OFW_USERNAME/OFW_PASSWORD, if set, were not reached ' +
+              'either. See error.message for the extension-specific fix.',
+          }
+        : undefined,
     hints: {
-      // Covers TWO situations, because the shared helper cannot tell them
-      // apart: it collapses any `resolveCredential` throw into this arm with
-      // this static hint. So the hint must not assert which one happened —
-      // `error.message` is what distinguishes them, and it says so. (Teaching
-      // the helper to classify a resolver throw would fix this for every
-      // connector; noted as a follow-up rather than worked around here.)
+      // Now means exactly what it says: nothing is set up. A configured path
+      // that was tried and failed no longer lands here.
       no_credential:
-        'No usable OFW credential. Either nothing is configured — set OFW_USERNAME + ' +
-        'OFW_PASSWORD, or install the fetchproxy extension and sign in to ourfamilywizard.com ' +
-        'in a tab (unsetting OFW_DISABLE_FETCHPROXY if you set it) — or a configured path was ' +
-        'tried and failed. `error.message` says which: a bridge that is down or a rejected ' +
-        'password reads very differently from nothing being set up at all.',
+        'No OFW credential is configured. Either set OFW_USERNAME + OFW_PASSWORD, or install ' +
+        'the fetchproxy extension and sign in to ourfamilywizard.com in a tab (unsetting ' +
+        'OFW_DISABLE_FETCHPROXY if you set it).',
       credential_rejected:
         'OurFamilyWizard rejected the credential. If it came from `env`, the password changed or ' +
         'the account is locked; if from `fetchproxy`, the browser session expired — sign in again ' +

@@ -2,7 +2,12 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { createTestHarness, parseToolResult } from '@chrischall/mcp-utils/test';
 import { registerHealthcheckTools } from '../../src/tools/healthcheck.js';
 import type { OFWClient } from '../../src/client.js';
-import { NO_AUTH_CONFIGURED, resolveAuth, type ResolvedAuth } from '../../src/auth.js';
+import {
+  BRIDGE_DOWN_PREFIX,
+  NO_AUTH_CONFIGURED,
+  resolveAuth,
+  type ResolvedAuth,
+} from '../../src/auth.js';
 
 interface Result {
   ok: boolean;
@@ -63,20 +68,32 @@ describe('ofw_healthcheck', () => {
     expect(r.hint).toMatch(/fetchproxy/i);
   });
 
-  // A rejected password and a downed bridge are NOT "no credential". Flattening
-  // them into that arm sends someone to set variables that are already set.
-  it('keeps a real auth failure distinct from an unconfigured one', async () => {
+  // A downed bridge is NOT "no credential". Flattening it into that arm sends
+  // someone to set variables that are already set — and since mcp-utils
+  // 0.19.3 classifies resolver throws, it no longer has to.
+  it('classifies a downed bridge as transport, not as a missing credential', async () => {
     const r = await call(async () => {
-      throw new Error('OFW auth: fetchproxy bridge is down (extension service worker unreachable after retry).');
+      throw new Error(`${BRIDGE_DOWN_PREFIX} (unreachable after retry). Click the toolbar icon.`);
     });
     expect(r.ok).toBe(false);
-    expect(r.credential.source).toBeNull();
-    // The real cause has to survive into the payload — this is the half the
-    // shared helper preserves. The hint cannot claim which case it is (the
-    // helper gives one static string to both), so it must point at the thing
-    // that can: error.message.
+    expect(r.error?.kind).toBe('transport');
+    // The real cause, and the extension-specific fix, survive into the payload.
     expect(r.error?.message).toMatch(/bridge is down/);
-    expect(r.hint).toMatch(/error\.message/);
+    expect(r.error?.message).toMatch(/toolbar icon/);
+    // The hint names ONE cause now, instead of hedging across two.
+    expect(r.hint).toMatch(/bridge is down/i);
+    expect(r.hint).not.toMatch(/set OFW_USERNAME/);
+  });
+
+  // The other side of the same split: the unconfigured hint may now say
+  // plainly that nothing is set up, because a failed path no longer lands here.
+  it('gives the unconfigured case advice that no longer hedges', async () => {
+    const r = await call(async () => {
+      throw new Error(NO_AUTH_CONFIGURED);
+    });
+    expect(r.error?.kind).toBe('no_credential');
+    expect(r.hint).toMatch(/OFW_USERNAME/);
+    expect(r.hint).not.toMatch(/error\.message/);
   });
 
   it('reports a probe failure without blaming the credential', async () => {

@@ -97,6 +97,23 @@ export const NO_AUTH_CONFIGURED =
   'or install the fetchproxy extension and sign into ourfamilywizard.com ' +
   '(unset OFW_DISABLE_FETCHPROXY if it is set).';
 
+/**
+ * Prefix of the message raised when the fetchproxy bridge is unreachable.
+ *
+ * A PREFIX rather than a whole constant because the upstream `.hint` — the
+ * actionable "click the toolbar icon" copy — is appended per failure. Exported
+ * with {@link isBridgeDown} for the reason {@link NO_AUTH_CONFIGURED} is: a
+ * reader that matched a copy of this text would keep its own test green on the
+ * day the wording changed, while silently misreporting a downed bridge as an
+ * unconfigured server.
+ */
+export const BRIDGE_DOWN_PREFIX = 'OFW auth: fetchproxy bridge is down';
+
+/** True for the {@link BRIDGE_DOWN_PREFIX} failure and nothing else. */
+export function isBridgeDown(e: unknown): boolean {
+  return e instanceof Error && e.message.startsWith(BRIDGE_DOWN_PREFIX);
+}
+
 /** True for the {@link NO_AUTH_CONFIGURED} failure and nothing else. */
 export function isNoAuthConfigured(e: unknown): boolean {
   return e instanceof Error && e.message === NO_AUTH_CONFIGURED;
@@ -163,7 +180,7 @@ export async function resolveAuth(): Promise<ResolvedAuth> {
         if (classifyBridgeError(e) === 'bridge_down') {
           const downErr = e as FetchproxyBridgeDownError;
           throw new Error(
-            `OFW auth: fetchproxy bridge is down (extension service worker unreachable after retry). ${downErr.hint}`,
+            `${BRIDGE_DOWN_PREFIX} (extension service worker unreachable after retry). ${downErr.hint}`,
           );
         }
         const msg = e instanceof Error ? e.message : String(e);
