@@ -82,6 +82,26 @@ function fetchproxyDisabled(): boolean {
  * return value as opaque credentials — they should not branch on `source`.
  * The field exists for logging / future cache-keying only.
  */
+/**
+ * The message raised when NEITHER auth path is configured.
+ *
+ * Exported with {@link isNoAuthConfigured} because a second reader needs to
+ * tell this case apart from every other auth failure: "nothing is set up" and
+ * "the password was rejected" or "the bridge is down" need opposite advice, and
+ * `ofw_healthcheck` gives the wrong one if it confuses them. A prefix match on
+ * a copy of this string in the other module would pass its own test while
+ * silently stopping matching the day this wording changed.
+ */
+export const NO_AUTH_CONFIGURED =
+  'OFW auth: set OFW_USERNAME + OFW_PASSWORD, ' +
+  'or install the fetchproxy extension and sign into ourfamilywizard.com ' +
+  '(unset OFW_DISABLE_FETCHPROXY if it is set).';
+
+/** True for the {@link NO_AUTH_CONFIGURED} failure and nothing else. */
+export function isNoAuthConfigured(e: unknown): boolean {
+  return e instanceof Error && e.message === NO_AUTH_CONFIGURED;
+}
+
 export async function resolveAuth(): Promise<ResolvedAuth> {
   // Which paths are CONFIGURED. `resolveAuthPattern` runs the first one
   // provided, in the fleet's fixed priority order (token → oauth →
@@ -159,11 +179,7 @@ export async function resolveAuth(): Promise<ResolvedAuth> {
   // because this one names OFW's own two fixes side-by-side and the generic
   // one cannot.
   if (!pattern.sessionScrape && !pattern.fetchproxy) {
-    throw new Error(
-      'OFW auth: set OFW_USERNAME + OFW_PASSWORD, ' +
-        'or install the fetchproxy extension and sign into ourfamilywizard.com ' +
-        '(unset OFW_DISABLE_FETCHPROXY if it is set).',
-    );
+    throw new Error(NO_AUTH_CONFIGURED);
   }
 
   // Errors from the winning path propagate UNWRAPPED, which is what keeps the
