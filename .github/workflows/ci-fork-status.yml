@@ -35,8 +35,13 @@ name: CI fork status
 #   2. `pr-auto-review` SKIPS fork PRs, so `ready-to-merge` is never applied
 #      automatically to one. A human must arm it.
 #
-# The status posted is exactly the conclusion of the run: this reports CI, it
-# does not vouch for it.
+# This reports CI; it does not vouch for it. But note that the run's conclusion
+# alone does NOT say whether CI ran: an un-armed fork PR defers the build and
+# the run still concludes `success`, which is how this workflow once posted a
+# green `ci-gated` for a commit nothing had compiled (skylight-mcp#148). The
+# action therefore re-derives the gate's arming decision from the PR's labels
+# and mirrors a conclusion only for a run that was armed; everything else is
+# reported `pending`, the same block the gate gives a same-repo un-armed PR.
 
 on:
   workflow_run:
@@ -46,6 +51,11 @@ on:
 permissions:
   contents: read
   statuses: write
+  # Read-only, and load-bearing: the action decides whether CI actually RAN by
+  # reading the PR's `ready-to-merge` label. Without this grant the lookup
+  # fails and every fork PR is reported blocked rather than green — safe, but
+  # unmergeable, so this must ship together with the action.
+  pull-requests: read
 
 jobs:
   report:
