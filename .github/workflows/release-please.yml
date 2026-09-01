@@ -40,10 +40,16 @@ jobs:
           manifest-file: .release-please-manifest.json
 
       # A changelog line names the change and the PR, never the person. This
-      # amends the release PR's CHANGELOG so a contribution from outside the
-      # org reads "(thanks @user)". Runs after release-please and re-applies
-      # every run, because release-please regenerates the changelog and
-      # force-pushes its branch each time.
+      # amends BOTH the release PR's CHANGELOG and its own description, so a
+      # contribution from outside the org reads "(thanks @user)" everywhere a
+      # person actually looks — the release PR, and the GitHub Release notes
+      # cut from it. The body needs its own pass because release-please writes
+      # the description from its own notes and never re-reads the branch.
+      #
+      # Runs after release-please and re-applies every run, because
+      # release-please regenerates the changelog and force-pushes its branch
+      # each time. The PAT below is load-bearing twice over: contents:write to
+      # commit the changelog, pull-requests:write to push the body back.
       - uses: actions/checkout@v7
         if: steps.release.outputs.pr != ''
         with:
