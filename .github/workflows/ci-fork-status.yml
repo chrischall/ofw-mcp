@@ -32,8 +32,10 @@ name: CI fork status
 #   1. GitHub holds fork workflow runs at `action_required` until a maintainer
 #      approves them, so CI never runs on unreviewed external code — and this
 #      workflow only ever reports a run that a human already approved.
-#   2. `pr-auto-review` SKIPS fork PRs, so `ready-to-merge` is never applied
-#      automatically to one. A human must arm it.
+#   2. a fork is armed only when a maintainer types `/auto-review` on it. No
+#      event reviews a fork on its own, the command's author_association is
+#      checked before anything runs, and auto-merge excludes forks by head
+#      repo — so arming a fork starts its CI, never its merge.
 #
 # This reports CI; it does not vouch for it. But note that the run's conclusion
 # alone does NOT say whether CI ran: an un-armed fork PR defers the build and
