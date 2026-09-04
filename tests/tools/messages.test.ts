@@ -321,7 +321,10 @@ describe('read-state reconciliation (bug: stale read flag vs viewedAt)', () => {
     upsertMessage(staleReadRow());
     const client = new OFWClient();
     setup(client);
-    const parsed = JSON.parse((await handlers.get('ofw_list_messages')!({ folderId: 'inbox' })).content[0].text);
+    // `full`, because the invariant under test is about the raw echo AGREEING
+    // with the derived flag. On `compact` the echo is not emitted at all, so
+    // there is nothing left to contradict — asserted separately below.
+    const parsed = JSON.parse((await handlers.get('ofw_list_messages')!({ folderId: 'inbox', view: 'full' })).content[0].text);
     const msg = parsed.messages[0];
     expect(msg.read).toBe(true);
     // and the raw listData flags no longer contradict the recipient viewedAt
@@ -332,12 +335,25 @@ describe('read-state reconciliation (bug: stale read flag vs viewedAt)', () => {
     expect(msg.recipients[0].userId).toBe(3039201);
   });
 
+  it('the default view carries the derived read flag and no echo to contradict it', async () => {
+    upsertMessage(staleReadRow());
+    const client = new OFWClient();
+    setup(client);
+    const parsed = JSON.parse((await handlers.get('ofw_list_messages')!({ folderId: 'inbox' })).content[0].text);
+    const msg = parsed.messages[0];
+    expect(msg.read).toBe(true);
+    expect(msg).not.toHaveProperty('listData');
+    // The reconciliation's whole purpose — one payload that cannot disagree
+    // with itself — is reached on compact by removing the second opinion.
+    expect(msg.recipients[0].viewedAt).toBe('2026-07-17T08:37:57-04:00');
+  });
+
   it('ofw_get_message reports read:true for the same record', async () => {
     upsertMessage(staleReadRow());
     const client = new OFWClient();
     const spy = vi.spyOn(client, 'request');
     setup(client);
-    const parsed = JSON.parse((await handlers.get('ofw_get_message')!({ messageId: '534973630' })).content[0].text);
+    const parsed = JSON.parse((await handlers.get('ofw_get_message')!({ messageId: '534973630', view: 'full' })).content[0].text);
     expect(parsed.read).toBe(true);
     expect(parsed.listData.showNeverViewed).toBe(false);
     expect(spy).not.toHaveBeenCalled(); // inbox with a real view time isn't re-fetched
@@ -353,7 +369,7 @@ describe('read-state reconciliation (bug: stale read flag vs viewedAt)', () => {
     });
     const client = new OFWClient();
     setup(client);
-    const parsed = JSON.parse((await handlers.get('ofw_list_messages')!({ folderId: 'inbox' })).content[0].text);
+    const parsed = JSON.parse((await handlers.get('ofw_list_messages')!({ folderId: 'inbox', view: 'full' })).content[0].text);
     expect(parsed.messages[0].read).toBe(false);
     expect(parsed.messages[0].listData.showNeverViewed).toBe(true);
   });
@@ -589,6 +605,24 @@ describe('ofw_get_message (cache-first)', () => {
     expect(parsed.chainRootId).toBeNull();
     // The drafts-table route doesn't hit OFW or the messages cache.
     expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('carries OFW’s raw echo on `full` and omits it on the default view', async () => {
+    upsertDraft({
+      id: 802, subject: 'D', body: 'b', recipients: [], replyToId: null,
+      modifiedAt: '2026-05-04T12:00:00Z',
+      listData: { date: { dateTime: '2026-05-04T12:00:00Z' }, preview: 'b...' },
+    });
+    const client = new OFWClient();
+    setup(client);
+    const full = JSON.parse((await handlers.get('ofw_get_message')!({ messageId: '802', view: 'full' })).content[0].text);
+    expect(full.listData).toMatchObject({ preview: 'b...' });
+    // The drafts TABLE is the source of truth for a draft id, so on compact
+    // the echo is dropped entirely rather than shipped as a second opinion.
+    const compact = JSON.parse((await handlers.get('ofw_get_message')!({ messageId: '802' })).content[0].text);
+    expect(compact).not.toHaveProperty('listData');
+    expect(compact.body).toBe('b');
+    expect(compact.revision).toBe(full.revision);
   });
 
   it('returns folder="drafts" even when no matching messages-table row exists', async () => {
@@ -3476,9 +3510,16 @@ describe('messages.ts — coverage backfill', () => {
     const c = new OFWClient();
     vi.spyOn(c, 'request').mockResolvedValue({ id: 77, subject: 'S', files: [] }); // detail: no subject/from/date/body
     setup(c);
+    const full = JSON.parse((await handlers.get('ofw_get_message')!({ messageId: 77, view: 'full' })).content[0].text);
+    expect(full.fromUser).toBe('');  // 180
+    expect(full.body).toBe('');      // 183
+    // On compact, `fromUser` is replaced by `from` — null here because neither
+    // source named a sender, rather than the empty string that made an unknown
+    // sender look like a blank one.
     const out = JSON.parse((await handlers.get('ofw_get_message')!({ messageId: 77 })).content[0].text);
-    expect(out.fromUser).toBe('');  // 180
-    expect(out.body).toBe('');      // 183
+    expect(out).not.toHaveProperty('fromUser');
+    expect(out.from).toBeNull();
+    expect(out.body).toBe('');
   });
 
   it('send_message: reports the missing required fields for a fresh send', async () => {
@@ -3827,7 +3868,7 @@ describe('ofw_get_message — sent view-status refresh', () => {
       recipients: [{ user: { id: 1, name: 'Co-parent' }, viewed: { dateTime: '2026-06-16T15:49:20' } }],
     });
     setup(client);
-    const result = await handlers.get('ofw_get_message')!({ messageId: '600' });
+    const result = await handlers.get('ofw_get_message')!({ messageId: '600', view: 'full' });
     const parsed = JSON.parse(result.content[0].text);
     expect(parsed.recipients[0].viewedAt).toBe('2026-06-16T15:49:20-04:00');
     expect(getMessage(600)?.recipients[0].viewedAt).toBe('2026-06-16T15:49:20');
@@ -3849,7 +3890,7 @@ describe('ofw_get_message — sent view-status refresh', () => {
       recipients: [{ user: { id: 1, name: 'Co-parent' }, viewed: null }],
     });
     setup(client);
-    const result = await handlers.get('ofw_get_message')!({ messageId: '603' });
+    const result = await handlers.get('ofw_get_message')!({ messageId: '603', view: 'full' });
     const parsed = JSON.parse(result.content[0].text);
     expect(parsed.recipients[0].viewedAt).toBeNull();
     expect(parsed.listData.showNeverViewed).toBe(true);

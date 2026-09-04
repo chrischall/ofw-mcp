@@ -64,6 +64,7 @@ src/
     delivery.ts     the attachment delivery ladder (image → extracted → raw bytes)
     freshness.ts    buildFreshness() — the `freshness` block every read tool returns (source/asOf/ageSeconds/staleness/warning)
     pagination.ts   paging state that survives a lossy reader: pageState/offsetState/readUpstreamPaging/withPaginationFirst
+    project.ts      the `view` projection — compactMessage/compactDraft/viewMessages/viewDrafts/viewOne, MESSAGE_VIEWS
     lifecycle.ts    "is this entity still what I think it is?" — classifyState/probeIds/resolveDraftKey/newDraftKey
     user.ts         ofw_get_profile, ofw_get_notifications
     messages.ts     folders, list, get, send, drafts, get_unread_sent, upload/download_attachment, sync_messages, check_freshness, status
@@ -96,6 +97,67 @@ OFW_AUTO_REFRESH          Optional. "1|true|yes|on" → when a cached read comes
 OFW_CALENDAR_WRITES       Optional. "1|true|yes|on" → in mode "drafts", additionally register the calendar write tools (ofw_create_event, ofw_update_event, ofw_delete_event). Rationale: calendar events have no draft stage but are reversible (editable/deletable), unlike a sent message. Redundant in "all"; never overrides "none" (including the unrecognized-mode fail-closed path)
 DISPLAY_TZ                Optional. IANA zone (e.g. America/New_York, the default) for every `<field>Display` value, and the zone a NAIVE source timestamp is assumed to be wall-clock in. OFW's API reports naive local times in the account's own zone, so this must match it. Unrecognized values fall back to the default rather than throwing — a typo degrades a label instead of breaking every tool. Never a fixed offset: DST comes from the IANA database, so a hardcoded -04:00 would be an hour wrong from November through March
 ```
+
+## Response shape (`view`)
+
+Every read tool that returns cached records takes `view: 'compact' | 'full'`,
+**defaulting to `compact`** — the fleet vocabulary from
+`@chrischall/mcp-utils` (`viewParam`/`resolveView`/`projectOrRaw`). The
+projection lives in `src/tools/project.ts`.
+
+Measured against a real 1,335-row cache, a default `ofw_list_messages()` (50
+messages) weighed **135 KB — about 34,000 tokens for one call**. `listData` was
+58% of that, and **78% of `listData` duplicated fields the same object already
+emitted at the top level**:
+
+- `listData.date` is 421 bytes per message: ELEVEN pre-formatted renderings of
+  one timestamp, beside the `sentAt` + `sentAtDisplay` that `timestamps.ts`
+  derives — and `normalizeTimestampsInValue` then adds a twelfth *inside it*.
+- `listData.recipients[].user` carries eight fields per person (`color`,
+  `displayInitials`, …) next to the three-field recipients the row normalised.
+- `listData.read`/`.showNeverViewed` are FORCED to agree with the derived
+  `read` before they are emitted (`withReadState`), so the copy cannot even
+  disagree usefully.
+- `listData.preview` is a truncation of the body in the same object.
+
+Compact drops that blob, keeps everything a caller acts on, and **promotes the
+sender to `from`**. That promotion is load-bearing, not cosmetic: `fromUser` is
+the empty string on all 1,335 rows — inbox AND sent — because OFW names the
+sender only in the list payload's `author`. Deleting `listData` without it
+would have taken the sender off every message; compact is where a field that
+never worked starts working.
+
+`files` and `replied` are kept (nothing else carries them); `files` is
+normalised from the number-or-empty-array OFW sends, and is **omitted entirely
+when OFW reported nothing** rather than defaulting to `0` — "we did not see a
+count" and "there are none" are different facts, and the second reads as
+verified. `canReply` (true on 1,330 of 1,335), `draft` (answered by `folder`),
+`archived` and `firstView` (absent on 1,326) are dropped.
+
+**There is no `raw` rung**, deliberately. A message here is ASSEMBLED — the
+list endpoint supplies `listData`, the detail GET supplies `body` and the real
+`viewedAt`, `timestamps.ts` rewrites both — so there is no single upstream
+payload to hand back. And a `raw` that skipped normalisation would put naive
+local times back beside UTC ones on the one rung a caller reaches for when
+something already looks wrong. `ofw_get_unread_sent` has no `view` either: it
+emits a verdict list (`{id, subject, sentAt, unreadBy}`), already narrower than
+the projection.
+
+**A projection that trips returns the rows WHOLE** (`projectOrRaw`), warns on
+stderr, and does so for the entire array rather than per row — a hole in the
+middle of a 50-message page is worse than a fat page and is indistinguishable
+from a message with no content. The projection is applied at the LAST moment,
+after `returned`/`complete`/the notes are computed, so it can never change what
+the response claims about its own contents.
+
+**All responses are minified.** `jsonResponse` uses `minifiedResult`, not
+`JSON.stringify(data, null, 2)`: indentation was 23% of that 135 KB page,
+roughly 8,000 tokens a call, and nothing downstream reads it. Whitespace
+*inside* a value is content and is untouched — a message body's blank lines
+survive byte-for-byte, which `JSON.stringify` gives for free and a text-level
+minifier would destroy. Tests pin it here and in mcp-utils.
+
+Together: **135.1 KB → 41.1 KB, −70%.**
 
 ## Timestamps
 

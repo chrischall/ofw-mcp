@@ -4,11 +4,24 @@ import { deriveRead, expandPath, hasRealView, jsonResponse, mapRecipients, textR
 import { sampleMessageRow } from '../_fixtures.js';
 
 describe('jsonResponse', () => {
-  it('wraps a payload as a single text content block with pretty-printed JSON', () => {
+  it('wraps a payload as a single text content block with NO formatting whitespace', () => {
+    // Indentation was 23% of a 135 KB message page — roughly 8,000 tokens a
+    // call — and nothing downstream reads it. This server has no `raw` rung
+    // (tools/project.ts), so every response is minified.
     const result = jsonResponse({ foo: 'bar', n: 1 });
     expect(result.content).toHaveLength(1);
     expect(result.content[0].type).toBe('text');
-    expect(result.content[0].text).toBe('{\n  "foo": "bar",\n  "n": 1\n}');
+    expect(result.content[0].text).toBe('{"foo":"bar","n":1}');
+  });
+
+  it('never touches whitespace INSIDE a value — a message body is content', () => {
+    // The distinction the whole rule turns on. A text-level minifier would
+    // collapse the blank line between paragraphs of every OFW message, which
+    // is most of what this server returns.
+    const body = 'Line one.\n\n  Indented continuation.\n\nThanks   ';
+    const text = jsonResponse({ body }).content[0].text;
+    expect(JSON.parse(text).body).toBe(body);
+    expect(text.split('\n')).toHaveLength(1);
   });
 
   it('serializes arrays and nested objects', () => {
