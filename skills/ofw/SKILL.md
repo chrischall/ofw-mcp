@@ -92,11 +92,11 @@ Always pass `--config ~/.mcporter/mcporter.json` unless a local `config/mcporter
 |------|-------|
 | `ofw_sync_messages(folders?, deep?, fetchUnreadBodies?)` | Sync OFW → local cache. **Call first if the cache might be stale.** Returns unread inbox hints (bodies not fetched, to avoid mark-as-read). |
 | `ofw_list_message_folders` | List OFW folders with unread counts. Most reads use the cache; this is mainly for folder IDs and live unread counts. |
-| `ofw_list_messages(folderId?, since?, until?, q?, sort?, page?, size?, autoRefresh?)` | Cache-backed list. Supports folder ("inbox"/"sent"/"both"), date range, and substring search. `sort:"oldest"` starts at the old end of a range instead of paging to it (default `"newest"`). Returns `complete` for the RESULT SET plus **`nextPage`** (null when done) — and the paging keys come FIRST in the JSON, before `messages`. `returned` carries the record count as a scalar, beside `total`. An **empty** result from a non-fresh cache is refused (`UNVERIFIED_EMPTY`) — pass `autoRefresh:true` to sync and answer instead. |
-| `ofw_get_message(messageId, allowMarkRead?)` | Read a message OR draft body. Cache-first. Ids in the drafts cache return `folder: "drafts"`. ⚠️ Falls through to OFW for unread inbox messages, which marks them read AND stamps a "First Viewed" time the co-parent can see — irreversible. Pass `allowMarkRead:false` to refuse that fetch instead; cached, sent and already-read messages are unaffected. |
+| `ofw_list_messages(folderId?, since?, until?, q?, sort?, page?, size?, autoRefresh?, view?)` | Cache-backed list. Supports folder ("inbox"/"sent"/"both"), date range, and substring search. `sort:"oldest"` starts at the old end of a range instead of paging to it (default `"newest"`). Returns `complete` for the RESULT SET plus **`nextPage`** (null when done) — and the paging keys come FIRST in the JSON, before `messages`. `returned` carries the record count as a scalar, beside `total`. An **empty** result from a non-fresh cache is refused (`UNVERIFIED_EMPTY`) — pass `autoRefresh:true` to sync and answer instead. |
+| `ofw_get_message(messageId, allowMarkRead?, view?)` | Read a message OR draft body. Cache-first. Ids in the drafts cache return `folder: "drafts"`. ⚠️ Falls through to OFW for unread inbox messages, which marks them read AND stamps a "First Viewed" time the co-parent can see — irreversible. Pass `allowMarkRead:false` to refuse that fetch instead; cached, sent and already-read messages are unaffected. |
 | `ofw_send_message(draftId?, subject?, body?, recipientIds?, replyToId?, expectedRevision?, deleteDraftOnSuccess?, myFileIDs?, force?)` | Send a message — **the one irreversible operation**. Preferred path: pass `draftId` (+ `expectedRevision`) to send an existing draft **as it exists on the server** — the tool re-reads it from OFW first and refuses if it changed since you read it (or was already sent/deleted); `subject`/`body` become optional overrides. `recipientIds` is usually still required: OFW does not store recipients on drafts. After a **confirmed** send the draft is auto-deleted (`deleteDraftOnSuccess:false` to keep it); on any failure or ambiguity it is retained and the response says why (`draftRetained`). Response leads with `sentMessageId`, `draftKey`, `threaded`, `draftDeleted`. Compose from scratch by passing `subject`/`body`/`recipientIds` with no `draftId`. |
 | `ofw_get_unread_sent(page?, size?, autoRefresh?)` | Sent messages your co-parent hasn't read yet (from cache). Leads with `complete`/`hasMore`/`nextPage`, then `scanned`/`total`, then `unread`; an empty sent cache that is not fresh is refused rather than reported as "nothing sent". |
-| `ofw_list_drafts(page?, size?, verify?, autoRefresh?)` | Leads with `complete`/`hasMore`/`nextPage`; `drafts` comes last. List saved drafts, **auto-verified**: when the cache is not verified-fresh a cheap drafts sync runs first (default `verify:true`), so one call answers server-confirmed. `verify:false` serves straight from cache. Each draft carries `serverConfirmed`, `revision` and `draftKey`. Returns `complete` — **check it before saying "you have N drafts"**. See [Freshness](#freshness). |
+| `ofw_list_drafts(page?, size?, verify?, autoRefresh?, view?)` | Leads with `complete`/`hasMore`/`nextPage`; `drafts` comes last. List saved drafts, **auto-verified**: when the cache is not verified-fresh a cheap drafts sync runs first (default `verify:true`), so one call answers server-confirmed. `verify:false` serves straight from cache. Each draft carries `serverConfirmed`, `revision` and `draftKey`. Returns `complete` — **check it before saying "you have N drafts"**. See [Freshness](#freshness). |
 | `ofw_save_draft(subject, body, recipientIds?, messageId?, replyToId?, myFileIDs?, expectedRevision?, force?)` | Create a new draft. Pass `messageId` to **replace** an existing draft: the tool creates a fresh draft and deletes the old one (OFW's update-in-place endpoint silently no-ops). The returned `id` is the NEW id; the response leads with `draftKey`, which stays the same across every edit — **track that, not the id**. Note: OFW does **not** store recipients on drafts — `recipientIds` are accepted but come back empty (a one-line NOTE says so; supply them at send time instead). Threading warnings fire only on genuine drops — a draft echoing `inReplyTo`/`showContext` IS threaded. |
 | `ofw_delete_draft(messageId)` | Delete a draft. |
 | `ofw_upload_attachment(path, shareClass?, label?, description?)` | Upload a local file to My Files; returns a fileId to pass into `myFileIDs`. |
@@ -124,6 +124,39 @@ Always pass `--config ~/.mcporter/mcporter.json` unless a local `config/mcporter
 |------|-------|
 | `ofw_list_journal_entries(start?, max?)` | 1-based offset; default max 10 |
 | `ofw_create_journal_entry(title, body)` | Create a new entry |
+
+## Response shape (`view`)
+
+`ofw_list_messages`, `ofw_get_message` and `ofw_list_drafts` take
+`view: "compact" | "full"`, and **`compact` is the default** — you get the slim
+shape without asking. It measured 135.1 KB → 41.1 KB on a real 50-message page.
+
+What compact drops is `listData`, OFW's echo of the list payload. That blob was
+58% of the response and 78% of it duplicated fields the same object already
+emits at the top level — eleven pre-formatted renderings of one timestamp,
+eight fields per recipient beside the three the row already normalised, and a
+`preview` that is a truncation of the `body` in the same object.
+
+**Two things about compact that will surprise you if you don't know them:**
+
+- **The sender is `from`, not `fromUser`.** `fromUser` is the empty string on
+  every row — inbox and sent alike — because OFW names the sender only inside
+  `listData.author`. So compact promotes it. Dropping `listData` without that
+  would have taken the sender off every message; this is the one field the fat
+  blob was carrying alone.
+- **On a draft, `ofw_get_message` returns `from: null`** — a draft is unsent, so
+  there is no sender, and `""` would read as one we failed to find.
+
+Pass `view: "full"` when you need a field compact dropped — `listData` and
+everything in it. There is deliberately **no `raw` rung**: a message here is
+assembled from a list item, a detail GET and derived fields, so there is no
+single upstream payload to hand back, and a rung that skipped normalisation
+would put naive local times back beside UTC ones on exactly the rung you reach
+for when something already looks wrong.
+
+`ofw_get_unread_sent` takes no `view`: it emits a verdict list
+(`{id, subject, sentAt, unreadBy}`) that is already narrower than the
+projection.
 
 ## Freshness, completeness, and lifecycle
 
