@@ -1,5 +1,18 @@
 # Changelog
 
+## [2.15.0](https://github.com/chrischall/ofw-mcp/compare/v2.14.0...v2.15.0) (2026-09-04)
+
+
+### Features
+
+* **tools:** compact responses by default, and drop the formatting whitespace ([#276](https://github.com/chrischall/ofw-mcp/issues/276)) ([9a966e3](https://github.com/chrischall/ofw-mcp/commit/9a966e3e63cfd3136b17273f07a04a68fde60ee4))
+
+
+### Bug Fixes
+
+* **tools:** one sender key per rung, and a projector keeps only its own columns ([#279](https://github.com/chrischall/ofw-mcp/issues/279)) ([03d9dc5](https://github.com/chrischall/ofw-mcp/commit/03d9dc53a56ac2b3f9df3a02a8e0718ed2eb28bb))
+* **tools:** one sender key per rung, and a projector keeps only its own columns ([#280](https://github.com/chrischall/ofw-mcp/issues/280)) ([fe91f56](https://github.com/chrischall/ofw-mcp/commit/fe91f56ea2855e2adbb035557aecd4172eb75de7))
+
 ## [2.14.0](https://github.com/chrischall/ofw-mcp/compare/v2.13.0...v2.14.0) (2026-08-31)
 
 
