@@ -24,6 +24,8 @@ import { basename, join } from 'node:path';
 import { ApiRecipientSchema, deriveRead, expandPath, hasRealView, jsonErrorResponse, jsonResponse, mapRecipients, postMessageAndRefetch, reportsThreaded, reportsUnthreaded, textResponse, threadedReplyTo, verifyWriteLanded, withReadState } from './_shared.js';
 import { parseLenient } from '@chrischall/mcp-utils';
 import { pageState } from './pagination.js';
+import { MESSAGE_VIEWS, viewDrafts, viewMessages, viewOne } from './project.js';
+import { resolveView, viewParam } from '@chrischall/mcp-utils';
 
 // Schemas for the load-bearing fields of each /pub/v3 response this file
 // reads (issue #83). Loose: unknown keys pass through into cached listData.
@@ -323,11 +325,15 @@ export function registerMessageTools(
       q: z.string().describe('Substring match on subject AND body (case-insensitive). Use to find messages on a specific topic.').optional(),
       sort: z.enum(['newest', 'oldest']).describe('Result order: "newest" (default, newest first) or "oldest" (oldest first). This decides which end a truncated page keeps — with "newest" page 1 of a wide date range holds its most RECENT slice, with "oldest" its earliest. Use "oldest" to start at the old end of a range instead of paging to it.').optional(),
       autoRefresh: z.boolean().describe(AUTO_REFRESH_DESC).optional(),
+      view: viewParam(MESSAGE_VIEWS, {
+        note: 'compact omits OurFamilyWizard\'s raw `listData` echo, which duplicates this record\'s own id, subject, sentAt, recipients and read flag; the sender is promoted to `from`, and `files`/`replied` are kept. Pass "full" for the echo.',
+      }),
     },
   }, async (args) => {
     const page = args.page ?? 1;
     const size = args.size ?? 50;
     const sort = args.sort ?? 'newest';
+    const view = resolveView(args.view, MESSAGE_VIEWS);
     const folderArg = args.folderId ?? 'both';
 
     let folder: 'inbox' | 'sent' | undefined;
@@ -433,7 +439,11 @@ export function registerMessageTools(
     }
     payload.freshness = freshness;
 
-    payload.messages = messages;
+    // Projected HERE, at the last possible moment, so `returned`, `complete`
+    // and every note above are computed from the rows themselves — a
+    // projection must never be able to change what the response claims about
+    // its own contents.
+    payload.messages = viewMessages(view, messages);
 
     return jsonResponse(payload);
   });
@@ -444,9 +454,13 @@ export function registerMessageTools(
     inputSchema: {
       messageId: z.string().describe('Message ID (also accepts draft IDs — drafts are routed via the drafts cache)'),
       allowMarkRead: z.boolean().describe('Default true (the long-standing behaviour). Set false to refuse a fetch that would mark an unread INBOX message as READ on OurFamilyWizard — an irreversible, co-parent-visible change to the record. Reads that cannot stamp anything (a cached body, a sent message, an already-read message) still succeed. The server-wide OFW_ALLOW_MARK_READ=false is a ceiling this argument cannot raise.').optional(),
+      view: viewParam(MESSAGE_VIEWS, {
+        note: 'compact omits OurFamilyWizard\'s raw `listData` echo, which duplicates this record\'s own id, subject, sentAt, recipients and read flag; the sender is promoted to `from`, and `files`/`replied` are kept. Pass "full" for the echo.',
+      }),
     },
   }, async (args) => {
     const id = Number(args.messageId);
+    const view = resolveView(args.view, MESSAGE_VIEWS);
     const cache = cacheProvider();
 
     // Draft routing: if this id is in the drafts cache, return a
@@ -477,7 +491,10 @@ export function registerMessageTools(
         fetchedBodyAt: draftRow.modifiedAt,
         replyToId: draftRow.replyToId,
         chainRootId: null,
-        listData: draftRow.listData,
+        // OFW's raw echo, on `full` only. Everything above it is derived from
+        // the DRAFTS table, which is the source of truth for a draft id — the
+        // echo duplicates it and adds a stale copy of nothing else.
+        ...(view === 'compact' ? {} : { listData: draftRow.listData }),
         attachments: [],
         // Concurrency token — pass as expectedRevision to ofw_save_draft /
         // ofw_delete_draft / ofw_send_message to assert you are acting on
@@ -550,7 +567,7 @@ export function registerMessageTools(
       // this call may have re-hit detail for view status, the message content
       // itself was not re-verified, so report the folder's cache freshness.
       const freshness = await buildFreshness(cache, { source: 'cache', folders: [row.folder] });
-      return jsonResponse({ ...withReadState(row), attachments, freshness });
+      return jsonResponse({ ...viewOne(view, withReadState(row)), attachments, freshness });
     }
 
     // Everything above this line was served without asking OFW for a body.
@@ -601,7 +618,7 @@ export function registerMessageTools(
     const attachments = await cache.listAttachmentsForMessage(detail.id);
     // Fetched live from OFW in this call — current by construction.
     const freshness = await buildFreshness(cache, { source: 'live', folders: [folder] });
-    return jsonResponse({ ...withReadState(row), attachments, freshness });
+    return jsonResponse({ ...viewOne(view, withReadState(row)), attachments, freshness });
   });
 
   if (allowSend) server.registerTool('ofw_send_message', {
@@ -992,10 +1009,14 @@ export function registerMessageTools(
       size: z.number().int().min(1).describe('Drafts per page (default 50)').optional(),
       verify: z.boolean().describe('Default true: when the drafts cache is not verified-fresh, run a drafts sync first (cheap — one list page plus one detail per draft) so the response is server-confirmed in one call. Set false to serve straight from the local cache with no OFW requests.').optional(),
       autoRefresh: z.boolean().describe(AUTO_REFRESH_DESC).optional(),
+      view: viewParam(MESSAGE_VIEWS, {
+        note: 'compact omits OurFamilyWizard\'s raw `listData` echo, which duplicates this draft\'s own id, subject, modifiedAt and recipients. `revision`, `draftKey` and `cacheStatus` are kept on both rungs.',
+      }),
     },
   }, async (args) => {
     const page = args.page ?? 1;
     const size = args.size ?? 50;
+    const view = resolveView(args.view, MESSAGE_VIEWS);
     const cache = cacheProvider();
 
     // Auto-verify (default on): drafts change rarely but INVISIBLY — a web-app
@@ -1101,7 +1122,7 @@ export function registerMessageTools(
       payload.verifyNote = verifyNote;
     }
     payload.freshness = freshness;
-    payload.drafts = drafts;
+    payload.drafts = viewDrafts(view, drafts);
     return jsonResponse(payload);
   });
 
@@ -1362,6 +1383,11 @@ export function registerMessageTools(
       page: z.number().int().min(1).describe('Page (default 1)').optional(),
       size: z.number().int().min(1).describe('Per page (default 50)').optional(),
       autoRefresh: z.boolean().describe(AUTO_REFRESH_DESC).optional(),
+      // No `view` here, deliberately. This tool never emitted a cache row: it
+      // builds a VERDICT list of `{id, subject, sentAt, unreadBy}`, which is
+      // already narrower than anything the compact projection would produce.
+      // A parameter offering a rung that changes nothing is the no-op schema
+      // `viewParam` exists to refuse.
     },
   }, async (args) => {
     const page = args.page ?? 1;

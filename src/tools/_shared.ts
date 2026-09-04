@@ -1,21 +1,31 @@
-import { expandPath as expandPathUtil, rawTextResult, textResult } from '@chrischall/mcp-utils';
+import { expandPath as expandPathUtil, minifiedResult, rawTextResult, type textResult } from '@chrischall/mcp-utils';
 import { z } from 'zod';
 import type { MessageRow, Recipient } from '../cache/store.js';
 import type { OFWClient } from '../client.js';
 import { parseLenient } from '@chrischall/mcp-utils';
 import { normalizeTimestampsInValue } from '../timestamps.js';
 
-// Pretty-printed JSON tool result. Thin wrapper over @chrischall/mcp-utils'
-// `textResult`, with one addition: every timestamp in the payload is rewritten
-// to ISO-8601 with an explicit offset and paired with a `<field>Display`
-// sibling in the operator's zone.
+// JSON tool result, with NO formatting whitespace. Thin wrapper over
+// @chrischall/mcp-utils' `minifiedResult`, with one addition: every timestamp
+// in the payload is rewritten to ISO-8601 with an explicit offset and paired
+// with a `<field>Display` sibling in the operator's zone.
 //
 // This is the single seam every structured tool response passes through, which
 // is the point — normalizing here rather than at each call site is what makes
 // it impossible for a tool to reintroduce the naive-local values that had
 // `sentAt` and `fetchedBodyAt` silently disagreeing by the UTC offset.
+//
+// Minified rather than `JSON.stringify(data, null, 2)`: indentation was 23% of
+// a 135 KB message page — about 8,000 tokens a call — and nothing downstream
+// reads it. This server has no `raw` rung (see tools/project.ts), so every
+// response is `compact` or `full` and every response is minified.
+//
+// Whitespace INSIDE a value is untouched. A message body's blank lines are
+// content, and `JSON.stringify` never touches them; the rule is pinned by
+// tests here and in mcp-utils, so do not replace this with a text-level
+// minifier.
 export function jsonResponse(data: unknown): ReturnType<typeof textResult> {
-  return textResult(normalizeTimestampsInValue(data));
+  return minifiedResult(normalizeTimestampsInValue(data));
 }
 
 // Raw-string tool result. Wrapper over @chrischall/mcp-utils' `rawTextResult`.
