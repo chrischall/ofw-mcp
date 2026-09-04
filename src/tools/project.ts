@@ -113,19 +113,31 @@ export function compactMessage(row: MessageRow & { read?: boolean }): Record<str
     // wholesale. Those are this server's own answers, never OFW's echo, and a
     // projection that dropped one would be removing the thing the caller
     // asked for rather than the thing they got twice.
-    ...omitKnown(rest as Record<string, unknown>),
+    ...omitKnown(rest as Record<string, unknown>, MESSAGE_ROW_KEYS),
   });
 }
 
-/** The row's own columns, so the spread above adds only tool-supplied extras. */
-const ROW_KEYS = new Set([
+/**
+ * Each projector's OWN columns — the ones it names explicitly above — so the
+ * spread adds only what a tool supplied on top of the cache row.
+ *
+ * Two sets rather than one union. A shared set is the union of `MessageRow` and
+ * `DraftRow`, so each projector would silently swallow any tool-supplied extra
+ * that happened to be named after the OTHER shape's column: a message carrying
+ * a `modifiedAt`, a draft carrying a `folder`. Nothing supplies those today,
+ * which is exactly what makes it the kind of trap that is only found once
+ * something does — and it would have quietly contradicted the "kept wholesale"
+ * promise below.
+ */
+const MESSAGE_ROW_KEYS = new Set([
   'id', 'folder', 'subject', 'sentAt', 'recipients', 'read', 'replyToId', 'chainRootId', 'body', 'fetchedBodyAt',
-  'modifiedAt',
 ]);
 
-function omitKnown(rest: Record<string, unknown>): Record<string, unknown> {
+const DRAFT_ROW_KEYS = new Set(['id', 'subject', 'recipients', 'replyToId', 'modifiedAt', 'body']);
+
+function omitKnown(rest: Record<string, unknown>, own: ReadonlySet<string>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(rest)) if (!ROW_KEYS.has(key)) out[key] = value;
+  for (const [key, value] of Object.entries(rest)) if (!own.has(key)) out[key] = value;
   return out;
 }
 
@@ -147,7 +159,7 @@ export function compactDraft(row: DraftRow): Record<string, unknown> {
     replyToId: rest.replyToId,
     modifiedAt: rest.modifiedAt,
     body: rest.body,
-    ...omitKnown(rest as Record<string, unknown>),
+    ...omitKnown(rest as Record<string, unknown>, DRAFT_ROW_KEYS),
   });
 }
 

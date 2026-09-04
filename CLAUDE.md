@@ -143,6 +143,13 @@ something already looks wrong. `ofw_get_unread_sent` has no `view` either: it
 emits a verdict list (`{id, subject, sentAt, unreadBy}`), already narrower than
 the projection.
 
+**One tool names the sender the same way on every path.** `ofw_get_message`'s
+draft-routing branch emits `from: null` on compact (a draft is unsent, so there
+is no sender — and `''` would read as one we failed to find), not the
+`fromUser: ''` the `full` rung keeps. A tool whose compact rung used two
+different sender keys depending on whether the id happened to be a draft would
+be worse than either name.
+
 **A projection that trips returns the rows WHOLE** (`projectOrRaw`), warns on
 stderr, and does so for the entire array rather than per row — a hole in the
 middle of a 50-message page is worse than a fat page and is indistinguishable

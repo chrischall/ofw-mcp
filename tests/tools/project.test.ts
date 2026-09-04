@@ -153,6 +153,26 @@ describe('compactDraft', () => {
   });
 });
 
+describe('each projector keeps only ITS OWN columns out of the extras spread', () => {
+  it('a message carrying a tool-supplied `modifiedAt` keeps it', async () => {
+    // `modifiedAt` is a DRAFT column. With one shared key set it was swallowed
+    // here, silently contradicting the "kept wholesale" promise for anything a
+    // tool adds on top of the row.
+    const out = compactMessage({ ...row(), modifiedAt: '2026-01-01T00:00:00Z' } as never);
+    expect(out.modifiedAt).toBe('2026-01-01T00:00:00Z');
+  });
+
+  it('a draft carrying a tool-supplied `folder` keeps it', () => {
+    const draft = {
+      id: 1, subject: 's', body: 'b', recipients: [], replyToId: null, modifiedAt: 'x',
+      listData: {}, folder: 'drafts', sentAt: 'y',
+    } as never;
+    const out = compactDraft(draft);
+    expect(out.folder).toBe('drafts');
+    expect(out.sentAt).toBe('y');
+  });
+});
+
 describe('the view selector', () => {
   it('offers compact and full, and NOT raw', () => {
     // A message row is assembled from the list endpoint and the detail GET,
