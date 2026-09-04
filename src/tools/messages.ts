@@ -481,7 +481,13 @@ export function registerMessageTools(
         id: draftRow.id,
         folder: 'drafts',
         subject: draftRow.subject,
-        fromUser: '',
+        // One tool, one sender key per rung. `compact` names the sender `from`
+        // everywhere else, so emitting `fromUser` here would mean the same
+        // tool's compact rung used two different key names depending on
+        // whether the id happened to be a draft. `null` rather than '' because
+        // a draft has no sender yet — it is unsent, and an empty string reads
+        // as a sender whose name we failed to find.
+        ...(view === 'compact' ? { from: null } : { fromUser: '' }),
         sentAt: draftRow.modifiedAt,
         recipients: draftRow.recipients,
         body: draftRow.body,

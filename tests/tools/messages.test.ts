@@ -599,7 +599,10 @@ describe('ofw_get_message (cache-first)', () => {
     expect(parsed.folder).toBe('drafts');
     expect(parsed.body).toBe('NEW body');
     expect(parsed.subject).toBe('Fresh subject');
-    expect(parsed.fromUser).toBe('');
+    // A draft has no sender — it is unsent — and compact names the sender
+    // `from` on every rung of this tool, drafts included.
+    expect(parsed).not.toHaveProperty('fromUser');
+    expect(parsed.from).toBeNull();
     expect(parsed.sentAt).toBe('2026-05-04T08:00:00-04:00');
     expect(parsed.fetchedBodyAt).toBe('2026-05-04T08:00:00-04:00');
     expect(parsed.chainRootId).toBeNull();
