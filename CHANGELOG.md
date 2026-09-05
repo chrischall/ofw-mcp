@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.15.1](https://github.com/chrischall/ofw-mcp/compare/v2.15.0...v2.15.1) (2026-09-04)
+
+
+### Documentation
+
+* **skill:** the skill never told callers `view` exists ([#281](https://github.com/chrischall/ofw-mcp/issues/281)) ([0942e48](https://github.com/chrischall/ofw-mcp/commit/0942e48891cabdef2e24e56ae56067b0135c1254))
+
 ## [2.15.0](https://github.com/chrischall/ofw-mcp/compare/v2.14.0...v2.15.0) (2026-09-04)
 
 

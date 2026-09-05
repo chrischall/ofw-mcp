@@ -40,7 +40,7 @@ const nodeAttachmentIO = new NodeAttachmentIO();
 // always succeeds before any credential check runs.
 await runMcp({
   name: 'ofw',
-  version: '2.15.0', // x-release-please-version
+  version: '2.15.1', // x-release-please-version
   deps: client,
   tools: [
     registerHealthcheckTools,
