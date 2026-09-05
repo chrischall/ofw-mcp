@@ -190,6 +190,18 @@
     {
       "name": "ofw_create_journal_entry",
       "description": "Create a journal entry"
+    },
+    {
+      "name": "ofw_healthcheck",
+      "description": "Report whether the OFW credential resolved and the API accepted it, and what to fix if not"
+    },
+    {
+      "name": "ofw_check_freshness",
+      "description": "Cheaply re-verify message/draft ids against OFW — live lifecycle state and content-hash comparison, no bodies fetched"
+    },
+    {
+      "name": "ofw_status",
+      "description": "Server-verified draft inventory and live lifecycle state for given ids or draft keys, in one round trip"
     }
   ],
   "compatibility": {
