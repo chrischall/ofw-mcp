@@ -10,7 +10,7 @@
 // `resolveAuth()` in `./auth.ts` can call it without a Client instance, and
 // so tests can mock it at the module boundary.
 
-import { BASE_URL, OFW_PROTOCOL_HEADERS, OFW_TOKEN_TTL_MS } from './protocol.js';
+import { BASE_URL, OFW_PROTOCOL_HEADERS, OFW_TOKEN_TTL_MS, assertOfwUrl } from './protocol.js';
 
 interface LoginResponse {
   auth: string;
@@ -27,7 +27,9 @@ export async function loginWithPassword(
   password: string,
 ): Promise<PasswordLoginResult> {
   // Step 1: get a SESSION cookie (Spring Security refuses the POST without it).
-  const initResponse = await fetch(`${BASE_URL}/ofw/login.form`, {
+  const initUrl = `${BASE_URL}/ofw/login.form`;
+  assertOfwUrl(initUrl);
+  const initResponse = await fetch(initUrl, {
     headers: { ...OFW_PROTOCOL_HEADERS },
     redirect: 'manual',
   });
@@ -40,7 +42,9 @@ export async function loginWithPassword(
     .join('; ');
 
   // Step 2: submit the form.
-  const response = await fetch(`${BASE_URL}/ofw/login`, {
+  const loginUrl = `${BASE_URL}/ofw/login`;
+  assertOfwUrl(loginUrl);
+  const response = await fetch(loginUrl, {
     method: 'POST',
     headers: {
       ...OFW_PROTOCOL_HEADERS,

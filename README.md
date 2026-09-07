@@ -251,6 +251,10 @@ By default nothing changes: reads behave exactly as they always have. Two contro
 
 Calendar events sit between the two message tiers: they have no draft stage (a created event is immediately visible on the shared record), but unlike a sent message they are reversible — an event can be edited or deleted afterward. If you run in `drafts` mode but are comfortable with direct calendar writes, set `OFW_CALENDAR_WRITES=true` to additionally register `ofw_create_event`, `ofw_update_event`, and `ofw_delete_event`. The flag is redundant in `all` mode and never overrides `none`.
 
+### Egress allowlist
+
+Every outbound request passes its constructed URL through a host check before `fetch` — the server refuses to contact any host other than `ofw.ourfamilywizard.com`. Today it always passes, and that is the point: it makes "this server only ever talks to OFW" a structural invariant rather than a code-review promise, so a later refactor or a compromised dependency that pointed a request elsewhere throws instead of carrying your bearer token or messages off-host. It is a pre-flight check on the URL we build, not a redirect-following egress filter.
+
 ## Troubleshooting
 
 **"0 messages"** — Claude may have read the notification counts rather than the actual messages. Ask explicitly: *"List the messages in my OFW inbox"* or *"Use ofw_list_message_folders then ofw_list_messages"*.
@@ -271,6 +275,7 @@ Calendar events sit between the two message tiers: they have no draft stage (a c
 - They are passed to the server as environment variables and never logged
 - The server authenticates with OFW using the same login flow as the web app
 - Use a strong, unique OFW password
+- Outbound requests are host-allowlisted to `ofw.ourfamilywizard.com` (see [Egress allowlist](#egress-allowlist))
 
 ## Development
 
