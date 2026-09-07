@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.16.0](https://github.com/chrischall/ofw-mcp/compare/v2.15.1...v2.16.0) (2026-09-07)
+
+
+### Features
+
+* **security:** allowlist outbound requests to the OFW host ([#289](https://github.com/chrischall/ofw-mcp/issues/289)) ([cbee3ce](https://github.com/chrischall/ofw-mcp/commit/cbee3ced75ba5dcd4ab27a9132b8652e47e7f7dd))
+
 ## [2.15.1](https://github.com/chrischall/ofw-mcp/compare/v2.15.0...v2.15.1) (2026-09-04)
 
 
