@@ -1,3 +1,6 @@
+# Thin config — the fleet-wide shape lives in chrischall/workflows.
+# Renders to: .github/dependabot.yml
+# Regenerate with: scripts/rollout.sh <owner/repo> --execute --only dependabot
 version: 2
 updates:
   - package-ecosystem: npm
@@ -6,9 +9,32 @@ updates:
       interval: weekly
     open-pull-requests-limit: 10
     groups:
+      # Dependabot does NOT hand a dependency to the first group that matches
+      # it. `PatternSpecificityCalculator` scores every matching group and the
+      # highest score wins:
+      #
+      #   exact `pattern == name`      1000   (EXACT_MATCH_SCORE)
+      #   group with NO `patterns` key  500   (NO_PATTERNS_SCORE)
+      #   pattern with no wildcard      500
+      #   wildcard   100 - 10*wildcards + max(len-5, 0)
+      #
+      # so "@vitest/*" scores 94 and loses @vitest/coverage-v8 to the
+      # dev-dependencies group below, which declares no patterns at all and
+      # therefore scores 500. On a MAJOR bump dev-dependencies cannot take it
+      # either (minor/patch only), so it falls out of every group into a PR of
+      # its own — and since vitest and its coverage provider peer-depend on
+      # each other at an EXACT version, the two halves apart are unsatisfiable:
+      # both PRs die on `npm ci` ERESOLVE and sit red with auto-merge armed
+      # until someone pushes the pair by hand. That cost 19 repos on
+      # 2026-09-07 and vibo-mcp #110/#113 the day after.
+      #
+      # Listing the exact name scores 1000, which is >= EXPLICIT_MEMBER_SCORE
+      # and short-circuits the comparison, so nothing can outbid it. The
+      # wildcard stays for any future @vitest/… package.
       vitest:
         patterns:
           - "vitest"
+          - "@vitest/coverage-v8"
           - "@vitest/*"
         update-types:
           - major
