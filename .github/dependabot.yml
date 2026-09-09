@@ -8,6 +8,19 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 10
+    # Dependabot INFERS a commit prefix from recent history when this is unset,
+    # which is why the fleet drifted into `chore(deps)`, `build(deps-dev)` and
+    # `fix(deps)` with no config anywhere. Setting it makes the release
+    # behaviour deterministic instead of a property of a repo's git log.
+    #
+    # `fix` for runtime dependencies, so a bump that changes what SHIPS cuts a
+    # patch release and reaches consumers. `chore` for dev dependencies, which
+    # ship nothing and stay out of the changelog. release-please reads the
+    # squash subject, and the squash subject is this.
+    commit-message:
+      prefix: "fix"
+      prefix-development: "chore"
+      include: "scope"
     groups:
       # Dependabot does NOT hand a dependency to the first group that matches
       # it. `PatternSpecificityCalculator` scores every matching group and the
@@ -56,6 +69,11 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    # `ci`, not `fix`: an action version ships nothing to a consumer, so it
+    # belongs in the hidden CI section rather than cutting a patch release.
+    commit-message:
+      prefix: "ci"
+      include: "scope"
     groups:
       actions:
         update-types:
