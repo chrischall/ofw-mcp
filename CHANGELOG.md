@@ -1,5 +1,14 @@
 # Changelog
 
+## [2.16.1](https://github.com/chrischall/ofw-mcp/compare/v2.16.0...v2.16.1) (2026-09-10)
+
+
+### Bug Fixes
+
+* **deps:** @chrischall/mcp-utils 0.26.1 ([#296](https://github.com/chrischall/ofw-mcp/issues/296)) ([7fa965c](https://github.com/chrischall/ofw-mcp/commit/7fa965c508e06fb5a36445bd239a87644622598a))
+* **deps:** bump hono from 4.13.0 to 4.13.7 ([#294](https://github.com/chrischall/ofw-mcp/issues/294)) ([dff5c60](https://github.com/chrischall/ofw-mcp/commit/dff5c60d7a33bcc51c975f8f9798940811c8b7eb))
+* **deps:** declare the peer floors mcp-utils 0.26.1 requires ([#297](https://github.com/chrischall/ofw-mcp/issues/297)) ([7b97843](https://github.com/chrischall/ofw-mcp/commit/7b978437a7ac9dab020efa9cea146f1e1360e3e5))
+
 ## [2.16.0](https://github.com/chrischall/ofw-mcp/compare/v2.15.1...v2.16.0) (2026-09-07)
 
 
