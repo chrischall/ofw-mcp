@@ -18,5 +18,12 @@ concurrency:
 jobs:
   arm:
     uses: chrischall/workflows/.github/workflows/reusable-auto-merge.yml@main
+    with:
+      # Empty renders as false: the reusable declares `default: false`, and an
+      # empty string is not `true`. So every repo that has not opted in keeps
+      # today's behaviour, and the line is inert until fleet.json says
+      # otherwise. Recorded there rather than hand-edited into a stub, because
+      # a hand-edit is silently reverted by the next `--execute` (#76).
+      sanitize_release_message: true
     secrets:
       release_pat: ${{ secrets.RELEASE_PAT }}
