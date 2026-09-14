@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.16.2](https://github.com/chrischall/ofw-mcp/compare/v2.16.1...v2.16.2) (2026-09-13)
+
+
+### Bug Fixes
+
+* **deps:** bump the production-dependencies group with 3 updates ([6c3a472](https://github.com/chrischall/ofw-mcp/commit/6c3a472feb53a66d6fb140c92d445712e705b9bf))
+
 ## [2.16.1](https://github.com/chrischall/ofw-mcp/compare/v2.16.0...v2.16.1) (2026-09-10)
 
 
