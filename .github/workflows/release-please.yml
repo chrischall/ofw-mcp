@@ -1,20 +1,29 @@
 name: release-please
 
-# Thin stub: release-please runs here; the publish steps are the
-# chrischall/workflows mcp-publish composite action. The publish job stays
-# in THIS file (not a reusable workflow) because npm trusted publishing and
-# mcp-publisher bind to this repo's workflow identity via OIDC.
+# Thin stub: release-please runs in chrischall/workflows'
+# reusable-release-please.yml, which also decides whether and what to publish.
+# The publish job stays in THIS file (the publish steps are the mcp-publish
+# composite action) because npm trusted publishing and mcp-publisher bind to
+# this repo's workflow identity via OIDC.
 #
 # The release PR ships via `release-ready`: adding it starts the auto-review,
 # and a passing review arms `ready-to-merge` → deferred CI → auto-merge. CI does
 # not run until the review passes, so `release-ready` is "review then ship", not
 # an instant CI arm.
-# The PAT (not GITHUB_TOKEN) so the release PR's events trigger CI/review.
 
 on:
   push:
     branches: [main]
+  # `republish_tag` re-fires the publish job for a tag that ALREADY EXISTS —
+  # for a release whose tag and GitHub Release were cut but whose publish never
+  # ran (chrischall/workflows#283). Blank on the ordinary path.
   workflow_dispatch:
+    inputs:
+      republish_tag:
+        description: 'Existing tag to re-publish (e.g. v1.2.3). Blank = skip publish.'
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: write
@@ -26,45 +35,15 @@ concurrency:
 
 jobs:
   release-please:
-    runs-on: ubuntu-latest
-    outputs:
-      release_created: ${{ steps.release.outputs.release_created }}
-      tag_name: ${{ steps.release.outputs.tag_name }}
-      version: ${{ steps.release.outputs.version }}
-    steps:
-      - uses: googleapis/release-please-action@v5
-        id: release
-        with:
-          token: ${{ secrets.RELEASE_PAT }}
-          config-file: release-please-config.json
-          manifest-file: .release-please-manifest.json
-
-      # A changelog line names the change and the PR, never the person. This
-      # amends BOTH the release PR's CHANGELOG and its own description, so a
-      # contribution from outside the org reads "(thanks @user)" everywhere a
-      # person actually looks — the release PR, and the GitHub Release notes
-      # cut from it. The body needs its own pass because release-please writes
-      # the description from its own notes and never re-reads the branch.
-      #
-      # Runs after release-please and re-applies every run, because
-      # release-please regenerates the changelog and force-pushes its branch
-      # each time. The PAT below is load-bearing twice over: contents:write to
-      # commit the changelog, pull-requests:write to push the body back.
-      - uses: actions/checkout@v7
-        if: steps.release.outputs.pr != ''
-        with:
-          token: ${{ secrets.RELEASE_PAT }}
-          fetch-depth: 0
-
-      - uses: chrischall/workflows/.github/actions/credit-contributors@main
-        if: steps.release.outputs.pr != ''
-        with:
-          token: ${{ secrets.RELEASE_PAT }}
-          pr: ${{ steps.release.outputs.pr }}
+    uses: chrischall/workflows/.github/workflows/reusable-release-please.yml@main
+    with:
+      republish_tag: ${{ inputs.republish_tag }}
+    secrets:
+      release_pat: ${{ secrets.RELEASE_PAT }}
 
   publish:
     needs: release-please
-    if: needs.release-please.outputs.release_created == 'true'
+    if: needs.release-please.outputs.publish == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -72,11 +51,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ needs.release-please.outputs.tag_name }}
+          ref: ${{ needs.release-please.outputs.tag }}
 
       - uses: chrischall/workflows/.github/actions/mcp-publish@main
         with:
           version: ${{ needs.release-please.outputs.version }}
-          tag-name: ${{ needs.release-please.outputs.tag_name }}
+          tag-name: ${{ needs.release-please.outputs.tag }}
           clawhub-token: ${{ secrets.CLAWHUB_TOKEN }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
