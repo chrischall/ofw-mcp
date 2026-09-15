@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.16.3](https://github.com/chrischall/ofw-mcp/compare/v2.16.2...v2.16.3) (2026-09-15)
+
+
+### Bug Fixes
+
+* **deps:** @fetchproxy/server 3.0.1 — capped peer frames, logged load drops, atomic identity writes ([#302](https://github.com/chrischall/ofw-mcp/issues/302)) ([a475da0](https://github.com/chrischall/ofw-mcp/commit/a475da0bb29347efbcf8129e820809dbd8ded53c))
+
 ## [2.16.2](https://github.com/chrischall/ofw-mcp/compare/v2.16.1...v2.16.2) (2026-09-13)
 
 
