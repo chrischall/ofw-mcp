@@ -1,7 +1,7 @@
 {
   "name": "ofw",
   "displayName": "OurFamilyWizard",
-  "version": "2.16.2",
+  "version": "2.16.3",
   "description": "OurFamilyWizard co-parenting tools for Claude — messages, calendar, expenses, and journal via MCP",
   "author": {
     "name": "Chris Chall"
