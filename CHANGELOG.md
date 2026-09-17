@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.17.0](https://github.com/chrischall/ofw-mcp/compare/v2.16.3...v2.17.0) (2026-09-17)
+
+
+### Features
+
+* **mcp:** migrate server to SDK v2 ([#306](https://github.com/chrischall/ofw-mcp/issues/306)) ([1c562cd](https://github.com/chrischall/ofw-mcp/commit/1c562cd4bc79308bc9e1cb186195b4ea56a86b78))
+
+
+### Bug Fixes
+
+* **deps:** align Zod floor with mcp-utils 0.28.0 ([#309](https://github.com/chrischall/ofw-mcp/issues/309)) ([b9a27e4](https://github.com/chrischall/ofw-mcp/commit/b9a27e4cb7f3b8e1f29a0afff39c6d7f9d0c514e)), closes [#307](https://github.com/chrischall/ofw-mcp/issues/307)
+
 ## [2.16.3](https://github.com/chrischall/ofw-mcp/compare/v2.16.2...v2.16.3) (2026-09-15)
 
 
