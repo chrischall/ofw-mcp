@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterEach } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { McpServer } from '@modelcontextprotocol/server';
 import { registerHealthcheckTools } from '../src/tools/healthcheck.js';
 import { registerUserTools } from '../src/tools/user.js';
 import { registerMessageTools } from '../src/tools/messages.js';

@@ -1,4 +1,4 @@
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import type { OFWClient } from '../client.js';
 import { jsonResponse, textResponse } from './_shared.js';
@@ -131,11 +131,11 @@ export function registerCalendarTools(server: McpServer, client: OFWClient): voi
   server.registerTool('ofw_list_events', {
     description: 'List OurFamilyWizard calendar events in a date range',
     annotations: { readOnlyHint: true },
-    inputSchema: {
+    inputSchema: z.object({
       startDate: z.string().describe('Start date YYYY-MM-DD'),
       endDate: z.string().describe('End date YYYY-MM-DD'),
       detailed: z.boolean().describe('Return full event details (default false)').optional(),
-    },
+    }),
   }, async (args) => {
     const variant = args.detailed ? 'detailed' : 'basic';
     const data = await client.request(
@@ -148,10 +148,10 @@ export function registerCalendarTools(server: McpServer, client: OFWClient): voi
   if (allowWrites) server.registerTool('ofw_create_event', {
     description: 'Create a calendar event in OurFamilyWizard. Unless privateEvent is true, the event is immediately visible to the co-parent — there is no draft stage.',
     annotations: { destructiveHint: false },
-    inputSchema: {
+    inputSchema: z.object({
       title: z.string(),
       ...eventWriteFields,
-    },
+    }),
   }, async (args) => {
     const raw = await client.request('POST', '/pub/v3/events', buildEventPayload(args as EventWriteArgs));
     const event = parseLenient(eventDetailSchema, raw, { label: 'ofw-mcp', context: 'POST /pub/v3/events', mode: 'strict' });
@@ -164,7 +164,7 @@ export function registerCalendarTools(server: McpServer, client: OFWClient): voi
   if (allowWrites) server.registerTool('ofw_update_event', {
     description: 'Update an existing OurFamilyWizard calendar event. Fetches the event, applies the given changes, and writes the merged result back (OFW has no partial update).',
     annotations: { destructiveHint: true },
-    inputSchema: {
+    inputSchema: z.object({
       eventId: z.string().describe('Event id — the `id` from ofw_list_events / eventRecurrenceId from ofw_create_event'),
       title: z.string().optional(),
       startDate: eventWriteFields.startDate.optional(),
@@ -180,7 +180,7 @@ export function registerCalendarTools(server: McpServer, client: OFWClient): voi
       eventParentId: eventWriteFields.eventParentId,
       dropOffParentId: eventWriteFields.dropOffParentId,
       pickUpParentId: eventWriteFields.pickUpParentId,
-    },
+    }),
   }, async (args) => {
     const { eventId, ...changes } = args;
     const id = encodeURIComponent(eventId);
@@ -198,10 +198,10 @@ export function registerCalendarTools(server: McpServer, client: OFWClient): voi
   if (allowWrites) server.registerTool('ofw_delete_event', {
     description: 'Delete an OurFamilyWizard calendar event',
     annotations: { destructiveHint: true },
-    inputSchema: {
+    inputSchema: z.object({
       eventId: z.string().describe('Event id — the `id` from ofw_list_events / eventRecurrenceId from ofw_create_event'),
       includeFuture: z.boolean().describe('For repeating events: also delete future occurrences (default false)').optional(),
-    },
+    }),
   }, async (args) => {
     const includeFuture = args.includeFuture ?? false;
     await client.request('DELETE', `/pub/v3/events/${encodeURIComponent(args.eventId)}?includeFuture=${includeFuture}`);

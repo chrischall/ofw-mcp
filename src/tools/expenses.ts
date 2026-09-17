@@ -1,4 +1,4 @@
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import type { OFWClient } from '../client.js';
 import { jsonResponse } from './_shared.js';
@@ -20,10 +20,10 @@ export function registerExpenseTools(server: McpServer, client: OFWClient): void
   server.registerTool('ofw_list_expenses', {
     description: 'List OurFamilyWizard expenses. Offset-paged via start/max. The response leads with its paging state — `hasMore` and `nextStart` (null when the list is exhausted) — BEFORE the records, so a truncated or partially-read response still says whether more remain. Never state an expense total or an absence from one page.',
     annotations: { readOnlyHint: true },
-    inputSchema: {
+    inputSchema: z.object({
       start: z.number().int().min(0).describe('Start offset, 0-based (default 0). To continue a listing, pass the `nextStart` from the previous response.').optional(),
       max: z.number().int().min(1).describe('Max results (default 20)').optional(),
-    },
+    }),
   }, async (args) => {
     const start = args.start ?? 0;
     const max = args.max ?? 20;
@@ -51,10 +51,10 @@ export function registerExpenseTools(server: McpServer, client: OFWClient): void
   if (allowWrites) server.registerTool('ofw_create_expense', {
     description: 'Log a new expense in OurFamilyWizard',
     annotations: { destructiveHint: false },
-    inputSchema: {
+    inputSchema: z.object({
       amount: z.number().describe('Expense amount'),
       description: z.string().describe('Expense description'),
-    },
+    }),
   }, async (args) => {
     const data = await client.request('POST', '/pub/v2/expense/expenses', args);
     return jsonResponse(data);

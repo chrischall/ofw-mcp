@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { mkdtempSync, rmSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { McpServer } from '@modelcontextprotocol/server';
 import { OFWClient } from '../../src/client.js';
 import { registerMessageTools } from '../../src/tools/messages.js';
 import * as syncModule from '../../src/sync.js';
@@ -3730,15 +3730,15 @@ describe('send_message draft preservation on unconfirmed send', () => {
 describe('pagination input schemas', () => {
   it('rejects non-positive or fractional page/size on the cached list tools', () => {
     const server = new McpServer({ name: 'test', version: '0.0.0' });
-    const configs = new Map<string, { inputSchema?: z.ZodRawShape }>();
+    const configs = new Map<string, { inputSchema?: z.ZodObject }>();
     vi.spyOn(server, 'registerTool').mockImplementation((name: string, config: unknown, _cb: unknown) => {
-      configs.set(name, config as { inputSchema?: z.ZodRawShape });
+      configs.set(name, config as { inputSchema?: z.ZodObject });
       return undefined as never;
     });
     registerMessageTools(server, new OFWClient(), cacheProvider, attachmentIO);
 
     for (const tool of ['ofw_list_messages', 'ofw_list_drafts', 'ofw_get_unread_sent']) {
-      const schema = z.object(configs.get(tool)!.inputSchema!);
+      const schema = configs.get(tool)!.inputSchema!;
       expect(schema.safeParse({ page: 0 }).success).toBe(false);
       expect(schema.safeParse({ size: -1 }).success).toBe(false);
       expect(schema.safeParse({ size: 1.5 }).success).toBe(false);
