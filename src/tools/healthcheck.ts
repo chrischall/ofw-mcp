@@ -1,4 +1,4 @@
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { McpServer } from '@modelcontextprotocol/server';
 import { registerCredentialHealthcheckTool } from '@chrischall/mcp-utils/healthcheck';
 import type { OFWClient } from '../client.js';
 import { resolveAuth, isNoAuthConfigured, isBridgeDown, type ResolvedAuth } from '../auth.js';

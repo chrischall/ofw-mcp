@@ -1,4 +1,4 @@
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import type { OFWClient } from '../client.js';
 import { jsonResponse } from './_shared.js';
@@ -12,10 +12,10 @@ export function registerJournalTools(server: McpServer, client: OFWClient): void
   server.registerTool('ofw_list_journal_entries', {
     description: 'List OurFamilyWizard journal entries. Offset-paged via start/max (1-based). The response leads with its paging state — `hasMore` and `nextStart` (null when the list is exhausted) — BEFORE the records, so a truncated or partially-read response still says whether more remain. Never state an entry count or an absence from one page.',
     annotations: { readOnlyHint: true },
-    inputSchema: {
+    inputSchema: z.object({
       start: z.number().int().min(1).describe('Start offset, 1-based (default 1). To continue a listing, pass the `nextStart` from the previous response.').optional(),
       max: z.number().int().min(1).describe('Max results (default 10)').optional(),
-    },
+    }),
   }, async (args) => {
     // Journal API uses 1-based offset (unlike expenses which start at 0)
     const start = args.start ?? 1;
@@ -44,10 +44,10 @@ export function registerJournalTools(server: McpServer, client: OFWClient): void
   if (allowWrites) server.registerTool('ofw_create_journal_entry', {
     description: 'Create a new journal entry in OurFamilyWizard',
     annotations: { destructiveHint: false },
-    inputSchema: {
+    inputSchema: z.object({
       title: z.string().describe('Entry title'),
       body: z.string().describe('Entry text content'),
-    },
+    }),
   }, async (args) => {
     const data = await client.request('POST', '/pub/v1/journals', args);
     return jsonResponse(data);
