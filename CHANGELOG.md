@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.18.0](https://github.com/chrischall/ofw-mcp/compare/v2.17.0...v2.18.0) (2026-09-19)
+
+
+### Features
+
+* **deps:** take mcp-utils 1.0.0, so server/discover works ([#310](https://github.com/chrischall/ofw-mcp/issues/310)) ([6e2bdfe](https://github.com/chrischall/ofw-mcp/commit/6e2bdfebdee628ec24d2004cca668eee96bda54b)), closes [#311](https://github.com/chrischall/ofw-mcp/issues/311)
+
 ## [2.17.0](https://github.com/chrischall/ofw-mcp/compare/v2.16.3...v2.17.0) (2026-09-17)
 
 
