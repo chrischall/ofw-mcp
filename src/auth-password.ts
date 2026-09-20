@@ -10,6 +10,7 @@
 // `resolveAuth()` in `./auth.ts` can call it without a Client instance, and
 // so tests can mock it at the module boundary.
 
+import { currentCallSignal } from '@chrischall/mcp-utils';
 import { BASE_URL, OFW_PROTOCOL_HEADERS, OFW_TOKEN_TTL_MS, assertOfwUrl } from './protocol.js';
 
 interface LoginResponse {
@@ -32,6 +33,10 @@ export async function loginWithPassword(
   const initResponse = await fetch(initUrl, {
     headers: { ...OFW_PROTOCOL_HEADERS },
     redirect: 'manual',
+    // Honour a caller who has given up (mcp-utils `cancel`). A sign-in
+    // nobody is waiting for should not keep hitting OFW, which counts
+    // failed attempts against the account.
+    signal: currentCallSignal(),
   });
   // headers.get('set-cookie') folds multiple Set-Cookie headers into one
   // comma-joined string; getSetCookie() preserves them individually. Echo
@@ -46,6 +51,7 @@ export async function loginWithPassword(
   assertOfwUrl(loginUrl);
   const response = await fetch(loginUrl, {
     method: 'POST',
+    signal: currentCallSignal(),
     headers: {
       ...OFW_PROTOCOL_HEADERS,
       Accept: 'application/json',

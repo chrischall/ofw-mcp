@@ -1,4 +1,4 @@
-import { loadDotenvSafely, parseBoolEnv, redactSecrets } from '@chrischall/mcp-utils';
+import { loadDotenvSafely, parseBoolEnv, redactSecrets, withAmbientCancellation } from '@chrischall/mcp-utils';
 import { TokenManager } from '@chrischall/mcp-utils/session';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
@@ -225,7 +225,15 @@ export class OFWClient {
       response = await fetch(url, {
         method,
         headers,
-        signal: ac.signal,
+        // THE CALLER'S CANCELLATION, folded in with our timeout (mcp-utils
+        // `cancel`). Until this the only thing that could stop an OFW
+        // request was the timeout below, so a cancelled tool call held it
+        // open for the full budget while the child burned the CPU
+        // mcp-host meters it on. The timeout diagnosis below is unaffected
+        // because it asks `ac.signal`, OUR controller — a caller's abort
+        // falls through to the generic path rather than being reported as
+        // OFW being slow.
+        signal: withAmbientCancellation(ac.signal),
         ...(body !== undefined ? { body: isFormData ? body : JSON.stringify(body) } : {}),
       });
     } catch (err) {
