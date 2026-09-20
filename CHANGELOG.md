@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.19.0](https://github.com/chrischall/ofw-mcp/compare/v2.18.0...v2.19.0) (2026-09-20)
+
+
+### Features
+
+* **client:** honour the caller's cancellation on every OFW request ([#313](https://github.com/chrischall/ofw-mcp/issues/313)) ([2b1ad8a](https://github.com/chrischall/ofw-mcp/commit/2b1ad8af60db7161f768d9dcf26439522818f469))
+
 ## [2.18.0](https://github.com/chrischall/ofw-mcp/compare/v2.17.0...v2.18.0) (2026-09-19)
 
 
