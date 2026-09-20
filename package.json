@@ -37,7 +37,7 @@
     "@chrischall/mcp-utils": "^2.0.0",
     "@fetchproxy/bootstrap": "^3.0.1",
     "@modelcontextprotocol/server": "^2.0.0",
-    "dotenv": "^17.4.2",
+    "dotenv": "^18.0.0",
     "zod": "^4.6.2"
   },
   "devDependencies": {
