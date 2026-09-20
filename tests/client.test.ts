@@ -1,3 +1,4 @@
+import { withCallSignal } from '@chrischall/mcp-utils';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { OFWClient } from '../src/client.js';
 
@@ -913,5 +914,60 @@ describe('OFWClient — injectable auth resolver', () => {
     expect(globalSpy).toHaveBeenCalled();
     const init = spy.mock.calls[0][1] as RequestInit;
     expect((init.headers as Record<string, string>)['Authorization']).toBe('Bearer global-token');
+  });
+});
+
+/**
+ * The caller's cancellation reaching OFW (mcp-utils `cancel`).
+ *
+ * Until this the only thing that could stop an OFW request was the client's
+ * own timeout, so a cancelled tool call held it open for the full budget
+ * while the child burned the CPU mcp-host meters it on. Measured on that
+ * fleet: claude.ai sent 101 cancellations in the week to 2026-09-20.
+ */
+describe('cancellation', () => {
+  beforeEach(() => {
+    process.env.OFW_USERNAME = 'test@example.com';
+    process.env.OFW_PASSWORD = 'testpass';
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('hands fetch a signal the CALLER can trip, on the login legs and the request', async () => {
+    // What changed is the signal reaching `fetch`; that an aborted signal
+    // ends a request is fetch's own behaviour, covered in mcp-utils. Testing
+    // it here through a hanging fetch only buys a timeout when some other
+    // part of the login flow stalls, which is what the first cut did.
+    const signals: (AbortSignal | null | undefined)[] = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+      signals.push((init as RequestInit | undefined)?.signal);
+      return {
+        ok: true,
+        status: 200,
+        statusText: '200',
+        headers: {
+          get: (k: string) => (k.toLowerCase() === 'content-type' ? 'application/json' : null),
+          getSetCookie: () => [],
+        },
+        json: async () => ({ auth: MOCK_TOKEN, redirectUrl: '/app/home', data: 'ok' }),
+        text: async () => '{}',
+      } as unknown as Response;
+    });
+
+    const controller = new AbortController();
+    await withCallSignal(controller.signal, () => new OFWClient().request('GET', '/pub/v1/test'));
+
+    // Every leg — both login fetches and the request itself.
+    expect(signals.length).toBeGreaterThanOrEqual(3);
+    for (const [i, signal] of signals.entries()) {
+      expect(signal, `leg ${i} was given no signal`).toBeInstanceOf(AbortSignal);
+    }
+    // ...and they are the CALLER's, not just the client's own timeout: one
+    // abort trips all of them.
+    controller.abort(new Error('caller went away'));
+    for (const [i, signal] of signals.entries()) {
+      expect(signal!.aborted, `leg ${i} did not honour the caller`).toBe(true);
+    }
   });
 });
