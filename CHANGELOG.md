@@ -1,5 +1,18 @@
 # Changelog
 
+## [2.19.1](https://github.com/chrischall/ofw-mcp/compare/v2.19.0...v2.19.1) (2026-09-21)
+
+
+### Bug Fixes
+
+* **deps:** bump dotenv from 17.4.2 to 18.0.0 ([#317](https://github.com/chrischall/ofw-mcp/issues/317)) ([549e2f9](https://github.com/chrischall/ofw-mcp/commit/549e2f9d0dbecf3b962637c686bc08843651b030))
+* **tools:** annotate the ten that declared only readOnlyHint: false ([#319](https://github.com/chrischall/ofw-mcp/issues/319)) ([3841797](https://github.com/chrischall/ofw-mcp/commit/38417976266e9c83b8709a75d02dccf4908f6818))
+
+
+### Documentation
+
+* AGENTS.md pointed at a directory that does not exist ([#320](https://github.com/chrischall/ofw-mcp/issues/320)) ([44a67b7](https://github.com/chrischall/ofw-mcp/commit/44a67b75450d048379b25976fdab5f3ed3b61b4b))
+
 ## [2.19.0](https://github.com/chrischall/ofw-mcp/compare/v2.18.0...v2.19.0) (2026-09-20)
 
 
