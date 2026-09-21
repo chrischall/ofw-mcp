@@ -315,7 +315,7 @@ export function registerMessageTools(
 
   server.registerTool('ofw_list_messages', {
     description: 'List messages from the local OurFamilyWizard cache. Supports filtering by folder, date range, and a substring query on subject+body. Pagination is offset-based (1-based `page`) but if you know what you want (a date range, a topic), prefer the filters over walking pages — the cache may have 1000+ messages. Results are newest-first by default; `sort:"oldest"` starts at the old end of a range instead of paging to it. Returns an explicit `complete` boolean describing the RESULT SET: true means "this is every message on OurFamilyWizard matching these filters as of freshness.asOf" — check it before asserting a count. An empty result from a cache that is not verified-fresh is REFUSED (result:"UNVERIFIED_EMPTY") rather than reported as an absence; pass autoRefresh:true to sync and answer instead.',
-    annotations: { readOnlyHint: false },
+    annotations: { readOnlyHint: true },
     inputSchema: z.object({
       folderId: z.string().describe('Folder name: "inbox", "sent", or "both" (default "both")').optional(),
       page: z.number().int().min(1).describe('Page number (default 1)').optional(),
@@ -450,7 +450,7 @@ export function registerMessageTools(
 
   server.registerTool('ofw_get_message', {
     description: 'Get a single OurFamilyWizard message OR draft by ID. Reads from local cache when available; otherwise fetches from OFW — and for an UNREAD INBOX message that fetch marks it read and stamps a "First Viewed" time the co-parent can see, which is part of the record and cannot be undone. Pass allowMarkRead:false to refuse such a fetch instead (cached bodies, sent messages and already-read messages are unaffected, because none of them stamp anything). For ids that match a draft (in the drafts cache), the response carries folder="drafts" and the body/subject/recipients reflect the drafts cache (which ofw_sync_messages keeps fresh) — drafts have no `fromUser`, and `sentAt`/`fetchedBodyAt` mirror the draft\'s `modifiedAt`. For inbox/sent messages, folder is "inbox" or "sent" as before.',
-    annotations: { readOnlyHint: false },
+    annotations: { readOnlyHint: false, destructiveHint: true },
     inputSchema: z.object({
       messageId: z.string().describe('Message ID (also accepts draft IDs — drafts are routed via the drafts cache)'),
       allowMarkRead: z.boolean().describe('Default true (the long-standing behaviour). Set false to refuse a fetch that would mark an unread INBOX message as READ on OurFamilyWizard — an irreversible, co-parent-visible change to the record. Reads that cannot stamp anything (a cached body, a sent message, an already-read message) still succeed. The server-wide OFW_ALLOW_MARK_READ=false is a ceiling this argument cannot raise.').optional(),
@@ -1009,7 +1009,7 @@ export function registerMessageTools(
 
   server.registerTool('ofw_list_drafts', {
     description: 'List draft messages, verified against OurFamilyWizard in ONE call: when the local drafts cache is not verified-fresh, a cheap drafts sync runs first by default (verify:true), so the answer is server-confirmed without a second call. Pass verify:false to answer purely from the cache (no OFW requests). Returns an explicit `complete` boolean describing the RESULT SET: true means "these are ALL the drafts on OurFamilyWizard as of freshness.asOf" — check it before saying "you have N drafts". Each draft carries its `draftKey` (stable across the create-then-delete churn of editing) when one is known. An empty result from a cache that is not verified-fresh is REFUSED (result:"UNVERIFIED_EMPTY"); pass autoRefresh:true to sync and answer instead.',
-    annotations: { readOnlyHint: false },
+    annotations: { readOnlyHint: false, destructiveHint: false },
     inputSchema: z.object({
       page: z.number().int().min(1).describe('Page number (default 1)').optional(),
       size: z.number().int().min(1).describe('Drafts per page (default 50)').optional(),
@@ -1134,7 +1134,7 @@ export function registerMessageTools(
 
   if (allowDrafts) server.registerTool('ofw_save_draft', {
     description: 'Save a message as a draft in OurFamilyWizard. RECIPIENTS: OurFamilyWizard does NOT persist recipients on drafts — recipientIds are accepted but the saved draft comes back with none (documented OFW behavior, noted once in the response, not warned about; supply recipientIds at send time instead). IDENTITY: the response leads with `draftKey`, the stable identity that survives editing — key off it, because the `id` changes on EVERY edit (replacing a draft creates a NEW draft and deletes the old one; OFW\'s update-in-place endpoint silently no-ops, so we never use it). Pass messageId to replace an existing draft; the response.id will be the NEW id, and a transparency NOTE documents the swap and which fields were carried over. THREADING: if replyToId is provided, the cache may rewrite it to the latest reply in the thread (note included). The threading verdict is read from OFW\'s full echo (replyToId/inReplyTo/showContext) — a warning appears ONLY when the reply linkage was genuinely dropped or re-targeted, and the response\'s top-level replyToId/inReplyTo always agree with its listData. Attach files via myFileIDs (from ofw_upload_attachment). After saving, the tool re-fetches the draft from OFW, and the returned `revision` reflects that authoritative state (so it will match on your next edit). SAFETY: because replacing DESTROYS the old draft rather than merging, passing messageId first re-reads that draft from OFW and REFUSES the write if its subject/body/recipients changed since you read it (drafts edited in the OFW web app do not bump any timestamp, so the local cache can be silently behind). A pure replyToId normalization by OFW is NOT treated as a conflict. The refusal returns the current server body under serverBody — merge your edit into it and retry with expectedRevision.',
-    annotations: { readOnlyHint: false },
+    annotations: { readOnlyHint: false, destructiveHint: false },
     inputSchema: z.object({
       subject: z.string().describe('Message subject'),
       body: z.string().describe('Message body text'),
@@ -1384,7 +1384,7 @@ export function registerMessageTools(
 
   server.registerTool('ofw_get_unread_sent', {
     description: 'List sent messages that have not been read by one or more recipients. Reads from local cache. Returns `complete` describing whether every sent message was scanned. An empty SENT cache that is not verified-fresh is REFUSED (result:"UNVERIFIED_EMPTY") rather than reported as "nothing sent"; pass autoRefresh:true to sync and answer instead.',
-    annotations: { readOnlyHint: false },
+    annotations: { readOnlyHint: true },
     inputSchema: z.object({
       page: z.number().int().min(1).describe('Page (default 1)').optional(),
       size: z.number().int().min(1).describe('Per page (default 50)').optional(),
@@ -1526,7 +1526,7 @@ export function registerMessageTools(
 
   server.registerTool('ofw_download_attachment', {
     description: 'Download an OFW message attachment by fileId and return content you can actually read. Inline delivery walks a ladder and returns the first rung that works: (1) host-renderable images (PNG/JPEG/GIF/WEBP) come back as ImageContent; (2) .xlsx/.csv/.tsv, .pdf, .docx, .pptx and text files come back as EXTRACTED CONTENT — per-sheet CSV, per-page/slide text, document text — in the response JSON under `extracted`; (3) anything else comes back as an EmbeddedResource blob of the raw bytes. The meta block names the rung as `deliveredVia` and, when it falls through to bytes, lists what was tried in `deliveryAttempts`. Reported mime types are always normalized to a bare media type (no charset/name parameters). In disk mode the bytes are saved to ~/Downloads/ofw-mcp/ and the response carries the absolute path; pass extract:true to ALSO get the extracted content in that response. The default for `inline` can be flipped server-side via the OFW_INLINE_ATTACHMENTS env var. On a hosted deployment with no filesystem, disk mode is unavailable, so inline is forced (forcedInline:true) rather than failing — a saveTo path never costs you the content. fileId comes from attachments[].fileId on ofw_get_message. Override disk destination with OFW_ATTACHMENTS_DIR or saveTo. Re-downloading to the same path is a no-op (disk mode only).',
-    annotations: { readOnlyHint: false },
+    annotations: { readOnlyHint: true },
     inputSchema: z.object({
       fileId: z.number().describe('Attachment file id (from ofw_get_message → attachments[].fileId)'),
       inline: z.boolean().describe('If true, return content inline as MCP content blocks and skip the disk write. If false, write to disk and return the path — except on a hosted deployment with no filesystem, where inline is forced (forcedInline:true) so the content is still returned. If omitted, falls back to the OFW_INLINE_ATTACHMENTS env var (default: false = disk).').optional(),
@@ -1638,7 +1638,7 @@ export function registerMessageTools(
 
   server.registerTool('ofw_sync_messages', {
     description: 'Sync messages from OurFamilyWizard into the local cache. Returns counts per folder and a list of unread inbox messages whose bodies were NOT fetched (to avoid mark-as-read on OFW). Call ofw_get_message(id) on those to read them. EVERY call re-checks the newest page first, so new messages are picked up promptly even while an old-history backfill is still running; only then does it spend what is left of its budget advancing that backfill. Pass deep:true to walk all OFW pages instead of stopping at the first all-cached page (use to backfill suspected gaps). Sync is BOUNDED and RESUMABLE: on hosted deployments a per-call OFW-request budget (env OFW_SYNC_MAX_REQUESTS, or the maxRequests argument) caps how far one call walks; when the budget is hit the response reports done:false with a note — call again with the SAME arguments to resume. done:false means older history is still being backfilled; it does NOT mean recent messages are missing. Local installs are unbounded by default (done is always true).',
-    annotations: { readOnlyHint: false },
+    annotations: { readOnlyHint: false, destructiveHint: false },
     inputSchema: z.object({
       folders: z.array(z.enum(['inbox', 'sent', 'drafts'])).min(1).describe('Folders to sync (default: all three). Must be non-empty if given — an empty list would sync nothing while reporting success.').optional(),
       fetchUnreadBodies: z.boolean().describe('If true, also fetch bodies for unread inbox messages — which marks each one READ on OurFamilyWizard and stamps a co-parent-visible "First Viewed" time that cannot be undone. Defaults to the OFW_FETCH_UNREAD_BODIES env var (false unless set), and is forced off entirely when OFW_ALLOW_MARK_READ=false.').optional(),
@@ -1667,7 +1667,7 @@ export function registerMessageTools(
 
   server.registerTool('ofw_check_freshness', {
     description: 'Cheaply confirm whether the local cache still matches OurFamilyWizard, WITHOUT running a full sync. Use this before asserting anything about current state — especially "draft X is still sitting unsent". Costs one OFW request for the folder check plus one per messageId. For each folder it returns the live server count next to the cached count. For each id it returns a LIVE lifecycle `state` — "draft" | "sent" | "received" | "deleted" | "unknown" — alongside `folder`, `sentAt`, `existsOnServer` and a content comparison. `state` is the field that answers "is this still a draft?": a draft that has been SENT still exists on the server, so existsOnServer:true never distinguished the two. A cached draft whose state is no longer "draft" reports inSync:false even when its text is byte-identical. Content is compared by revision hash, because OFW draft timestamps do NOT change when a draft is edited in the web app. Does not fetch bodies into the cache, does not touch attachments, and does not depend on sync state. For draftKeys, or a full live draft inventory, use ofw_status.',
-    annotations: { readOnlyHint: false },
+    annotations: { readOnlyHint: true },
     inputSchema: z.object({
       folders: z.array(z.enum(['inbox', 'sent', 'drafts'])).min(1).describe('Folders to compare cached vs live counts for. Defaults to all three when messageIds is not given. Must be non-empty if given.').optional(),
       messageIds: z.array(z.number()).describe(`Specific ids to verify against OFW (max ${MAX_FRESHNESS_IDS}). Ids cached as drafts, as sent messages, or as already-read inbox messages are probed freely — none of those can stamp the record. Anything else is skipped — see allowMarkRead.`).optional(),
@@ -1763,7 +1763,7 @@ export function registerMessageTools(
 
   server.registerTool('ofw_status', {
     description: 'ONE live call that answers "where does everything stand?". This is the call that should back any status summary about drafts or specific messages — never session memory, and never a cached read alone. With no arguments it returns the FULL current draft inventory, verified against OurFamilyWizard. Pass ids and/or draftKeys to get each one\'s live lifecycle `state` ("draft" | "sent" | "received" | "deleted" | "unknown") with `sentAt` and `viewedAt`. A draftKey is the stable identity ofw_save_draft returns: editing a draft mints a new OFW id every time (create-then-delete), so the key is the only way to ask "what happened to the thing I was working on?" — it resolves to the chain\'s current id and keeps resolving after the draft is SENT (state:"sent" with sentMessageId). The top-level `complete` is true ONLY when every part of this snapshot was verified live; if it is false, do not state a draft count or a lifecycle claim from this payload.',
-    annotations: { readOnlyHint: false },
+    annotations: { readOnlyHint: true },
     inputSchema: z.object({
       ids: z.array(z.number()).describe(`Message/draft ids to resolve to a live state (combined with draftKeys, max ${MAX_FRESHNESS_IDS} probes per call).`).optional(),
       draftKeys: z.array(z.string()).describe('Stable draft keys (from ofw_save_draft / ofw_list_drafts) to resolve to their CURRENT id and state.').optional(),
