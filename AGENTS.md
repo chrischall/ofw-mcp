@@ -337,23 +337,23 @@ Repo-specific: PR handling here is **source-aware**.
 | PR author | `auto-review` | Auto-merge |
 |---|---|---|
 | You / same-repo collaborators | Yes | Yes on `pass` OR `warn` + green CI |
-| External fork PRs | No — the workflow skips them (fork PRs can't see secrets). Comment `@Codex review this` to trigger `Codex.yml`. | No — merge manually after review |
+| External fork PRs | No — the workflow skips them (fork PRs can't see secrets). Comment `@claude review this` to trigger `claude.yml`. | No — merge manually after review |
 | Dependabot / bots | No (skipped to keep noise down) | Yes, armed immediately; merges on green CI |
 
 The fork gap is structural: the workflow uses `pull_request`, not
 `pull_request_target`, because Anthropic's GitHub App OIDC backend rejects
-`pull_request_target` ([Codex-action#713](https://github.com/anthropics/Codex-action/issues/713)).
+`pull_request_target` ([claude-code-action#713](https://github.com/anthropics/claude-code-action/issues/713)).
 
 ## Plugin / Distribution
 
 ```
 .claude-plugin/
-  plugin.json       Claude plugin manifest (points at .mcp.json and skills/)
+  plugin.json       Claude Code plugin manifest (points at .mcp.json and skills/)
   marketplace.json  Marketplace catalog entry
-.mcp.json           Codex MCP server config (npx -y ofw-mcp)
+.mcp.json           Claude Code MCP server config (npx -y ofw-mcp)
 manifest.json       mcpb manifest (server.entry_point=dist/bundle.js, user_config for credentials)
 server.json         MCP Registry manifest (npm package, env var schema)
-skills/ofw/SKILL.md Codex skill describing when/how to use the tools
+skills/ofw/SKILL.md Claude Code skill describing when/how to use the tools
 ```
 
 ## Gotchas
@@ -373,4 +373,4 @@ skills/ofw/SKILL.md Codex skill describing when/how to use the tools
   - **A truncated extraction always says so.** `maxChars` (default 50k) clips on a row/line boundary, sets `truncated`, and lists whatever was dropped whole in `extracted.omitted`; `parts` (`"1-3,5"`, or a sheet name — a bare number matches EITHER a position or a name, because spreadsheet tabs are routinely named for a year) filters BEFORE a part is decompressed, so a ranged request over a large file is cheap. Silence about a partial custody schedule reads as the whole schedule.
   - Extraction and raw bytes are mutually exclusive by design: when content is extracted the blob is NOT also attached (it is the payload the host rejects, at double the response size). `extract:false` gets the bytes back; in disk mode `extract:true` returns the saved path AND the content.
 - **Where there is no disk, inline is the ONLY channel** and must never dead-end. `AttachmentIO.supportsDisk` is `true` on `NodeAttachmentIO`; a filesystem-free implementation reports `false`. `ofw_download_attachment` computes `inline = requestedInline || !supportsDisk`: an explicit `inline:false` on a no-disk deployment is *forced* to inline (bytes still returned) rather than erroring on a disk write, and the response's meta block carries `forcedInline: true` so the override is honest rather than silently ignored. The old failure — reject disk AND fail inline (bad MIME) → attachment unreadable by any route — is now structurally impossible. A `saveTo` on a no-disk deployment therefore never costs the caller the content: it is forced inline and still walks the delivery ladder.
-- **AI-maintained**: README warns this codebase is built and maintained by Codex; `src/index.ts` prints the same notice to stderr on startup
+- **AI-maintained**: README warns this codebase is built and maintained by Claude; `src/index.ts` prints the same notice to stderr on startup
