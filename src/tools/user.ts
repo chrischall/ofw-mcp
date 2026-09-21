@@ -14,7 +14,7 @@ export function registerUserTools(server: McpServer, client: OFWClient): void {
   server.registerTool('ofw_get_notifications', {
     description:
       'Get OurFamilyWizard dashboard summary: unread message count, upcoming events, outstanding expenses. Note: updates your last-seen status.',
-    annotations: { readOnlyHint: false },
+    annotations: { readOnlyHint: true },
   }, async () => {
     const data = await client.request('GET', '/pub/v1/users/useraccountstatus');
     return jsonResponse(data);
