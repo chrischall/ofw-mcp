@@ -38,6 +38,18 @@ export function getAttachmentsDir(): string {
   return join(homedir(), 'Downloads', 'ofw-mcp');
 }
 
+/**
+ * The only directory tree ofw_upload_attachment may read from. Uploading sends
+ * a local file to OurFamilyWizard (and, when shared, straight to the
+ * co-parent), so the source is confined to a directory the user deliberately
+ * put files in: OFW_UPLOAD_DIR, else the attachments directory.
+ */
+export function getUploadDir(): string {
+  const override = process.env.OFW_UPLOAD_DIR;
+  if (override && override.trim().length > 0) return override.trim();
+  return getAttachmentsDir();
+}
+
 export type WriteMode = 'none' | 'drafts' | 'all';
 
 /**

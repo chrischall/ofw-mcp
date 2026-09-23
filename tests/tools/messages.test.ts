@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { z } from 'zod';
-import { existsSync, lstatSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, truncateSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { McpServer } from '@modelcontextprotocol/server';
@@ -2399,7 +2399,7 @@ describe('ofw_upload_attachment', () => {
     });
     setup(client);
 
-    const dir = mkdtempSync(join(tmpdir(), 'ofw-up-'));
+    const dir = mkdtempSync(join(tmpDir, 'ofw-up-'));
     const filePath = join(dir, 'note.txt');
     writeFileSync(filePath, 'hello attachments!');
     try {
@@ -2434,7 +2434,7 @@ describe('ofw_upload_attachment', () => {
       fileId: 1, fileName: 'a.pdf', fileType: 'application/pdf', sizeInBytes: 4, shareClass: 'SHARED',
     });
     setup(client);
-    const dir = mkdtempSync(join(tmpdir(), 'ofw-up-'));
+    const dir = mkdtempSync(join(tmpDir, 'ofw-up-'));
     const filePath = join(dir, 'a.pdf');
     writeFileSync(filePath, 'PDF.');
     try {
@@ -2456,6 +2456,115 @@ describe('ofw_upload_attachment', () => {
     await expect(
       handlers.get('ofw_upload_attachment')!({ path: '/tmp/does-not-exist-' + Date.now() })
     ).rejects.toThrow();
+  });
+});
+
+describe('ofw_upload_attachment — only files the user put in the upload dir can leave the machine', () => {
+  function uploadClient() {
+    const c = new OFWClient();
+    const spy = vi.spyOn(c, 'request').mockResolvedValue({ fileId: 1, fileName: 'x', fileType: 'text/plain', sizeInBytes: 1 });
+    setup(c);
+    return spy;
+  }
+
+  function configsFor(mode: string | undefined) {
+    const prev = process.env.OFW_WRITE_MODE;
+    if (mode === undefined) delete process.env.OFW_WRITE_MODE; else process.env.OFW_WRITE_MODE = mode;
+    try {
+      const server = new McpServer({ name: 'test', version: '0.0.0' });
+      const configs = new Map<string, { annotations?: Record<string, unknown>; inputSchema: z.ZodType; description: string }>();
+      vi.spyOn(server, 'registerTool').mockImplementation((name: string, config: unknown) => {
+        configs.set(name, config as { annotations?: Record<string, unknown>; inputSchema: z.ZodType; description: string });
+        return undefined as never;
+      });
+      registerMessageTools(server, new OFWClient(), cacheProvider, attachmentIO);
+      return configs;
+    } finally {
+      if (prev === undefined) delete process.env.OFW_WRITE_MODE; else process.env.OFW_WRITE_MODE = prev;
+    }
+  }
+
+  it('refuses a file outside the upload dir (e.g. an SSH key) without contacting OFW', async () => {
+    const spy = uploadClient();
+    const outside = mkdtempSync(join(tmpdir(), 'ofw-outside-'));
+    try {
+      const key = join(outside, 'id_ed25519');
+      writeFileSync(key, 'PRIVATE KEY');
+      await expect(handlers.get('ofw_upload_attachment')!({ path: key }))
+        .rejects.toThrow(/outside the upload directory/);
+      await expect(handlers.get('ofw_upload_attachment')!({ path: '~/.ssh/id_ed25519' }))
+        .rejects.toThrow(/outside the upload directory/);
+      expect(spy).not.toHaveBeenCalled();
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a symlink inside the upload dir that points outside it', async () => {
+    const spy = uploadClient();
+    const outside = mkdtempSync(join(tmpdir(), 'ofw-outside-'));
+    try {
+      writeFileSync(join(outside, 'credentials'), 'secret');
+      symlinkSync(join(outside, 'credentials'), join(tmpDir, 'innocent.pdf'));
+      await expect(handlers.get('ofw_upload_attachment')!({ path: join(tmpDir, 'innocent.pdf') }))
+        .rejects.toThrow(/outside the upload directory/);
+      expect(spy).not.toHaveBeenCalled();
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses dotfiles and files inside dot-directories', async () => {
+    const spy = uploadClient();
+    writeFileSync(join(tmpDir, '.env'), 'X=1');
+    mkdirSync(join(tmpDir, '.aws'));
+    writeFileSync(join(tmpDir, '.aws', 'credentials'), 'k');
+    await expect(handlers.get('ofw_upload_attachment')!({ path: join(tmpDir, '.env') })).rejects.toThrow(/hidden/);
+    await expect(handlers.get('ofw_upload_attachment')!({ path: join(tmpDir, '.aws', 'credentials') })).rejects.toThrow(/hidden/);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('refuses a file over the size cap', async () => {
+    const spy = uploadClient();
+    const big = join(tmpDir, 'big.pdf');
+    writeFileSync(big, '');
+    truncateSync(big, 26 * 1024 * 1024); // sparse — no real disk use
+    await expect(handlers.get('ofw_upload_attachment')!({ path: big })).rejects.toThrow(/too large/);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('resolves a relative path against the upload dir and honours OFW_UPLOAD_DIR', async () => {
+    const outbox = join(tmpDir, 'outbox');
+    mkdirSync(outbox);
+    writeFileSync(join(outbox, 'receipt.pdf'), 'PDF');
+    const prev = process.env.OFW_UPLOAD_DIR;
+    process.env.OFW_UPLOAD_DIR = outbox;
+    try {
+      const spy = uploadClient();
+      const out = JSON.parse((await handlers.get('ofw_upload_attachment')!({ path: 'receipt.pdf' })).content[0].text);
+      expect(out.fileId).toBe(1);
+      expect((spy.mock.calls[0][2] as FormData).get('fileName')).toBe('receipt.pdf');
+      // The attachments dir itself is now outside the configured upload dir.
+      writeFileSync(join(tmpDir, 'other.pdf'), 'PDF');
+      await expect(handlers.get('ofw_upload_attachment')!({ path: join(tmpDir, 'other.pdf') }))
+        .rejects.toThrow(/outside the upload directory/);
+    } finally {
+      if (prev === undefined) delete process.env.OFW_UPLOAD_DIR; else process.env.OFW_UPLOAD_DIR = prev;
+    }
+  });
+
+  it('in drafts mode cannot share with the co-parent: shareClass SHARED is not accepted', () => {
+    const drafts = configsFor('drafts').get('ofw_upload_attachment')!;
+    expect(drafts.inputSchema.safeParse({ path: 'a.pdf', shareClass: 'SHARED' }).success).toBe(false);
+    expect(drafts.inputSchema.safeParse({ path: 'a.pdf', shareClass: 'PRIVATE' }).success).toBe(true);
+    const all = configsFor('all').get('ofw_upload_attachment')!;
+    expect(all.inputSchema.safeParse({ path: 'a.pdf', shareClass: 'SHARED' }).success).toBe(true);
+  });
+
+  it('is annotated open-world and describes the upload as disclosure', () => {
+    const tool = configsFor(undefined).get('ofw_upload_attachment')!;
+    expect(tool.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: false, openWorldHint: true });
+    expect(tool.description).toMatch(/leaves this machine/);
   });
 });
 
@@ -3696,7 +3805,8 @@ describe('messages.ts — coverage backfill', () => {
     const c = new OFWClient();
     vi.spyOn(c, 'request').mockResolvedValue({});
     setup(c);
-    await expect(handlers.get('ofw_upload_attachment')!({ path: tmpDir })).rejects.toThrow(/Not a file/); // 480
+    mkdirSync(join(tmpDir, 'adir'));
+    await expect(handlers.get('ofw_upload_attachment')!({ path: join(tmpDir, 'adir') })).rejects.toThrow(/Not a file/); // 480
   });
 
   it('download_attachment: fetches metadata when uncached and writes into a saveTo directory', async () => {
@@ -4046,7 +4156,7 @@ describe('response validation (issue #83)', () => {
     const client = new OFWClient();
     vi.spyOn(client, 'request').mockResolvedValueOnce({ fileName: 'note.txt' }); // no fileId
     setup(client);
-    const dir = mkdtempSync(join(tmpdir(), 'ofw-upv-'));
+    const dir = mkdtempSync(join(tmpDir, 'ofw-upv-'));
     const filePath = join(dir, 'note.txt');
     writeFileSync(filePath, 'x');
     try {

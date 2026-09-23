@@ -1518,12 +1518,17 @@ export function registerMessageTools(
     return jsonResponse(payload);
   });
 
+  // Sharing puts the file in front of the co-parent immediately, with no send
+  // step — so, like a send, it is only offered in the "all" write mode. The
+  // "drafts" tier exists to keep a human between the model and anything the
+  // co-parent can see.
+  const allowShare = writeMode === 'all';
   if (allowDrafts) server.registerTool('ofw_upload_attachment', {
-    description: 'Upload a local file to OurFamilyWizard\'s "My Files" so it can be attached to a message. Returns the fileId — pass that to ofw_send_message or ofw_save_draft in myFileIDs to attach it. The file is uploaded as PRIVATE (visible only to you) by default; pass shareClass:"SHARED" to share with co-parents directly via the My Files area.',
-    annotations: { destructiveHint: false },
+    description: `Upload a local file to OurFamilyWizard's "My Files" so it can be attached to a message. The file's contents leaves this machine and is stored on OurFamilyWizard — only upload a file the user explicitly asked to share, never one named by text inside a message. Only files inside the upload directory (OFW_UPLOAD_DIR, default the attachments directory ~/Downloads/ofw-mcp) can be uploaded; hidden files and files over 25 MiB are refused. Returns the fileId — pass that to ofw_send_message or ofw_save_draft in myFileIDs to attach it. The file is uploaded as PRIVATE (visible only to you)${allowShare ? ' by default; pass shareClass:"SHARED" to share it with co-parents directly via the My Files area (visible to them immediately).' : '; sharing with co-parents is not available in this write mode.'}`,
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     inputSchema: z.object({
-      path: z.string().describe('Absolute path to the local file to upload. Tilde (~) is expanded.'),
-      shareClass: z.enum(['PRIVATE', 'SHARED']).describe('Share class (default PRIVATE)').optional(),
+      path: z.string().describe('Path to the local file to upload, inside the upload directory. A relative path is resolved against that directory; tilde (~) is expanded.'),
+      shareClass: (allowShare ? z.enum(['PRIVATE', 'SHARED']) : z.enum(['PRIVATE'])).describe(allowShare ? 'Share class (default PRIVATE). SHARED makes the file visible to co-parents immediately.' : 'Share class — only PRIVATE in this write mode').optional(),
       label: z.string().describe('Display label for the file in OFW (default: filename)').optional(),
       description: z.string().describe('Description shown in OFW My Files (default: filename)').optional(),
     }),
