@@ -21,7 +21,7 @@ import {
   getFetchUnreadBodies, getSyncMaxRequests, getWriteMode,
 } from '../config.js';
 import { basename, join } from 'node:path';
-import { ApiRecipientSchema, deriveRead, expandPath, hasRealView, jsonErrorResponse, jsonResponse, mapRecipients, postMessageAndRefetch, reportsThreaded, reportsUnthreaded, textResponse, threadedReplyTo, verifyWriteLanded, withReadState } from './_shared.js';
+import { ApiRecipientSchema, deriveRead, expandPath, hasRealView, jsonErrorResponse, jsonResponse, mapRecipients, postMessageAndRefetch, reportsThreaded, UnconfirmedWriteError, reportsUnthreaded, textResponse, threadedReplyTo, verifyWriteLanded, withReadState } from './_shared.js';
 import { parseLenient } from '@chrischall/mcp-utils';
 import { pageState } from './pagination.js';
 import { MESSAGE_VIEWS, viewDrafts, viewMessages, viewOne } from './project.js';
@@ -651,7 +651,7 @@ export function registerMessageTools(
   });
 
   if (allowSend) server.registerTool('ofw_send_message', {
-    description: 'Send a message via OurFamilyWizard — the ONE irreversible operation here, so it carries the strongest guard. TO SEND AN EXISTING DRAFT (the safe default): pass draftId (or messageId — same thing). The tool re-reads the draft from OFW and sends the SERVER\'S version, so what goes out is what is on OurFamilyWizard, not what this session remembers — subject/body act only as explicit overrides. It is guarded exactly like ofw_save_draft: pass expectedRevision to assert which version you are sending; if the draft changed on OFW since you read it — or no longer exists (it may already have been SENT) — the send is REFUSED with the current server content echoed back, and nothing goes out. RECIPIENTS: OurFamilyWizard does not persist recipients on drafts, so recipientIds is usually still required at send time (ids from ofw_get_profile). After the send is CONFIRMED (OFW returned the new message id and the re-fetched sent record matches what was posted), the source draft is deleted automatically; pass deleteDraftOnSuccess:false to keep it. On ANY failure or ambiguity the draft is never deleted — the response carries draftRetained:true with the reason. TO COMPOSE FROM SCRATCH: supply subject/body/recipientIds with no draftId. If replyToId is provided (or inherited from the draft), the cache may rewrite it to the latest reply in the same thread (a note is included when this happens). ATTACHMENTS: when sending by draftId, the server draft\'s own attachments carry over automatically; myFileIDs (from ofw_upload_attachment) overrides or attaches files on a fresh compose. The response leads with sentMessageId and the stable draftKey, and reports threaded (whether OFW actually linked the reply) and draftDeleted.',
+    description: 'Send a message via OurFamilyWizard — the ONE irreversible operation here, so it carries the strongest guard. TO SEND AN EXISTING DRAFT (the safe default): pass draftId (or messageId — same thing). The tool re-reads the draft from OFW and sends the SERVER\'S version, so what goes out is what is on OurFamilyWizard, not what this session remembers — subject/body act only as explicit overrides. It is guarded exactly like ofw_save_draft: pass expectedRevision to assert which version you are sending; if the draft changed on OFW since you read it — or no longer exists (it may already have been SENT) — the send is REFUSED with the current server content echoed back, and nothing goes out. RECIPIENTS: OurFamilyWizard does not persist recipients on drafts, so recipientIds is usually still required at send time (ids from ofw_get_profile). After the send is CONFIRMED (OFW returned the new message id and the re-fetched sent record matches what was posted), the source draft is deleted automatically; pass deleteDraftOnSuccess:false to keep it. On ANY failure or ambiguity the draft is never deleted — the response carries draftRetained:true with the reason. If the send request times out or drops without a definitive answer, the result is SEND_UNCONFIRMED: the message may already have been delivered, so do NOT retry until a sent-folder sync (or ourfamilywizard.com) shows it did not go out. TO COMPOSE FROM SCRATCH: supply subject/body/recipientIds with no draftId. If replyToId is provided (or inherited from the draft), the cache may rewrite it to the latest reply in the same thread (a note is included when this happens). ATTACHMENTS: when sending by draftId, the server draft\'s own attachments carry over automatically; myFileIDs (from ofw_upload_attachment) overrides or attaches files on a fresh compose. The response leads with sentMessageId and the stable draftKey, and reports threaded (whether OFW actually linked the reply) and draftDeleted.',
     annotations: { destructiveHint: true },
     inputSchema: z.object({
       subject: z.string().describe('Message subject. Required unless draftId/messageId is given (then it overrides the server draft\'s subject).').optional(),
@@ -758,15 +758,38 @@ export function registerMessageTools(
     // "the draft as it exists on the server" includes its files, or the send
     // would silently strip them. Explicit myFileIDs still overrides.
     const myFileIDs = args.myFileIDs ?? serverDraft?.files ?? [];
-    const { id: newId, detail, raw } = await postMessageAndRefetch(client, {
-      subject,
-      body,
-      recipientIds,
-      attachments: { myFileIDs },
-      draft: false,
-      includeOriginal: resolvedReplyTo !== null,
-      replyToId: resolvedReplyTo,
-    }, SentDetailSchema, 'ofw_send_message');
+    let posted: Awaited<ReturnType<typeof postMessageAndRefetch<z.infer<typeof SentDetailSchema>>>>;
+    try {
+      posted = await postMessageAndRefetch(client, {
+        subject,
+        body,
+        recipientIds,
+        attachments: { myFileIDs },
+        draft: false,
+        includeOriginal: resolvedReplyTo !== null,
+        replyToId: resolvedReplyTo,
+      }, SentDetailSchema, 'ofw_send_message');
+    } catch (e) {
+      if (!(e instanceof UnconfirmedWriteError)) throw e;
+      // The one irreversible operation failed WITHOUT a definitive answer. A
+      // plain error here reads as "nothing happened" and invites a retry —
+      // which, if the first attempt landed, sends the co-parent a duplicate
+      // on the court-visible record. Say so, and keep the draft.
+      const reason = e.postedId !== null
+        ? `OFW accepted the send (message id ${e.postedId}) but re-reading it to confirm failed: ${e.message}. The message WAS very likely delivered.`
+        : `The send request failed without a definitive answer from OFW: ${e.message}. The message MAY HAVE BEEN DELIVERED to the recipient.`;
+      return jsonErrorResponse({
+        result: 'SEND_UNCONFIRMED',
+        mayHaveBeenDelivered: true,
+        sentMessageId: e.postedId,
+        reason,
+        remedy: 'Do NOT retry the send blindly. First run ofw_sync_messages with folders:["sent"] and look for this subject/body among the newest sent messages (or check ourfamilywizard.com). Retry only once you have confirmed it did not go out.',
+        ...(draftRef !== undefined
+          ? { draftRetained: true, draftId: draftRef }
+          : {}),
+      });
+    }
+    const { id: newId, detail, raw } = posted;
 
     let persisted: MessageRow | null = null;
     let verifyNote: string | null = null;

@@ -279,6 +279,35 @@ const PostMessagesResponseSchema = z.looseObject({
  * `<S extends z.ZodType>` constraint would widen the output to `unknown`
  * and force a cast at this call site.)
  */
+/**
+ * A message write whose outcome is UNKNOWN: the POST failed without a
+ * definitive answer (timeout, dropped connection, 5xx), or OFW accepted it
+ * (`postedId`) and the re-fetch that confirms it failed. Either way the write
+ * may have landed, so a caller must not treat it as "nothing happened" — for
+ * a send, retrying would put a duplicate on the court-visible record. The
+ * message is the underlying error's, so callers that do not care see the same
+ * text as before.
+ */
+export class UnconfirmedWriteError extends Error {
+  constructor(readonly postedId: number | null, cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause), { cause });
+    this.name = 'UnconfirmedWriteError';
+  }
+}
+
+/**
+ * True when a failed request is a DEFINITIVE rejection — OFW answered with a
+ * 4xx (other than 408 Request Timeout) or a repeated 429 — so the write
+ * certainly did not happen. Anything else (timeout, network error, 5xx,
+ * cancellation) leaves the outcome unknown.
+ */
+function isDefinitiveRejection(e: unknown): boolean {
+  if (!(e instanceof Error)) return false;
+  if (/^Rate limited by OFW API/.test(e.message)) return true;
+  const m = /OFW API error: (4\d\d)\b/.exec(e.message);
+  return m !== null && m[1] !== '408';
+}
+
 export async function postMessageAndRefetch<T>(
   client: OFWClient,
   payload: unknown,
@@ -288,9 +317,15 @@ export async function postMessageAndRefetch<T>(
   | { id: number; detail: T; raw: unknown }
   | { id: null; detail: null; raw: unknown }
 > {
+  let posted: unknown;
+  try {
+    posted = await client.request('POST', '/pub/v3/messages', payload);
+  } catch (e) {
+    throw isDefinitiveRejection(e) ? e : new UnconfirmedWriteError(null, e);
+  }
   const raw = parseLenient(
     PostMessagesResponseSchema,
-    await client.request('POST', '/pub/v3/messages', payload),
+    posted,
     { label: 'ofw-mcp', context: `POST /pub/v3/messages (${ctx})`, mode: 'strict' },
   );
   const id =
@@ -298,9 +333,17 @@ export async function postMessageAndRefetch<T>(
     : typeof raw?.entityId === 'number' ? raw.entityId
     : null;
   if (id === null) return { id: null, detail: null, raw };
+  let fetched: unknown;
+  try {
+    fetched = await client.request('GET', `/pub/v3/messages/${id}`);
+  } catch (e) {
+    // OFW already accepted the write (it returned an id); only the
+    // confirmation failed.
+    throw new UnconfirmedWriteError(id, e);
+  }
   const detail = parseLenient(
     detailSchema,
-    await client.request('GET', `/pub/v3/messages/${id}`),
+    fetched,
     { label: 'ofw-mcp', context: `GET /pub/v3/messages/{id} (${ctx})`, mode: 'strict' },
   );
   return { id, detail, raw };

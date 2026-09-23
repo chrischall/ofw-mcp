@@ -742,6 +742,78 @@ describe('ofw_send_message', () => {
     expect(result.content[0].type).toBe('text');
   });
 
+  it('a POST that times out returns SEND_UNCONFIRMED telling the caller NOT to retry blindly', async () => {
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request')
+      .mockRejectedValueOnce(new Error('OFW API request timed out after 30000ms: POST /pub/v3/messages'));
+    setup(client);
+
+    const result = await handlers.get('ofw_send_message')!({ subject: 'S', body: 'B', recipientIds: [1] });
+    const parsed = JSON.parse(result.content[0].text);
+    expect(result.isError).toBe(true);
+    expect(parsed.result).toBe('SEND_UNCONFIRMED');
+    expect(parsed.mayHaveBeenDelivered).toBe(true);
+    expect(parsed.sentMessageId).toBeNull();
+    expect(parsed.reason).toMatch(/timed out/);
+    expect(parsed.reason).toMatch(/MAY HAVE BEEN DELIVERED/);
+    expect(parsed.remedy).toMatch(/Do NOT retry/);
+    expect(parsed.remedy).toMatch(/ofw_sync_messages/);
+    expect(spy).toHaveBeenCalledTimes(1);
+  });
+
+  it('a network drop or 5xx on the POST is unconfirmed too', async () => {
+    for (const err of [new TypeError('fetch failed'), new Error('OFW API error: 502 Bad Gateway for POST /pub/v3/messages')]) {
+      const client = new OFWClient();
+      vi.spyOn(client, 'request').mockRejectedValueOnce(err);
+      setup(client);
+      const result = await handlers.get('ofw_send_message')!({ subject: 'S', body: 'B', recipientIds: [1] });
+      expect(JSON.parse(result.content[0].text).result).toBe('SEND_UNCONFIRMED');
+    }
+  });
+
+  it('a definitive 4xx rejection of the POST still fails as a plain error (nothing went out)', async () => {
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockRejectedValueOnce(new Error('OFW API error: 400 Bad Request for POST /pub/v3/messages'));
+    setup(client);
+    await expect(handlers.get('ofw_send_message')!({ subject: 'S', body: 'B', recipientIds: [1] }))
+      .rejects.toThrow(/400 Bad Request/);
+  });
+
+  it('a POST that succeeded but whose re-fetch failed reports the sent id as unconfirmed, not an error to retry', async () => {
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce({ entityId: 321 })
+      .mockRejectedValueOnce(new Error('OFW API request timed out after 30000ms: GET /pub/v3/messages/321'));
+    setup(client);
+    const result = await handlers.get('ofw_send_message')!({ subject: 'S', body: 'B', recipientIds: [1] });
+    const parsed = JSON.parse(result.content[0].text);
+    expect(result.isError).toBe(true);
+    expect(parsed.result).toBe('SEND_UNCONFIRMED');
+    expect(parsed.sentMessageId).toBe(321);
+    expect(parsed.reason).toMatch(/accepted.*321/);
+  });
+
+  it('keeps the source draft when a send-by-draft POST times out', async () => {
+    upsertDraft({
+      id: 55, subject: 'Pickup', body: 'At 3', recipients: [], replyToId: null,
+      modifiedAt: '2026-05-04T12:00:00', listData: {},
+    });
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request')
+      // Freshness guard re-reads the draft; server copy matches the cache.
+      .mockResolvedValueOnce({ id: 55, subject: 'Pickup', body: 'At 3', recipients: [], date: { dateTime: '2026-05-04T12:00:00' } })
+      .mockRejectedValueOnce(new Error('OFW API request timed out after 30000ms: POST /pub/v3/messages'));
+    setup(client);
+    const result = await handlers.get('ofw_send_message')!({ draftId: 55, recipientIds: [1] });
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.result).toBe('SEND_UNCONFIRMED');
+    expect(parsed.draftRetained).toBe(true);
+    expect(parsed.draftId).toBe(55);
+    expect(spy).not.toHaveBeenCalledWith('DELETE', expect.anything(), expect.anything());
+    expect(getDraft(55)).not.toBeNull();
+  });
+
   it('does not delete a draft when draftId is not provided', async () => {
     const client = new OFWClient();
     const spy = sendMessageMocks(client, { entityId: 200 });
