@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { z } from 'zod';
-import { mkdtempSync, rmSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, truncateSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { McpServer } from '@modelcontextprotocol/server';
@@ -69,15 +69,23 @@ function setupWithClient(client: OFWClient): Map<string, ToolHandler> {
   return localHandlers;
 }
 
+let prevAttachmentsDir: string | undefined;
+
 beforeEach(() => {
   tmpDir = mkdtempSync(join(tmpdir(), 'ofw-tools-'));
   cache = OFWCache.open(':memory:');
+  // Downloads are confined to the attachments dir; point it at this test's
+  // scratch dir so saveTo paths under tmpDir are allowed and nothing escapes.
+  prevAttachmentsDir = process.env.OFW_ATTACHMENTS_DIR;
+  process.env.OFW_ATTACHMENTS_DIR = tmpDir;
 });
 
 afterEach(() => {
   cache.close();
   vi.restoreAllMocks();
   rmSync(tmpDir, { recursive: true, force: true });
+  if (prevAttachmentsDir === undefined) delete process.env.OFW_ATTACHMENTS_DIR;
+  else process.env.OFW_ATTACHMENTS_DIR = prevAttachmentsDir;
 });
 
 describe('ofw_list_message_folders', () => {
@@ -230,6 +238,44 @@ describe('ofw_list_messages (cache-backed)', () => {
     expect(parsed.messages).toHaveLength(1);
     expect(parsed.messages[0].subject).toBe('Boston');
     expect(parsed.total).toBe(1);
+  });
+
+  it('compares an offset or Z since/until as an instant against the naive-local sent_at', async () => {
+    // OFW stores sent_at as naive Eastern wall clock. 23:31 ET on the 27th is
+    // 03:31Z on the 28th; a raw string compare against a Z bound dropped it.
+    upsertMessage({
+      id: 1, folder: 'inbox', subject: 'Late', fromUser: 'A',
+      sentAt: '2026-07-27T23:31:09', recipients: [], body: 'b',
+      fetchedBodyAt: null, replyToId: null, chainRootId: null, listData: {},
+    });
+    const client = new OFWClient();
+    setup(client);
+    const list = async (args: Record<string, unknown>) =>
+      JSON.parse((await handlers.get('ofw_list_messages')!({ folderId: 'inbox', ...args })).content[0].text);
+
+    // 22:00 ET on the 27th, written in UTC — the message is after it.
+    expect((await list({ since: '2026-07-28T02:00:00Z' })).total).toBe(1);
+    // The message's own sentAt, copied back out of a response (offset form).
+    expect((await list({ since: '2026-07-27T23:31:09-04:00' })).total).toBe(1);
+    // until is exclusive: the exact instant excludes it, one second later includes it.
+    // (An empty result from an unverified cache is refused, not reported as [];
+    // either way no message comes back.)
+    expect((await list({ until: '2026-07-28T03:31:09Z' })).messages ?? []).toHaveLength(0);
+    expect((await list({ until: '2026-07-28T03:31:10Z' })).total).toBe(1);
+  });
+
+  it('rejects a since/until that is not a date instead of string-comparing it', async () => {
+    const client = new OFWClient();
+    setup(client);
+    const result = await handlers.get('ofw_list_messages')!({ folderId: 'inbox', since: 'last tuesday' });
+    const parsed = JSON.parse(result.content[0].text);
+    expect(result.isError).toBe(true);
+    expect(parsed.result).toBe('INVALID_DATE');
+    expect(parsed.reason).toMatch(/since/);
+    expect(parsed.messages).toBeUndefined();
+
+    const bad = await handlers.get('ofw_list_messages')!({ folderId: 'inbox', until: 'soon' });
+    expect(JSON.parse(bad.content[0].text).reason).toMatch(/until/);
   });
 
   it('sort:"oldest" makes a TRUNCATED page hold the oldest messages, not a reshuffled newest page', async () => {
@@ -514,6 +560,17 @@ describe('ofw_get_message (cache-first)', () => {
     expect(getMessage(42)?.body).toBe('fresh-body');
   });
 
+  it('stores a naive-local sentAt, not a UTC Z value, when the detail carries no date', async () => {
+    const client = new OFWClient();
+    vi.spyOn(client, 'request').mockResolvedValueOnce({
+      id: 98, body: 'b', subject: 'Undated', from: { name: 'Alice' }, recipients: [],
+    });
+    setup(client);
+    await handlers.get('ofw_get_message')!({ messageId: '98' });
+    // Same shape as every OFW-supplied sent_at, so since/until compare it correctly.
+    expect(getMessage(98)?.sentAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3})?$/);
+  });
+
   it('falls through to OFW when row is missing entirely', async () => {
     const client = new OFWClient();
     vi.spyOn(client, 'request').mockResolvedValueOnce({
@@ -691,6 +748,78 @@ describe('ofw_send_message', () => {
     expect(getMessage(200)?.folder).toBe('sent');
     expect(result.content).toHaveLength(1);
     expect(result.content[0].type).toBe('text');
+  });
+
+  it('a POST that times out returns SEND_UNCONFIRMED telling the caller NOT to retry blindly', async () => {
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request')
+      .mockRejectedValueOnce(new Error('OFW API request timed out after 30000ms: POST /pub/v3/messages'));
+    setup(client);
+
+    const result = await handlers.get('ofw_send_message')!({ subject: 'S', body: 'B', recipientIds: [1] });
+    const parsed = JSON.parse(result.content[0].text);
+    expect(result.isError).toBe(true);
+    expect(parsed.result).toBe('SEND_UNCONFIRMED');
+    expect(parsed.mayHaveBeenDelivered).toBe(true);
+    expect(parsed.sentMessageId).toBeNull();
+    expect(parsed.reason).toMatch(/timed out/);
+    expect(parsed.reason).toMatch(/MAY HAVE BEEN DELIVERED/);
+    expect(parsed.remedy).toMatch(/Do NOT retry/);
+    expect(parsed.remedy).toMatch(/ofw_sync_messages/);
+    expect(spy).toHaveBeenCalledTimes(1);
+  });
+
+  it('a network drop or 5xx on the POST is unconfirmed too', async () => {
+    for (const err of [new TypeError('fetch failed'), new Error('OFW API error: 502 Bad Gateway for POST /pub/v3/messages')]) {
+      const client = new OFWClient();
+      vi.spyOn(client, 'request').mockRejectedValueOnce(err);
+      setup(client);
+      const result = await handlers.get('ofw_send_message')!({ subject: 'S', body: 'B', recipientIds: [1] });
+      expect(JSON.parse(result.content[0].text).result).toBe('SEND_UNCONFIRMED');
+    }
+  });
+
+  it('a definitive 4xx rejection of the POST still fails as a plain error (nothing went out)', async () => {
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockRejectedValueOnce(new Error('OFW API error: 400 Bad Request for POST /pub/v3/messages'));
+    setup(client);
+    await expect(handlers.get('ofw_send_message')!({ subject: 'S', body: 'B', recipientIds: [1] }))
+      .rejects.toThrow(/400 Bad Request/);
+  });
+
+  it('a POST that succeeded but whose re-fetch failed reports the sent id as unconfirmed, not an error to retry', async () => {
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce({ entityId: 321 })
+      .mockRejectedValueOnce(new Error('OFW API request timed out after 30000ms: GET /pub/v3/messages/321'));
+    setup(client);
+    const result = await handlers.get('ofw_send_message')!({ subject: 'S', body: 'B', recipientIds: [1] });
+    const parsed = JSON.parse(result.content[0].text);
+    expect(result.isError).toBe(true);
+    expect(parsed.result).toBe('SEND_UNCONFIRMED');
+    expect(parsed.sentMessageId).toBe(321);
+    expect(parsed.reason).toMatch(/accepted.*321/);
+  });
+
+  it('keeps the source draft when a send-by-draft POST times out', async () => {
+    upsertDraft({
+      id: 55, subject: 'Pickup', body: 'At 3', recipients: [], replyToId: null,
+      modifiedAt: '2026-05-04T12:00:00', listData: {},
+    });
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request')
+      // Freshness guard re-reads the draft; server copy matches the cache.
+      .mockResolvedValueOnce({ id: 55, subject: 'Pickup', body: 'At 3', recipients: [], date: { dateTime: '2026-05-04T12:00:00' } })
+      .mockRejectedValueOnce(new Error('OFW API request timed out after 30000ms: POST /pub/v3/messages'));
+    setup(client);
+    const result = await handlers.get('ofw_send_message')!({ draftId: 55, recipientIds: [1] });
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.result).toBe('SEND_UNCONFIRMED');
+    expect(parsed.draftRetained).toBe(true);
+    expect(parsed.draftId).toBe(55);
+    expect(spy).not.toHaveBeenCalledWith('DELETE', expect.anything(), expect.anything());
+    expect(getDraft(55)).not.toBeNull();
   });
 
   it('does not delete a draft when draftId is not provided', async () => {
@@ -2270,7 +2399,7 @@ describe('ofw_upload_attachment', () => {
     });
     setup(client);
 
-    const dir = mkdtempSync(join(tmpdir(), 'ofw-up-'));
+    const dir = mkdtempSync(join(tmpDir, 'ofw-up-'));
     const filePath = join(dir, 'note.txt');
     writeFileSync(filePath, 'hello attachments!');
     try {
@@ -2305,7 +2434,7 @@ describe('ofw_upload_attachment', () => {
       fileId: 1, fileName: 'a.pdf', fileType: 'application/pdf', sizeInBytes: 4, shareClass: 'SHARED',
     });
     setup(client);
-    const dir = mkdtempSync(join(tmpdir(), 'ofw-up-'));
+    const dir = mkdtempSync(join(tmpDir, 'ofw-up-'));
     const filePath = join(dir, 'a.pdf');
     writeFileSync(filePath, 'PDF.');
     try {
@@ -2327,6 +2456,115 @@ describe('ofw_upload_attachment', () => {
     await expect(
       handlers.get('ofw_upload_attachment')!({ path: '/tmp/does-not-exist-' + Date.now() })
     ).rejects.toThrow();
+  });
+});
+
+describe('ofw_upload_attachment — only files the user put in the upload dir can leave the machine', () => {
+  function uploadClient() {
+    const c = new OFWClient();
+    const spy = vi.spyOn(c, 'request').mockResolvedValue({ fileId: 1, fileName: 'x', fileType: 'text/plain', sizeInBytes: 1 });
+    setup(c);
+    return spy;
+  }
+
+  function configsFor(mode: string | undefined) {
+    const prev = process.env.OFW_WRITE_MODE;
+    if (mode === undefined) delete process.env.OFW_WRITE_MODE; else process.env.OFW_WRITE_MODE = mode;
+    try {
+      const server = new McpServer({ name: 'test', version: '0.0.0' });
+      const configs = new Map<string, { annotations?: Record<string, unknown>; inputSchema: z.ZodType; description: string }>();
+      vi.spyOn(server, 'registerTool').mockImplementation((name: string, config: unknown) => {
+        configs.set(name, config as { annotations?: Record<string, unknown>; inputSchema: z.ZodType; description: string });
+        return undefined as never;
+      });
+      registerMessageTools(server, new OFWClient(), cacheProvider, attachmentIO);
+      return configs;
+    } finally {
+      if (prev === undefined) delete process.env.OFW_WRITE_MODE; else process.env.OFW_WRITE_MODE = prev;
+    }
+  }
+
+  it('refuses a file outside the upload dir (e.g. an SSH key) without contacting OFW', async () => {
+    const spy = uploadClient();
+    const outside = mkdtempSync(join(tmpdir(), 'ofw-outside-'));
+    try {
+      const key = join(outside, 'id_ed25519');
+      writeFileSync(key, 'PRIVATE KEY');
+      await expect(handlers.get('ofw_upload_attachment')!({ path: key }))
+        .rejects.toThrow(/outside the upload directory/);
+      await expect(handlers.get('ofw_upload_attachment')!({ path: '~/.ssh/id_ed25519' }))
+        .rejects.toThrow(/outside the upload directory/);
+      expect(spy).not.toHaveBeenCalled();
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a symlink inside the upload dir that points outside it', async () => {
+    const spy = uploadClient();
+    const outside = mkdtempSync(join(tmpdir(), 'ofw-outside-'));
+    try {
+      writeFileSync(join(outside, 'credentials'), 'secret');
+      symlinkSync(join(outside, 'credentials'), join(tmpDir, 'innocent.pdf'));
+      await expect(handlers.get('ofw_upload_attachment')!({ path: join(tmpDir, 'innocent.pdf') }))
+        .rejects.toThrow(/outside the upload directory/);
+      expect(spy).not.toHaveBeenCalled();
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses dotfiles and files inside dot-directories', async () => {
+    const spy = uploadClient();
+    writeFileSync(join(tmpDir, '.env'), 'X=1');
+    mkdirSync(join(tmpDir, '.aws'));
+    writeFileSync(join(tmpDir, '.aws', 'credentials'), 'k');
+    await expect(handlers.get('ofw_upload_attachment')!({ path: join(tmpDir, '.env') })).rejects.toThrow(/hidden/);
+    await expect(handlers.get('ofw_upload_attachment')!({ path: join(tmpDir, '.aws', 'credentials') })).rejects.toThrow(/hidden/);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('refuses a file over the size cap', async () => {
+    const spy = uploadClient();
+    const big = join(tmpDir, 'big.pdf');
+    writeFileSync(big, '');
+    truncateSync(big, 26 * 1024 * 1024); // sparse — no real disk use
+    await expect(handlers.get('ofw_upload_attachment')!({ path: big })).rejects.toThrow(/too large/);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('resolves a relative path against the upload dir and honours OFW_UPLOAD_DIR', async () => {
+    const outbox = join(tmpDir, 'outbox');
+    mkdirSync(outbox);
+    writeFileSync(join(outbox, 'receipt.pdf'), 'PDF');
+    const prev = process.env.OFW_UPLOAD_DIR;
+    process.env.OFW_UPLOAD_DIR = outbox;
+    try {
+      const spy = uploadClient();
+      const out = JSON.parse((await handlers.get('ofw_upload_attachment')!({ path: 'receipt.pdf' })).content[0].text);
+      expect(out.fileId).toBe(1);
+      expect((spy.mock.calls[0][2] as FormData).get('fileName')).toBe('receipt.pdf');
+      // The attachments dir itself is now outside the configured upload dir.
+      writeFileSync(join(tmpDir, 'other.pdf'), 'PDF');
+      await expect(handlers.get('ofw_upload_attachment')!({ path: join(tmpDir, 'other.pdf') }))
+        .rejects.toThrow(/outside the upload directory/);
+    } finally {
+      if (prev === undefined) delete process.env.OFW_UPLOAD_DIR; else process.env.OFW_UPLOAD_DIR = prev;
+    }
+  });
+
+  it('in drafts mode cannot share with the co-parent: shareClass SHARED is not accepted', () => {
+    const drafts = configsFor('drafts').get('ofw_upload_attachment')!;
+    expect(drafts.inputSchema.safeParse({ path: 'a.pdf', shareClass: 'SHARED' }).success).toBe(false);
+    expect(drafts.inputSchema.safeParse({ path: 'a.pdf', shareClass: 'PRIVATE' }).success).toBe(true);
+    const all = configsFor('all').get('ofw_upload_attachment')!;
+    expect(all.inputSchema.safeParse({ path: 'a.pdf', shareClass: 'SHARED' }).success).toBe(true);
+  });
+
+  it('is annotated open-world and describes the upload as disclosure', () => {
+    const tool = configsFor(undefined).get('ofw_upload_attachment')!;
+    expect(tool.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: false, openWorldHint: true });
+    expect(tool.description).toMatch(/leaves this machine/);
   });
 });
 
@@ -2546,6 +2784,94 @@ describe('mark-read gate (issue #192)', () => {
   });
 });
 
+describe('ofw_download_attachment — disk writes are confined and never clobber', () => {
+  function downloadClient(fileId: number, body = Buffer.from('payload')) {
+    upsertAttachmentForMessage({ fileId, fileName: 'evil.sh', label: 'x', mimeType: 'text/plain', sizeBytes: body.length, metadata: {}, messageId: 0 });
+    const c = new OFWClient();
+    const bin = vi.spyOn(c, 'requestBinary').mockResolvedValue({ body, contentType: 'text/plain', suggestedFileName: 'evil.sh' } as never);
+    setup(c);
+    return bin;
+  }
+
+  it('is NOT annotated read-only: it creates files on disk', () => {
+    const server = new McpServer({ name: 'test', version: '0.0.0' });
+    const configs = new Map<string, { annotations?: Record<string, unknown> }>();
+    vi.spyOn(server, 'registerTool').mockImplementation((name: string, config: unknown) => {
+      configs.set(name, config as { annotations?: Record<string, unknown> });
+      return undefined as never;
+    });
+    registerMessageTools(server, new OFWClient(), cacheProvider, attachmentIO);
+    expect(configs.get('ofw_download_attachment')?.annotations?.readOnlyHint).toBe(false);
+  });
+
+  it('refuses a saveTo outside the attachments dir and writes nothing', async () => {
+    const bin = downloadClient(801);
+    const outside = mkdtempSync(join(tmpdir(), 'ofw-outside-'));
+    try {
+      const target = join(outside, '.zshrc');
+      await expect(handlers.get('ofw_download_attachment')!({ fileId: 801, saveTo: target }))
+        .rejects.toThrow(/outside the attachments directory/);
+      expect(existsSync(target)).toBe(false);
+      expect(bin).not.toHaveBeenCalled();
+      await expect(handlers.get('ofw_download_attachment')!({ fileId: 801, saveTo: join(tmpDir, '..', 'escape.sh') }))
+        .rejects.toThrow(/outside the attachments directory/);
+      // A home-relative target is outside too (refused before anything is written).
+      await expect(handlers.get('ofw_download_attachment')!({ fileId: 801, saveTo: '~/.ofw-mcp-test-must-not-exist' }))
+        .rejects.toThrow(/outside the attachments directory/);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a saveTo that reaches outside through a symlinked directory', async () => {
+    downloadClient(802);
+    const outside = mkdtempSync(join(tmpdir(), 'ofw-outside-'));
+    try {
+      symlinkSync(outside, join(tmpDir, 'link'));
+      await expect(handlers.get('ofw_download_attachment')!({ fileId: 802, saveTo: join(tmpDir, 'link', 'sub', 'x.sh') }))
+        .rejects.toThrow(/outside the attachments directory/);
+      expect(existsSync(join(outside, 'sub', 'x.sh'))).toBe(false);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('resolves a relative saveTo inside the attachments dir', async () => {
+    downloadClient(803);
+    const out = JSON.parse((await handlers.get('ofw_download_attachment')!({ fileId: 803, saveTo: 'case/evidence.sh' })).content[0].text);
+    expect(out.path).toBe(join(tmpDir, 'case', 'evidence.sh'));
+    expect(readFileSync(out.path, 'utf8')).toBe('payload');
+  });
+
+  it('never overwrites an existing file unless force:true, and never follows a symlink at the target', async () => {
+    downloadClient(804);
+    const dest = join(tmpDir, 'existing.txt');
+    writeFileSync(dest, 'user data');
+    await expect(handlers.get('ofw_download_attachment')!({ fileId: 804, saveTo: dest }))
+      .rejects.toThrow(/already exists/);
+    expect(readFileSync(dest, 'utf8')).toBe('user data');
+
+    // A symlink planted at the target must not redirect the write.
+    const outside = mkdtempSync(join(tmpdir(), 'ofw-outside-'));
+    try {
+      const victim = join(outside, 'victim');
+      writeFileSync(victim, 'precious');
+      symlinkSync(victim, join(tmpDir, 'planted'));
+      await expect(handlers.get('ofw_download_attachment')!({ fileId: 804, saveTo: join(tmpDir, 'planted') }))
+        .rejects.toThrow(/already exists/);
+      await handlers.get('ofw_download_attachment')!({ fileId: 804, saveTo: join(tmpDir, 'planted'), force: true });
+      expect(readFileSync(victim, 'utf8')).toBe('precious');
+      expect(lstatSync(join(tmpDir, 'planted')).isSymbolicLink()).toBe(false);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+
+    const out = JSON.parse((await handlers.get('ofw_download_attachment')!({ fileId: 804, saveTo: dest, force: true })).content[0].text);
+    expect(readFileSync(out.path, 'utf8')).toBe('payload');
+    expect(statSync(out.path).mode & 0o777).toBe(0o600);
+  });
+});
+
 describe('ofw_download_attachment', () => {
   it('fetches metadata + bytes, writes file, returns path/mime/size', async () => {
     const client = new OFWClient();
@@ -2564,7 +2890,7 @@ describe('ofw_download_attachment', () => {
     });
     setup(client);
 
-    const downloadDir = mkdtempSync(join(tmpdir(), 'ofw-dl-'));
+    const downloadDir = mkdtempSync(join(tmpDir, 'ofw-dl-'));
     try {
       const result = await handlers.get('ofw_download_attachment')!({ fileId: 50015547, saveTo: downloadDir + '/' });
       const parsed = JSON.parse(result.content[0].text);
@@ -2594,7 +2920,7 @@ describe('ofw_download_attachment', () => {
     });
     setup(client);
 
-    const downloadDir = mkdtempSync(join(tmpdir(), 'ofw-dl-'));
+    const downloadDir = mkdtempSync(join(tmpDir, 'ofw-dl-'));
     try {
       const result = await handlers.get('ofw_download_attachment')!({ fileId: 66, saveTo: downloadDir + '/' });
       const parsed = JSON.parse(result.content[0].text);
@@ -2694,7 +3020,7 @@ describe('ofw_download_attachment', () => {
         body: Buffer.from('data'), contentType: 'text/plain', suggestedFileName: 'memo.txt',
       });
       setup(client);
-      const dir = mkdtempSync(join(tmpdir(), 'ofw-dl-'));
+      const dir = mkdtempSync(join(tmpDir, 'ofw-dl-'));
       try {
         const result = await handlers.get('ofw_download_attachment')!({ fileId: 12, inline: false, saveTo: dir + '/' });
         const parsed = JSON.parse(result.content[0].text);
@@ -2721,7 +3047,7 @@ describe('ofw_download_attachment', () => {
     });
     setup(client);
 
-    const dir = mkdtempSync(join(tmpdir(), 'ofw-dl-'));
+    const dir = mkdtempSync(join(tmpDir, 'ofw-dl-'));
     try {
       // First: disk download populates downloadedPath.
       await handlers.get('ofw_download_attachment')!({ fileId: 99, saveTo: dir + '/' });
@@ -2747,7 +3073,7 @@ describe('ofw_download_attachment', () => {
       .mockResolvedValueOnce({ body: bytes, contentType: 'text/plain', suggestedFileName: 'gone.txt' });
     setup(client);
 
-    const dir = mkdtempSync(join(tmpdir(), 'ofw-dl-'));
+    const dir = mkdtempSync(join(tmpDir, 'ofw-dl-'));
     try {
       // Populate downloadedPath in the attachment cache, then delete the actual file.
       const first = await handlers.get('ofw_download_attachment')!({ fileId: 77, saveTo: dir + '/' });
@@ -2798,7 +3124,7 @@ describe('ofw_download_attachment', () => {
     });
     setup(client);
 
-    const dir = mkdtempSync(join(tmpdir(), 'ofw-dl-'));
+    const dir = mkdtempSync(join(tmpDir, 'ofw-dl-'));
     try {
       const result = await handlers.get('ofw_download_attachment')!({ fileId: 89, saveTo: dir + '/' });
       const parsed = JSON.parse(result.content[0].text);
@@ -2821,7 +3147,7 @@ describe('ofw_download_attachment', () => {
       suggestedFileName: 'a.txt',
     });
     setup(client);
-    const dir = mkdtempSync(join(tmpdir(), 'ofw-dl-'));
+    const dir = mkdtempSync(join(tmpDir, 'ofw-dl-'));
     try {
       // First call downloads.
       await handlers.get('ofw_download_attachment')!({ fileId: 1, saveTo: dir + '/' });
@@ -3050,7 +3376,7 @@ describe('ofw_download_attachment', () => {
       body: bytes, contentType: 'image/png;charset=UTF-8', suggestedFileName: 'shot.png',
     });
     setup(client);
-    const dir = mkdtempSync(join(tmpdir(), 'ofw-dl-'));
+    const dir = mkdtempSync(join(tmpDir, 'ofw-dl-'));
     try {
       const first = await handlers.get('ofw_download_attachment')!({ fileId: 700, saveTo: dir + '/' });
       const parsed = JSON.parse(first.content[0].text);
@@ -3281,7 +3607,7 @@ describe('ofw_download_attachment', () => {
     stubAttachment(client, 909, 'winter.xlsx', XLSX_MIME, bytes);
     setup(client);
 
-    const dir = mkdtempSync(join(tmpdir(), 'ofw-dl-'));
+    const dir = mkdtempSync(join(tmpDir, 'ofw-dl-'));
     try {
       const parsed = JSON.parse((await handlers.get('ofw_download_attachment')!({
         fileId: 909, saveTo: dir + '/', extract: true,
@@ -3301,7 +3627,7 @@ describe('ofw_download_attachment', () => {
     stubAttachment(client, 910, 'note.txt', 'text/plain', bytes);
     setup(client);
 
-    const dir = mkdtempSync(join(tmpdir(), 'ofw-dl-'));
+    const dir = mkdtempSync(join(tmpDir, 'ofw-dl-'));
     try {
       await handlers.get('ofw_download_attachment')!({ fileId: 910, saveTo: dir + '/' });
       const second = JSON.parse((await handlers.get('ofw_download_attachment')!({
@@ -3326,7 +3652,7 @@ describe('ofw_download_attachment', () => {
       .mockResolvedValue({ body: bytes, contentType: 'text/plain', suggestedFileName: 'gone.txt' });
     setup(client);
 
-    const dir = mkdtempSync(join(tmpdir(), 'ofw-dl-'));
+    const dir = mkdtempSync(join(tmpDir, 'ofw-dl-'));
     try {
       const first = JSON.parse((await handlers.get('ofw_download_attachment')!({
         fileId: 911, saveTo: dir + '/',
@@ -3350,7 +3676,7 @@ describe('ofw_download_attachment', () => {
     stubAttachment(client, 912, 'blob.bin', 'application/octet-stream', bytes);
     setup(client);
 
-    const dir = mkdtempSync(join(tmpdir(), 'ofw-dl-'));
+    const dir = mkdtempSync(join(tmpDir, 'ofw-dl-'));
     try {
       const parsed = JSON.parse((await handlers.get('ofw_download_attachment')!({
         fileId: 912, saveTo: dir + '/', extract: true,
@@ -3479,7 +3805,8 @@ describe('messages.ts — coverage backfill', () => {
     const c = new OFWClient();
     vi.spyOn(c, 'request').mockResolvedValue({});
     setup(c);
-    await expect(handlers.get('ofw_upload_attachment')!({ path: tmpDir })).rejects.toThrow(/Not a file/); // 480
+    mkdirSync(join(tmpDir, 'adir'));
+    await expect(handlers.get('ofw_upload_attachment')!({ path: join(tmpDir, 'adir') })).rejects.toThrow(/Not a file/); // 480
   });
 
   it('download_attachment: fetches metadata when uncached and writes into a saveTo directory', async () => {
@@ -3829,7 +4156,7 @@ describe('response validation (issue #83)', () => {
     const client = new OFWClient();
     vi.spyOn(client, 'request').mockResolvedValueOnce({ fileName: 'note.txt' }); // no fileId
     setup(client);
-    const dir = mkdtempSync(join(tmpdir(), 'ofw-upv-'));
+    const dir = mkdtempSync(join(tmpDir, 'ofw-upv-'));
     const filePath = join(dir, 'note.txt');
     writeFileSync(filePath, 'x');
     try {

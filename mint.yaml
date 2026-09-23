@@ -61,7 +61,13 @@ env:
     help: >-
       Directory where ofw_download_attachment writes files when not returning
       inline. Defaults to ~/Downloads/ofw-mcp/. Pick a directory that is
-      readable by your MCP host.
+      readable by your MCP host. Downloads can only be written inside it.
+  - name: OFW_UPLOAD_DIR
+    required: false
+    help: >-
+      The only directory ofw_upload_attachment may upload files from (hidden
+      files excluded). Defaults to OFW_ATTACHMENTS_DIR. Put files you want to
+      send to OurFamilyWizard here.
   - name: DISPLAY_TZ
     required: false
     help: >-

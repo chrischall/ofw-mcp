@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DEFAULT_FRESHNESS_TTL_SECONDS, getAllowMarkRead, getAttachmentsDir, getCacheDbPath, getCalendarWritesAllowed, getDefaultInlineAttachments, getCacheDir, getFetchUnreadBodies, getFreshnessTtlSeconds, getSyncMaxRequests, getWriteMode } from '../src/config.js';
+import { DEFAULT_FRESHNESS_TTL_SECONDS, getAllowMarkRead, getAttachmentsDir, getCacheDbPath, getCalendarWritesAllowed, getDefaultInlineAttachments, getCacheDir, getFetchUnreadBodies, getFreshnessTtlSeconds, getSyncMaxRequests, getUploadDir, getWriteMode } from '../src/config.js';
 
 describe('getCacheDbPath', () => {
   let tmp: string;
@@ -95,6 +95,36 @@ describe('getAttachmentsDir', () => {
   it('honors OFW_ATTACHMENTS_DIR override', () => {
     process.env.OFW_ATTACHMENTS_DIR = '/custom/attachments';
     expect(getAttachmentsDir()).toBe('/custom/attachments');
+  });
+});
+
+describe('getUploadDir', () => {
+  let prevUpload: string | undefined;
+  let prevAttach: string | undefined;
+
+  beforeEach(() => {
+    prevUpload = process.env.OFW_UPLOAD_DIR;
+    prevAttach = process.env.OFW_ATTACHMENTS_DIR;
+    delete process.env.OFW_UPLOAD_DIR;
+    delete process.env.OFW_ATTACHMENTS_DIR;
+  });
+
+  afterEach(() => {
+    if (prevUpload === undefined) delete process.env.OFW_UPLOAD_DIR; else process.env.OFW_UPLOAD_DIR = prevUpload;
+    if (prevAttach === undefined) delete process.env.OFW_ATTACHMENTS_DIR; else process.env.OFW_ATTACHMENTS_DIR = prevAttach;
+  });
+
+  it('defaults to the attachments dir', () => {
+    expect(getUploadDir()).toBe(join(homedir(), 'Downloads', 'ofw-mcp'));
+    process.env.OFW_ATTACHMENTS_DIR = '/custom/attachments';
+    expect(getUploadDir()).toBe('/custom/attachments');
+  });
+
+  it('honors OFW_UPLOAD_DIR, ignoring a blank value', () => {
+    process.env.OFW_UPLOAD_DIR = '  ';
+    expect(getUploadDir()).toBe(join(homedir(), 'Downloads', 'ofw-mcp'));
+    process.env.OFW_UPLOAD_DIR = ' /outbox ';
+    expect(getUploadDir()).toBe('/outbox');
   });
 });
 

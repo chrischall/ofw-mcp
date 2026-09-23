@@ -1,6 +1,8 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { isAbsolute } from 'node:path';
-import { deriveRead, expandPath, hasRealView, jsonResponse, mapRecipients, textResponse, verifyWriteLanded, withReadState } from '../../src/tools/_shared.js';
+import { z } from 'zod';
+import { OFWClient } from '../../src/client.js';
+import { deriveRead, expandPath, hasRealView, jsonResponse, mapRecipients, postMessageAndRefetch, textResponse, UnconfirmedWriteError, verifyWriteLanded, withReadState } from '../../src/tools/_shared.js';
 import { sampleMessageRow } from '../_fixtures.js';
 
 describe('jsonResponse', () => {
@@ -281,5 +283,32 @@ describe('withReadState', () => {
     const out = withReadState(row);
     expect(out.read).toBe(false);
     expect(out.listData).toBeNull();
+  });
+});
+
+describe('postMessageAndRefetch — unknown vs definitive failures', () => {
+  const post = (err: unknown) => {
+    const client = new OFWClient();
+    vi.spyOn(client, 'request').mockRejectedValueOnce(err);
+    return postMessageAndRefetch(client, {}, z.looseObject({}), 'test');
+  };
+
+  it('wraps a non-Error rejection as an unconfirmed write, keeping its text', async () => {
+    const e = await post('socket hang up').catch((x: unknown) => x);
+    expect(e).toBeInstanceOf(UnconfirmedWriteError);
+    expect((e as UnconfirmedWriteError).message).toBe('socket hang up');
+    expect((e as UnconfirmedWriteError).postedId).toBeNull();
+  });
+
+  it('treats 408 Request Timeout as unknown, not a rejection', async () => {
+    await expect(post(new Error('OFW API error: 408 Request Timeout for POST /pub/v3/messages')))
+      .rejects.toBeInstanceOf(UnconfirmedWriteError);
+  });
+
+  it('passes a definitive rejection (4xx, repeated 429) through unchanged', async () => {
+    const rejected = new Error('OFW API error: 403 Forbidden for POST /pub/v3/messages');
+    await expect(post(rejected)).rejects.toBe(rejected);
+    const limited = new Error('Rate limited by OFW API');
+    await expect(post(limited)).rejects.toBe(limited);
   });
 });

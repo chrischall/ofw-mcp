@@ -125,6 +125,42 @@ describe('extractXlsx', () => {
     expect((await extractXlsx(bytes)).sheets[0].csv).toBe(',2');
   });
 
+  it('drops a cell referenced beyond Excel\'s last column (XFD) instead of allocating billions of columns', async () => {
+    // DZZZZZZ is ~1.4e9 columns: before the cap this aborted the process with
+    // an uncatchable heap OOM while building the CSV row.
+    const bytes = makeXlsx({
+      sheets: [{
+        name: 'Hostile',
+        rows: xlsxSheetData([[{ ref: 'A1', v: '1' }, { ref: 'DZZZZZZ1', v: 'x' }, { ref: 'XFE1', v: 'y' }]]),
+      }],
+    });
+    const [sheet] = (await extractXlsx(bytes)).sheets;
+    expect(sheet.cols).toBe(1);
+    expect(sheet.csv).toBe('1');
+  });
+
+  it('keeps a cell in Excel\'s last real column (XFD)', async () => {
+    const bytes = makeXlsx({
+      sheets: [{ name: 'Edge', rows: xlsxSheetData([[{ ref: 'XFD1', v: 'z' }]]) }],
+    });
+    const [sheet] = (await extractXlsx(bytes)).sheets;
+    expect(sheet.cols).toBe(16_384);
+    expect(sheet.csv.endsWith(',z')).toBe(true);
+  });
+
+  it('stops at the rows x cols grid budget, so sparse wide rows cannot blow up the CSV', async () => {
+    // Every row has one cell in the last column: few cells, but a padded CSV
+    // grid of rows x 16384 fields.
+    const rows = Array.from({ length: 50 }, (_, i) => [{ ref: `XFD${i + 1}`, v: String(i) }]);
+    const bytes = makeXlsx({ sheets: [{ name: 'Sparse', rows: xlsxSheetData(rows) }] });
+    const out = await extractXlsx(bytes, { maxGridCells: 16_384 * 5 });
+    const [sheet] = out.sheets;
+    expect(sheet.rows).toBe(5);
+    expect(sheet.truncated).toBe(true);
+    expect(out.truncated).toBe(true);
+    expect(sheet.csv.split('\n')).toHaveLength(5);
+  });
+
   it('reports a row with no cells as an empty line', async () => {
     const bytes = makeXlsx({
       sheets: [{ name: 'Gap', rows: '<row r="1"><c r="A1"><v>1</v></c></row><row r="2"/>' }],
@@ -274,6 +310,17 @@ describe('extractDelimited', () => {
     expect(out.sheets[0].rows).toBe(3);
     expect(out.sheets[0].cols).toBe(2);
     expect(out.sheets[0].csv).toBe('a,b\n"x,1","he said ""hi"""\n"multi\nline",z');
+  });
+
+  it('stops at the rows x cols grid budget when one wide row would pad every other row', () => {
+    const text = `${','.repeat(99)}\n${'x\n'.repeat(50)}`;
+    const out = extractDelimited(text, 'wide.csv', ',', 100 * 5);
+    const [sheet] = out.sheets;
+    expect(sheet.cols).toBe(100);
+    expect(sheet.rows).toBe(5);
+    expect(sheet.truncated).toBe(true);
+    expect(out.truncated).toBe(true);
+    expect(sheet.csv.split('\n')).toHaveLength(5);
   });
 
   it('converts a TSV to CSV', () => {

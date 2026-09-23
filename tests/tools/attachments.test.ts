@@ -1,6 +1,10 @@
 import { describe, it, expect } from 'vitest';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   normalizeMimeType, sniffImageMime, resolveDownloadMime, isHostRenderableImage, mimeFromName,
+  NodeAttachmentIO,
 } from '../../src/tools/attachments.js';
 
 describe('normalizeMimeType', () => {
@@ -88,5 +92,21 @@ describe('mimeFromName (existing helper, sanity)', () => {
   it('maps known and unknown extensions', () => {
     expect(mimeFromName('a.png')).toBe('image/png');
     expect(mimeFromName('a.unknownext')).toBe('application/octet-stream');
+  });
+});
+
+describe('NodeAttachmentIO.writeDownload', () => {
+  it('rethrows a write failure that is not "already exists"', () => {
+    const root = mkdtempSync(join(tmpdir(), 'ofw-io-'));
+    const ro = join(root, 'ro');
+    mkdirSync(ro);
+    chmodSync(ro, 0o500);
+    try {
+      expect(() => new NodeAttachmentIO().writeDownload(join(ro, 'f.bin'), Buffer.from('x'), { root, overwrite: false }))
+        .toThrow(/EACCES/);
+    } finally {
+      chmodSync(ro, 0o700);
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

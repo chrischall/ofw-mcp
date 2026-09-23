@@ -39,6 +39,7 @@
         "OFW_PASSWORD": "${user_config.ofw_password}",
         "OFW_INLINE_ATTACHMENTS": "${user_config.ofw_inline_attachments}",
         "OFW_ATTACHMENTS_DIR": "${user_config.ofw_attachments_dir}",
+        "OFW_UPLOAD_DIR": "${user_config.ofw_upload_dir}",
         "OFW_WRITE_MODE": "${user_config.ofw_write_mode}",
         "OFW_CALENDAR_WRITES": "${user_config.ofw_calendar_writes}",
         "OFW_ALLOW_MARK_READ": "${user_config.ofw_allow_mark_read}",
@@ -70,7 +71,13 @@
     "ofw_attachments_dir": {
       "type": "directory",
       "title": "Attachments download directory",
-      "description": "Directory where ofw_download_attachment writes files when not returning inline. Defaults to ~/Downloads/ofw-mcp/. Pick a directory that is readable by your MCP host.",
+      "description": "Directory where ofw_download_attachment writes files when not returning inline. Defaults to ~/Downloads/ofw-mcp/. Pick a directory that is readable by your MCP host. Downloads can only be written inside it.",
+      "required": false
+    },
+    "ofw_upload_dir": {
+      "type": "directory",
+      "title": "Upload source directory",
+      "description": "The only directory ofw_upload_attachment may upload files from (hidden files excluded). Defaults to the attachments download directory. Put files you want to send to OurFamilyWizard here.",
       "required": false
     },
     "ofw_write_mode": {

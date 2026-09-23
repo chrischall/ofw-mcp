@@ -144,7 +144,7 @@ Read-only tools run automatically. Write tools ask for your confirmation first. 
 | `ofw_list_drafts` | Draft messages | Auto | any |
 | `ofw_save_draft` | Create or update a draft | Confirm | `drafts` |
 | `ofw_delete_draft` | Delete a draft | Confirm | `drafts` |
-| `ofw_upload_attachment` | Upload a local file to My Files; returns a fileId to attach via `ofw_send_message`/`ofw_save_draft` | Auto | `drafts` |
+| `ofw_upload_attachment` | Upload a local file from the upload directory (`OFW_UPLOAD_DIR`, default `~/Downloads/ofw-mcp`) to My Files; returns a fileId to attach via `ofw_send_message`/`ofw_save_draft`. Sharing (`shareClass: SHARED`) needs mode `all` | Auto | `drafts` |
 | `ofw_list_events` | Calendar events in a date range | Auto | any |
 | `ofw_create_event` | Create a calendar event | Confirm | `all` (or `drafts` + `OFW_CALENDAR_WRITES`) |
 | `ofw_update_event` | Update a calendar event | Confirm | `all` (or `drafts` + `OFW_CALENDAR_WRITES`) |
@@ -229,7 +229,7 @@ The "Confirm" permission above is a *hint* to the MCP host — a host configured
 | `OFW_WRITE_MODE` | What's available |
 |------------------|------------------|
 | `none` | Read/sync/search only. No write tools exist. |
-| `drafts` | Adds draft-level writes: `ofw_save_draft`, `ofw_delete_draft`, `ofw_upload_attachment`. Nothing that lands on the court-visible record — the AI prepares, only a human signed into the OFW web UI can send. |
+| `drafts` | Adds draft-level writes: `ofw_save_draft`, `ofw_delete_draft`, `ofw_upload_attachment` (PRIVATE only). Nothing that lands on the court-visible record — the AI prepares, only a human signed into the OFW web UI can send. |
 | `all` | Everything (the default — fully backward compatible). |
 
 Unrecognized values fail closed to `none`, with a warning on stderr — a typo never silently grants write access.
