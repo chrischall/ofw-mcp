@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.19.3](https://github.com/chrischall/ofw-mcp/compare/v2.19.2...v2.19.3) (2026-09-23)
+
+
+### Bug Fixes
+
+* close five medium audit findings (xlsx OOM, since/until offsets, unconfirmed sends, attachment path confinement) ([#325](https://github.com/chrischall/ofw-mcp/issues/325)) ([2998807](https://github.com/chrischall/ofw-mcp/commit/2998807804f37b90b683bb88180c6cac5a8b97c1))
+
 ## [2.19.2](https://github.com/chrischall/ofw-mcp/compare/v2.19.1...v2.19.2) (2026-09-23)
 
 
