@@ -18,9 +18,19 @@ export interface SpreadsheetOptions {
   select?: PartSelector;
   /** Cell ceiling per sheet — bounds memory on a workbook with huge sheets. */
   maxCells?: number;
+  /**
+   * Ceiling on the padded rows x cols grid the CSV is rendered from. The cell
+   * budget alone does not bound output: one cell per row in the last column
+   * still pads every row out to thousands of empty fields.
+   */
+  maxGridCells?: number;
 }
 
 const DEFAULT_MAX_CELLS = 200_000;
+const DEFAULT_MAX_GRID_CELLS = 2_000_000;
+
+/** Excel's hard sheet width: column XFD. A reference past it is malformed. */
+const MAX_COLUMNS = 16_384;
 
 // Built-in number formats that denote a date and/or time (ECMA-376 §18.8.30).
 const BUILTIN_DATE_FORMATS = new Set([14, 15, 16, 17, 18, 19, 20, 21, 22, 45, 46, 47]);
@@ -57,13 +67,18 @@ function isDateFormat(numFmtId: number, formatCode: string | undefined): boolean
   return /[ymdhs]/i.test(bare);
 }
 
-/** Column index (0-based) from a cell reference like `AA12`. */
+/**
+ * Column index (0-based) from a cell reference like `AA12`, or null when the
+ * reference has no column letters or points past Excel's last column (XFD).
+ * The bound matters: a crafted `DZZZZZZ1` would otherwise ask for ~1.4e9
+ * columns and the CSV build would die in an uncatchable heap OOM.
+ */
 function columnIndex(ref: string): number | null {
-  const m = /^([A-Z]+)/.exec(ref);
+  const m = /^([A-Z]{1,3})(?![A-Z])/.exec(ref);
   if (!m) return null;
   let index = 0;
   for (const ch of m[1]) index = index * 26 + (ch.charCodeAt(0) - 64);
-  return index - 1;
+  return index > MAX_COLUMNS ? null : index - 1;
 }
 
 /** Quote a CSV field per RFC 4180 when it contains a delimiter, quote or newline. */
@@ -142,7 +157,9 @@ function cellValue(attrs: string, inner: string, ctx: CellContext): string {
   }
 }
 
-function parseSheet(xml: string, name: string, ctx: CellContext, maxCells: number): SheetExtract {
+function parseSheet(
+  xml: string, name: string, ctx: CellContext, maxCells: number, maxGridCells: number,
+): SheetExtract {
   const rows: string[][] = [];
   let cols = 0;
   let cells = 0;
@@ -153,6 +170,7 @@ function parseSheet(xml: string, name: string, ctx: CellContext, maxCells: numbe
       break;
     }
     const values: string[] = [];
+    let rowCols = cols;
     for (const cell of elements(row.inner, 'c')) {
       const ref = attr(cell.attrs, 'r');
       const index = ref === null ? null : columnIndex(ref);
@@ -161,8 +179,14 @@ function parseSheet(xml: string, name: string, ctx: CellContext, maxCells: numbe
       if (index === null) continue;
       values[index] = cellValue(cell.attrs, cell.inner, ctx);
       cells++;
-      if (index + 1 > cols) cols = index + 1;
+      if (index + 1 > rowCols) rowCols = index + 1;
     }
+    // Stop before the padded grid the CSV is built from outgrows its budget.
+    if ((rows.length + 1) * rowCols > maxGridCells) {
+      truncated = true;
+      break;
+    }
+    cols = rowCols;
     rows.push(values);
   }
   return { name, rows: rows.length, cols, csv: toCsv(rows, cols), ...(truncated ? { truncated } : {}) };
@@ -187,6 +211,7 @@ export async function extractXlsx(
     date1904: /<workbookPr[^>]*date1904="(1|true)"/i.test(workbookXml),
   };
   const maxCells = opts.maxCells ?? DEFAULT_MAX_CELLS;
+  const maxGridCells = opts.maxGridCells ?? DEFAULT_MAX_GRID_CELLS;
 
   const sheets: SheetExtract[] = [];
   const omitted: string[] = [];
@@ -208,7 +233,7 @@ export async function extractXlsx(
       omitted.push(`${name} (sheet part not found in the workbook)`);
       continue;
     }
-    sheets.push(parseSheet(xml, name, ctx, maxCells));
+    sheets.push(parseSheet(xml, name, ctx, maxCells, maxGridCells));
   }
 
   const truncated = sheets.some((s) => s.truncated);
@@ -257,12 +282,18 @@ function parseDelimitedRows(text: string, delimiter: string): string[][] {
 
 /** Extract .csv/.tsv text as a single-sheet spreadsheet. */
 export function extractDelimited(
-  text: string, name: string, delimiter: string,
+  text: string, name: string, delimiter: string, maxGridCells = DEFAULT_MAX_GRID_CELLS,
 ): SpreadsheetExtract {
-  const rows = parseDelimitedRows(text, delimiter);
+  let rows = parseDelimitedRows(text, delimiter);
   const cols = rows.reduce((max, r) => Math.max(max, r.length), 0);
+  // Every row is padded to the widest one, so a single very wide line would
+  // otherwise multiply the output by the row count.
+  const keep = cols === 0 ? rows.length : Math.floor(maxGridCells / cols);
+  const truncated = rows.length > keep;
+  if (truncated) rows = rows.slice(0, keep);
   return {
     kind: 'spreadsheet',
-    sheets: [{ name, rows: rows.length, cols, csv: toCsv(rows, cols) }],
+    sheets: [{ name, rows: rows.length, cols, csv: toCsv(rows, cols), ...(truncated ? { truncated } : {}) }],
+    ...(truncated ? { truncated } : {}),
   };
 }
