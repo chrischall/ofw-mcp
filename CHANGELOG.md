@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.19.2](https://github.com/chrischall/ofw-mcp/compare/v2.19.1...v2.19.2) (2026-09-23)
+
+
+### Bug Fixes
+
+* **deps:** require zod ^4.6.5 to match @chrischall/mcp-utils 2.4.0 ([#324](https://github.com/chrischall/ofw-mcp/issues/324)) ([9385981](https://github.com/chrischall/ofw-mcp/commit/938598102a5763b0e0ac882a1ba55117aaf89e02))
+* **deps:** upgrade @chrischall/mcp-utils to 2.4.0 and @fetchproxy/* to 3.2.0 ([#322](https://github.com/chrischall/ofw-mcp/issues/322)) ([9227648](https://github.com/chrischall/ofw-mcp/commit/9227648a10915cad7324a5057e7413e0395b199c))
+
 ## [2.19.1](https://github.com/chrischall/ofw-mcp/compare/v2.19.0...v2.19.1) (2026-09-21)
 
 
