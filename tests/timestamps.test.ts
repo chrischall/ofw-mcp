@@ -6,6 +6,7 @@ import {
   isNaiveTimestamp,
   normalizeTimestampsInValue,
   parseTimestampValue,
+  toNaiveWallClock,
 } from '../src/timestamps.js';
 
 const ET = 'America/New_York';
@@ -236,5 +237,40 @@ describe('normalizeTimestampsInValue', () => {
     const out = normalizeTimestampsInValue({ timeZone: 'America/New_York', timezone: 'UTC' }, ET);
     expect(out.timeZone).toBe('America/New_York');
     expect(out.timezone).toBe('UTC');
+  });
+});
+
+describe('toNaiveWallClock', () => {
+  it('converts a Z instant to the naive wall clock OFW stores, in the display zone', () => {
+    expect(toNaiveWallClock('2026-07-28T02:00:00Z', ET)).toBe('2026-07-27T22:00:00');
+  });
+
+  it('converts an offset instant, keeping milliseconds when present', () => {
+    expect(toNaiveWallClock('2026-07-27T23:31:09-04:00', ET)).toBe('2026-07-27T23:31:09');
+    expect(toNaiveWallClock('2026-07-28T03:31:09.250Z', ET)).toBe('2026-07-27T23:31:09.250');
+  });
+
+  it('respects DST: a January instant is five hours behind UTC, not four', () => {
+    expect(toNaiveWallClock('2026-01-15T05:00:00Z', ET)).toBe('2026-01-15T00:00:00');
+  });
+
+  it('passes a naive value through in canonical form, since it is already wall clock', () => {
+    expect(toNaiveWallClock('2026-07-27 23:31', ET)).toBe('2026-07-27T23:31:00');
+    expect(toNaiveWallClock('2026-07-27T23:31:09.5', ET)).toBe('2026-07-27T23:31:09.500');
+  });
+
+  it('passes a bare date through untouched', () => {
+    expect(toNaiveWallClock(' 2026-07-27 ', ET)).toBe('2026-07-27');
+  });
+
+  it('returns null for something that is not a date', () => {
+    expect(toNaiveWallClock('yesterday', ET)).toBeNull();
+    expect(toNaiveWallClock('2026-13-40T00:00:00', ET)).toBeNull();
+    expect(toNaiveWallClock('2026-13-40T00:00:00Z', ET)).toBeNull();
+  });
+
+  it('defaults to the display zone', () => {
+    vi.stubEnv('DISPLAY_TZ', 'America/Los_Angeles');
+    expect(toNaiveWallClock('2026-07-28T02:00:00Z')).toBe('2026-07-27T19:00:00');
   });
 });

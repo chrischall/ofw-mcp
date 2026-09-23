@@ -268,6 +268,48 @@ export function parseTimestampValue(
   return null;
 }
 
+// Render an instant as the NAIVE wall clock OFW itself stores (no offset), in
+// `tz`. The inverse of how a naive source value is read above.
+function naiveWallClockOf(instant: Date, tz: string): string {
+  return isoWithOffset(instant, tz, '');
+}
+
+/**
+ * The current time as naive wall clock in the display zone — the fallback for a
+ * record OFW returned without a date. A UTC `...Z` there would mix two formats
+ * in one column and break every lexicographic since/until comparison on it.
+ */
+export function nowNaiveWallClock(tz = displayTimeZone()): string {
+  return naiveWallClockOf(new Date(), tz);
+}
+
+/**
+ * Convert a caller-supplied date bound to the form `sent_at` is stored in:
+ * OFW's naive local wall clock (`YYYY-MM-DDTHH:MM:SS[.mmm]`) in `tz`. An
+ * offset or `Z` value is converted as an instant; a naive value is already wall
+ * clock and is only canonicalised; a bare `YYYY-MM-DD` passes through, since it
+ * sorts correctly against the stored values as a prefix. Returns null for a
+ * value that is not a date, so it can be rejected instead of string-compared.
+ */
+export function toNaiveWallClock(value: string, tz = displayTimeZone()): string | null {
+  const raw = value.trim();
+  if (DATE_ONLY.test(raw)) return raw;
+  if (RFC3339_WITH_OFFSET.test(raw)) {
+    const instant = parseTimestampValue('', raw, tz);
+    return instant ? naiveWallClockOf(instant, tz) : null;
+  }
+  const naive = NAIVE_DATE_TIME.exec(raw);
+  if (!naive) return null;
+  const [, y, mo, d, h, mi, s, frac] = naive;
+  const parts = {
+    year: Number(y), month: Number(mo), day: Number(d),
+    hour: Number(h), minute: Number(mi), second: Number(s ?? '0'),
+  };
+  if (!isRealCalendarDate(parts)) return null;
+  const ms = frac ? `.${frac.padEnd(3, '0').slice(0, 3)}` : '';
+  return `${y}-${mo}-${d}T${h}:${mi}:${pad(parts.second)}${ms}`;
+}
+
 // True when a string carries no zone information — the shape this whole module
 // exists to eliminate. Used by the contract test.
 export function isNaiveTimestamp(value: unknown): boolean {

@@ -232,6 +232,44 @@ describe('ofw_list_messages (cache-backed)', () => {
     expect(parsed.total).toBe(1);
   });
 
+  it('compares an offset or Z since/until as an instant against the naive-local sent_at', async () => {
+    // OFW stores sent_at as naive Eastern wall clock. 23:31 ET on the 27th is
+    // 03:31Z on the 28th; a raw string compare against a Z bound dropped it.
+    upsertMessage({
+      id: 1, folder: 'inbox', subject: 'Late', fromUser: 'A',
+      sentAt: '2026-07-27T23:31:09', recipients: [], body: 'b',
+      fetchedBodyAt: null, replyToId: null, chainRootId: null, listData: {},
+    });
+    const client = new OFWClient();
+    setup(client);
+    const list = async (args: Record<string, unknown>) =>
+      JSON.parse((await handlers.get('ofw_list_messages')!({ folderId: 'inbox', ...args })).content[0].text);
+
+    // 22:00 ET on the 27th, written in UTC — the message is after it.
+    expect((await list({ since: '2026-07-28T02:00:00Z' })).total).toBe(1);
+    // The message's own sentAt, copied back out of a response (offset form).
+    expect((await list({ since: '2026-07-27T23:31:09-04:00' })).total).toBe(1);
+    // until is exclusive: the exact instant excludes it, one second later includes it.
+    // (An empty result from an unverified cache is refused, not reported as [];
+    // either way no message comes back.)
+    expect((await list({ until: '2026-07-28T03:31:09Z' })).messages ?? []).toHaveLength(0);
+    expect((await list({ until: '2026-07-28T03:31:10Z' })).total).toBe(1);
+  });
+
+  it('rejects a since/until that is not a date instead of string-comparing it', async () => {
+    const client = new OFWClient();
+    setup(client);
+    const result = await handlers.get('ofw_list_messages')!({ folderId: 'inbox', since: 'last tuesday' });
+    const parsed = JSON.parse(result.content[0].text);
+    expect(result.isError).toBe(true);
+    expect(parsed.result).toBe('INVALID_DATE');
+    expect(parsed.reason).toMatch(/since/);
+    expect(parsed.messages).toBeUndefined();
+
+    const bad = await handlers.get('ofw_list_messages')!({ folderId: 'inbox', until: 'soon' });
+    expect(JSON.parse(bad.content[0].text).reason).toMatch(/until/);
+  });
+
   it('sort:"oldest" makes a TRUNCATED page hold the oldest messages, not a reshuffled newest page', async () => {
     // 25 messages across a wide range, read 5 at a time. The point of the
     // parameter is which 5 you get — re-sorting the returned page would give
@@ -512,6 +550,17 @@ describe('ofw_get_message (cache-first)', () => {
     const parsed = JSON.parse(result.content[0].text);
     expect(parsed.body).toBe('fresh-body');
     expect(getMessage(42)?.body).toBe('fresh-body');
+  });
+
+  it('stores a naive-local sentAt, not a UTC Z value, when the detail carries no date', async () => {
+    const client = new OFWClient();
+    vi.spyOn(client, 'request').mockResolvedValueOnce({
+      id: 98, body: 'b', subject: 'Undated', from: { name: 'Alice' }, recipients: [],
+    });
+    setup(client);
+    await handlers.get('ofw_get_message')!({ messageId: '98' });
+    // Same shape as every OFW-supplied sent_at, so since/until compare it correctly.
+    expect(getMessage(98)?.sentAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3})?$/);
   });
 
   it('falls through to OFW when row is missing entirely', async () => {

@@ -6,6 +6,7 @@ import type {
 import { z } from 'zod';
 import { ApiRecipientSchema, hasRealView, mapRecipients, threadedReplyTo } from './tools/_shared.js';
 import { parseLenient } from '@chrischall/mcp-utils';
+import { nowNaiveWallClock } from './timestamps.js';
 
 // Each OFW message detail returns `files: [fileId, ...]`. We fetch the metadata
 // for each file id (cheap JSON call) so the model can see filenames/mime types
@@ -348,7 +349,7 @@ async function walkPages(
         folder,
         subject: item.subject ?? '(no subject)',
         fromUser: item.from?.name ?? '',
-        sentAt: item.date?.dateTime ?? new Date().toISOString(),
+        sentAt: item.date?.dateTime ?? nowNaiveWallClock(),
         recipients: mapRecipients(detailRecipients ?? item.recipients),
         body,
         fetchedBodyAt,
@@ -637,7 +638,7 @@ export async function syncDrafts(
       body: detail.body ?? '',
       recipients: mapRecipients(item.recipients),
       replyToId: threadedReplyTo(item),
-      modifiedAt: item.date?.dateTime ?? new Date().toISOString(),
+      modifiedAt: item.date?.dateTime ?? nowNaiveWallClock(),
       listData: item,
     });
   }

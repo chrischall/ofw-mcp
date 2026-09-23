@@ -26,6 +26,7 @@ import { parseLenient } from '@chrischall/mcp-utils';
 import { pageState } from './pagination.js';
 import { MESSAGE_VIEWS, viewDrafts, viewMessages, viewOne } from './project.js';
 import { resolveView, viewParam } from '@chrischall/mcp-utils';
+import { nowNaiveWallClock, toNaiveWallClock } from '../timestamps.js';
 
 // Schemas for the load-bearing fields of each /pub/v3 response this file
 // reads (issue #83). Loose: unknown keys pass through into cached listData.
@@ -320,8 +321,8 @@ export function registerMessageTools(
       folderId: z.string().describe('Folder name: "inbox", "sent", or "both" (default "both")').optional(),
       page: z.number().int().min(1).describe('Page number (default 1)').optional(),
       size: z.number().int().min(1).describe('Messages per page (default 50)').optional(),
-      since: z.string().describe('ISO date or datetime — only messages with sent_at >= since (inclusive)').optional(),
-      until: z.string().describe('ISO date or datetime — only messages with sent_at < until (exclusive)').optional(),
+      since: z.string().describe('ISO date or datetime — only messages with sent_at >= since (inclusive). A value with an offset or Z is compared as that instant; a naive value is read as the account\'s local time (DISPLAY_TZ)').optional(),
+      until: z.string().describe('ISO date or datetime — only messages with sent_at < until (exclusive). A value with an offset or Z is compared as that instant; a naive value is read as the account\'s local time (DISPLAY_TZ)').optional(),
       q: z.string().describe('Substring match on subject AND body (case-insensitive). Use to find messages on a specific topic.').optional(),
       sort: z.enum(['newest', 'oldest']).describe('Result order: "newest" (default, newest first) or "oldest" (oldest first). This decides which end a truncated page keeps — with "newest" page 1 of a wide date range holds its most RECENT slice, with "oldest" its earliest. Use "oldest" to start at the old end of a range instead of paging to it.').optional(),
       autoRefresh: z.boolean().describe(AUTO_REFRESH_DESC).optional(),
@@ -353,9 +354,31 @@ export function registerMessageTools(
       });
     }
 
+    // sent_at is stored as OFW's naive local wall clock, so the bounds are
+    // compared as strings. Convert an offset/Z bound to that same form first —
+    // a raw compare shifts the boundary by the UTC offset, which can move a
+    // late-evening message across a custody day. A bound that is not a date at
+    // all is refused rather than string-compared into a silently wrong slice.
+    const bounds: { since?: string; until?: string } = {};
+    for (const key of ['since', 'until'] as const) {
+      const value = args[key];
+      if (value === undefined) continue;
+      const converted = toNaiveWallClock(value);
+      if (converted === null) {
+        return jsonErrorResponse({
+          result: 'INVALID_DATE',
+          reason: `${key} must be an ISO date (YYYY-MM-DD) or datetime, optionally with an offset or Z (got ${JSON.stringify(value)}).`,
+          remedy: `Re-call with ${key} as e.g. "2026-07-27" or "2026-07-27T22:00:00-04:00".`,
+          complete: false,
+          note: 'No lookup was performed. This says NOTHING about what is in the cache — do not read it as "no messages".',
+        });
+      }
+      bounds[key] = converted;
+    }
+
     const cache = cacheProvider();
     const folders: FolderName[] = folder === undefined ? ['inbox', 'sent'] : [folder];
-    const filter = { folder, since: args.since, until: args.until, q: args.q };
+    const filter = { folder, since: bounds.since, until: bounds.until, q: args.q };
 
     const { value, refreshed, unverifiedEmpty } = await guardedCacheRead({
       client,
@@ -609,7 +632,7 @@ export function registerMessageTools(
       folder,
       subject: detail.subject,
       fromUser: detail.from?.name ?? '',
-      sentAt: detail.date?.dateTime ?? new Date().toISOString(),
+      sentAt: detail.date?.dateTime ?? nowNaiveWallClock(),
       recipients: mapRecipients(detail.recipients),
       body: detail.body ?? '',
       fetchedBodyAt: new Date().toISOString(),
@@ -796,7 +819,7 @@ export function registerMessageTools(
         folder: 'sent',
         subject: detail.subject ?? subject,
         fromUser: detail.from?.name ?? '',
-        sentAt: detail.date?.dateTime ?? new Date().toISOString(),
+        sentAt: detail.date?.dateTime ?? nowNaiveWallClock(),
         recipients: storedRecipients,
         body: detail.body ?? body,
         fetchedBodyAt: new Date().toISOString(),
@@ -1224,7 +1247,7 @@ export function registerMessageTools(
         body: detail.body ?? '',
         recipients: storedRecipients,
         replyToId: effectiveReplyTo,
-        modifiedAt: detail.date?.dateTime ?? new Date().toISOString(),
+        modifiedAt: detail.date?.dateTime ?? nowNaiveWallClock(),
         listData: detail,
       };
       await cache.upsertDraft(persisted);
