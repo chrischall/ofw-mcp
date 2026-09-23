@@ -15,12 +15,12 @@ import type { CacheStore, MessageRow, DraftRow, FolderName } from '../cache/stor
 import { getFolderVerifiedAt } from '../sync.js';
 import type { AttachmentIO } from './attachments.js';
 import { buildInlineDelivery, tryExtract } from './delivery.js';
-import { resolveDownloadMime } from './attachments.js';
+import { isWithin, resolveDownloadMime } from './attachments.js';
 import {
   getAllowMarkRead, getAttachmentsDir, getAutoRefreshStaleReads, getDefaultInlineAttachments,
   getFetchUnreadBodies, getSyncMaxRequests, getWriteMode,
 } from '../config.js';
-import { basename, join } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 import { ApiRecipientSchema, deriveRead, expandPath, hasRealView, jsonErrorResponse, jsonResponse, mapRecipients, postMessageAndRefetch, reportsThreaded, UnconfirmedWriteError, reportsUnthreaded, textResponse, threadedReplyTo, verifyWriteLanded, withReadState } from './_shared.js';
 import { parseLenient } from '@chrischall/mcp-utils';
 import { pageState } from './pagination.js';
@@ -1571,13 +1571,13 @@ export function registerMessageTools(
   });
 
   server.registerTool('ofw_download_attachment', {
-    description: 'Download an OFW message attachment by fileId and return content you can actually read. Inline delivery walks a ladder and returns the first rung that works: (1) host-renderable images (PNG/JPEG/GIF/WEBP) come back as ImageContent; (2) .xlsx/.csv/.tsv, .pdf, .docx, .pptx and text files come back as EXTRACTED CONTENT — per-sheet CSV, per-page/slide text, document text — in the response JSON under `extracted`; (3) anything else comes back as an EmbeddedResource blob of the raw bytes. The meta block names the rung as `deliveredVia` and, when it falls through to bytes, lists what was tried in `deliveryAttempts`. Reported mime types are always normalized to a bare media type (no charset/name parameters). In disk mode the bytes are saved to ~/Downloads/ofw-mcp/ and the response carries the absolute path; pass extract:true to ALSO get the extracted content in that response. The default for `inline` can be flipped server-side via the OFW_INLINE_ATTACHMENTS env var. On a hosted deployment with no filesystem, disk mode is unavailable, so inline is forced (forcedInline:true) rather than failing — a saveTo path never costs you the content. fileId comes from attachments[].fileId on ofw_get_message. Override disk destination with OFW_ATTACHMENTS_DIR or saveTo. Re-downloading to the same path is a no-op (disk mode only).',
-    annotations: { readOnlyHint: true },
+    description: 'Download an OFW message attachment by fileId and return content you can actually read. Inline delivery walks a ladder and returns the first rung that works: (1) host-renderable images (PNG/JPEG/GIF/WEBP) come back as ImageContent; (2) .xlsx/.csv/.tsv, .pdf, .docx, .pptx and text files come back as EXTRACTED CONTENT — per-sheet CSV, per-page/slide text, document text — in the response JSON under `extracted`; (3) anything else comes back as an EmbeddedResource blob of the raw bytes. The meta block names the rung as `deliveredVia` and, when it falls through to bytes, lists what was tried in `deliveryAttempts`. Reported mime types are always normalized to a bare media type (no charset/name parameters). In disk mode the bytes are saved to ~/Downloads/ofw-mcp/ and the response carries the absolute path; pass extract:true to ALSO get the extracted content in that response. The default for `inline` can be flipped server-side via the OFW_INLINE_ATTACHMENTS env var. On a hosted deployment with no filesystem, disk mode is unavailable, so inline is forced (forcedInline:true) rather than failing — a saveTo path never costs you the content. fileId comes from attachments[].fileId on ofw_get_message. Override disk destination with OFW_ATTACHMENTS_DIR or saveTo; saveTo must stay inside the attachments directory, and an existing file is never overwritten unless force:true. Re-downloading to the same path is a no-op (disk mode only).',
+    annotations: { readOnlyHint: false, destructiveHint: false },
     inputSchema: z.object({
       fileId: z.number().describe('Attachment file id (from ofw_get_message → attachments[].fileId)'),
       inline: z.boolean().describe('If true, return content inline as MCP content blocks and skip the disk write. If false, write to disk and return the path — except on a hosted deployment with no filesystem, where inline is forced (forcedInline:true) so the content is still returned. If omitted, falls back to the OFW_INLINE_ATTACHMENTS env var (default: false = disk).').optional(),
-      saveTo: z.string().describe('Absolute path or directory to write to. If a directory, the OFW filename is used. Default: ~/Downloads/ofw-mcp/<fileId>-<filename>. Ignored when inline is in effect.').optional(),
-      force: z.boolean().describe('Re-download even if already on disk. Default false. Ignored when inline:true (inline always fetches fresh bytes, or reuses an on-disk copy if present).').optional(),
+      saveTo: z.string().describe('Path or directory to write to, INSIDE the attachments directory (OFW_ATTACHMENTS_DIR, default ~/Downloads/ofw-mcp); a relative path is resolved against it and anything outside it is refused. If a directory (trailing /), the OFW filename is used. Default: <attachments dir>/<fileId>-<filename>. An existing file is not overwritten unless force:true. Ignored when inline is in effect.').optional(),
+      force: z.boolean().describe('Re-download even if already on disk, replacing any existing file at the destination. Default false. Ignored when inline:true (inline always fetches fresh bytes, or reuses an on-disk copy if present).').optional(),
       extract: z.boolean().describe('Whether to extract readable content from the file. Default: on for inline delivery of any non-image type, off in disk mode. Set false to get the raw bytes inline instead of extracted text (e.g. to hash or re-upload the file); set true in disk mode to get both the saved path and the extracted content.').optional(),
       maxChars: z.number().int().min(500).max(500_000).describe('Ceiling on extracted characters (default 50000). Over it, content is clipped on a row/line boundary, `truncated` is set, and anything dropped whole is listed in `extracted.omitted`.').optional(),
       parts: z.string().describe('Which sheets / slides / pages to extract, e.g. "1-3,5" (1-based positions) or a sheet name like "2026". A bare number matches either a position or a name. Omit for everything. Unselected parts are listed in `extracted.omitted`.').optional(),
@@ -1635,13 +1635,23 @@ export function registerMessageTools(
     // into a path so a crafted `../…` name can't escape the target directory
     // (the upload path at :549 already applies basename to its input).
     const safeName = basename(cached.fileName);
+    // Every disk write is confined to the attachments directory. The bytes are
+    // co-parent-controlled, so a saveTo like ~/.zshrc or a LaunchAgents plist
+    // — reachable through an instruction injected into a message body — must
+    // be impossible, not merely discouraged.
+    const root = resolve(getAttachmentsDir());
     if (args.saveTo) {
       // Treat saveTo as a directory if it ends with a separator; otherwise as a full path.
       const isDirArg = args.saveTo.endsWith('/') || args.saveTo.endsWith('\\');
-      const abs = expandPath(args.saveTo);
+      // expandPath resolves a relative path against the process cwd; resolve
+      // it against the attachments dir instead, and only expand a leading ~.
+      const abs = resolve(root, args.saveTo.startsWith('~') ? expandPath(args.saveTo) : args.saveTo);
       dest = isDirArg ? join(abs, `${fileId}-${safeName}`) : abs;
+      if (!isWithin(root, dest)) {
+        throw new Error(`Refusing to save to ${dest}: it is outside the attachments directory (${root}). Downloads can only be written inside it — pass a path or subdirectory under it, or set OFW_ATTACHMENTS_DIR to move it.`);
+      }
     } else {
-      dest = join(getAttachmentsDir(), `${fileId}-${safeName}`);
+      dest = join(root, `${fileId}-${safeName}`);
     }
 
     // Disk mode extracts only on request: the caller already has a real file to
@@ -1667,7 +1677,7 @@ export function registerMessageTools(
     }
 
     const response = await client.requestBinary('GET', `/pub/v1/myfiles/${fileId}/data`);
-    attachmentIO.writeDownload(dest, response.body);
+    attachmentIO.writeDownload(dest, response.body, { root, overwrite: args.force === true });
     await cache.markAttachmentDownloaded(fileId, dest);
 
     const fileName = response.suggestedFileName ?? cached.fileName;
