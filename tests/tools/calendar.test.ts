@@ -374,6 +374,26 @@ describe('calendar writes — confirmation gate (SEC-2)', () => {
     });
   });
 
+  it('update preview: names come only from OFW\'s own detail — an unnamed or untagged person is null, never guessed', async () => {
+    const detail = {
+      ...SHARED_EVENT,
+      notes: 'Bring the forms',
+      children: null,
+      eventParent: { userId: 111, name: 'Parent One' },
+      dropOffParent: { userId: 222 }, // OFW gave no name
+      pickUpParent: null,
+    };
+    const client = new OFWClient();
+    vi.spyOn(client, 'request').mockResolvedValue(detail);
+    setup(client);
+    const preview = await callPreview(handlers.get('ofw_update_event')! as GatedHandler, { eventId: '5', pickUpParentId: 333, allDay: true });
+    expect(preview.preview).toMatchObject({
+      before: { notes: 'Bring the forms', eventParent: { userId: 111, name: 'Parent One' }, dropOffParent: { userId: 222, name: null } },
+      after: { allDay: true, pickUpParent: { userId: 333, name: null } },
+    });
+    expect((preview.preview.before as Record<string, unknown>).children).toBeUndefined();
+  });
+
   it('update: an event the co-parent edited between preview and confirmation is refused — no PUT', async () => {
     const client = new OFWClient();
     const spy = vi.spyOn(client, 'request')

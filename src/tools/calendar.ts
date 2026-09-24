@@ -134,7 +134,7 @@ const PRIVATE = 'private (only you)';
  * reported with `name: null` — never an invented one.
  */
 function describeEvent(a: EventWriteArgs, names: ReadonlyMap<number, string> = new Map()): Record<string, unknown> {
-  const who = (id: number | undefined) => (id === undefined ? undefined : { userId: id, name: names.get(id) ?? null });
+  const who = (id: number) => ({ userId: id, name: names.get(id) ?? null });
   const out: Record<string, unknown> = {
     title: a.title,
     startDate: a.startDate,
