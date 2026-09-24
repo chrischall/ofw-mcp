@@ -1,9 +1,11 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { McpServer } from '@modelcontextprotocol/server';
 import { OFWClient } from '../../src/client.js';
+import { z } from 'zod';
 import { registerCalendarTools } from '../../src/tools/calendar.js';
+import { CAN_ASK_CTX, NO_ELICIT_CTX, callConfirmed, callPreview, type GatedHandler } from './_confirm-helpers.js';
 
-type ToolHandler = (args: Record<string, unknown>) => Promise<{ content: Array<{ type: string; text: string }> }>;
+type ToolHandler = (args: Record<string, unknown>, ctx?: unknown) => Promise<{ content: Array<{ type: string; text: string }>; isError?: boolean; resultType?: string }>;
 
 let server: McpServer;
 let handlers: Map<string, ToolHandler>;
@@ -104,7 +106,7 @@ describe('ofw_create_event', () => {
     const client = makeClient(EVENT_DETAIL);
     setup(client);
     const handler = handlers.get('ofw_create_event')!;
-    await handler({
+    await callConfirmed(handler as GatedHandler, {
       title: 'Camp drop-off',
       startDate: '2026-07-20',
       endDate: '2026-07-21',
@@ -135,7 +137,7 @@ describe('ofw_create_event', () => {
     const client = makeClient(EVENT_DETAIL);
     setup(client);
     const handler = handlers.get('ofw_create_event')!;
-    await handler({ title: 'Solo errand', startDate: '2026-07-20', allDay: true, children: [] });
+    await callConfirmed(handler as GatedHandler, { title: 'Solo errand', startDate: '2026-07-20', allDay: true, children: [] });
     expect(client.request).toHaveBeenCalledWith('POST', '/pub/v3/events', expect.objectContaining({
       children: [],
     }));
@@ -145,7 +147,7 @@ describe('ofw_create_event', () => {
     const client = makeClient(EVENT_DETAIL);
     setup(client);
     const handler = handlers.get('ofw_create_event')!;
-    await handler({ title: 'Holiday', startDate: '2026-12-25', allDay: true });
+    await callConfirmed(handler as GatedHandler, { title: 'Holiday', startDate: '2026-12-25', allDay: true });
     expect(client.request).toHaveBeenCalledWith('POST', '/pub/v3/events', expect.objectContaining({
       allDay: true,
       startTime: '01:00',
@@ -166,7 +168,7 @@ describe('ofw_create_event', () => {
     const client = makeClient({ whatever: true });
     setup(client);
     const handler = handlers.get('ofw_create_event')!;
-    await expect(handler({ title: 'X', startDate: '2026-07-11', allDay: true }))
+    await expect(callConfirmed(handler as GatedHandler, { title: 'X', startDate: '2026-07-11', allDay: true }))
       .rejects.toThrow(/Unexpected POST \/pub\/v3\/events shape from the upstream API/);
   });
 });
@@ -212,12 +214,15 @@ describe('ofw_update_event', () => {
     };
     const client = new OFWClient();
     const spy = vi.spyOn(client, 'request')
-      .mockResolvedValueOnce(populated)
+      .mockResolvedValueOnce(populated) // phase 1 (preview) read
+      .mockResolvedValueOnce(populated) // phase 2 re-read
       .mockResolvedValueOnce(undefined)
       .mockResolvedValueOnce(populated);
     setup(client);
     const handler = handlers.get('ofw_update_event')!;
-    await handler({ eventId: '128246904', startTime: '10:00', endTime: '10:30' });
+    // A shared event: the change reaches the co-parent's calendar, so it is
+    // confirmed first.
+    await callConfirmed(handler as GatedHandler, { eventId: '128246904', startTime: '10:00', endTime: '10:30' });
     expect(spy).toHaveBeenNthCalledWith(2, 'PUT', '/pub/v3/events/128246904', expect.objectContaining({
       startTime: '10:00',
       endTime: '10:30',
@@ -301,20 +306,166 @@ describe('ofw_update_event', () => {
 
 describe('ofw_delete_event', () => {
   it('deletes /pub/v3/events/{id} with includeFuture=false by default', async () => {
-    const client = makeClient(undefined);
+    const client = new OFWClient();
+    vi.spyOn(client, 'request').mockResolvedValueOnce(EVENT_DETAIL).mockResolvedValueOnce(undefined);
     setup(client);
     const handler = handlers.get('ofw_delete_event')!;
     const result = await handler({ eventId: '128246904' });
-    expect(client.request).toHaveBeenCalledWith('DELETE', '/pub/v3/events/128246904?includeFuture=false');
+    expect(client.request).toHaveBeenNthCalledWith(1, 'GET', '/pub/v3/events/128246904');
+    expect(client.request).toHaveBeenNthCalledWith(2, 'DELETE', '/pub/v3/events/128246904?includeFuture=false');
     expect(result.content[0].text).toContain('128246904');
   });
 
   it('passes includeFuture=true for repeating events', async () => {
-    const client = makeClient(undefined);
+    const client = new OFWClient();
+    vi.spyOn(client, 'request').mockResolvedValueOnce(EVENT_DETAIL).mockResolvedValueOnce(undefined);
     setup(client);
     const handler = handlers.get('ofw_delete_event')!;
     await handler({ eventId: '55', includeFuture: true });
     expect(client.request).toHaveBeenCalledWith('DELETE', '/pub/v3/events/55?includeFuture=true');
+  });
+});
+
+const SHARED_EVENT = {
+  ...EVENT_DETAIL,
+  title: 'Pickup swap',
+  publicFlag: true,
+  location: 'School',
+  children: [{ userId: 2737713, name: 'Child A' }],
+};
+
+describe('calendar writes — confirmation gate (SEC-2)', () => {
+  it('create: a SHARED event previews title/date/time/visibility and posts nothing', async () => {
+    const client = makeClient(EVENT_DETAIL);
+    setup(client);
+    const preview = await callPreview(handlers.get('ofw_create_event')! as GatedHandler, {
+      title: 'Pickup swap', startDate: '2026-07-20', startTime: '15:00', endTime: '15:30', location: 'School',
+    });
+    expect(client.request).not.toHaveBeenCalled();
+    expect(preview.preview).toMatchObject({
+      event: { title: 'Pickup swap', startDate: '2026-07-20', startTime: '15:00', endTime: '15:30', location: 'School', visibility: 'shared with co-parent' },
+    });
+  });
+
+  it('create: a PRIVATE event is not gated (the co-parent never sees it)', async () => {
+    const client = makeClient(EVENT_DETAIL);
+    setup(client);
+    await handlers.get('ofw_create_event')!({ title: 'Dentist', startDate: '2026-07-11', startTime: '09:00', endTime: '09:15', privateEvent: true }, NO_ELICIT_CTX);
+    expect(client.request).toHaveBeenCalledWith('POST', '/pub/v3/events', expect.anything());
+  });
+
+  it('create: a client that can be prompted gets the real prompt', async () => {
+    const client = makeClient(EVENT_DETAIL);
+    setup(client);
+    const result = await handlers.get('ofw_create_event')!({ title: 'X', startDate: '2026-07-11', allDay: true }, CAN_ASK_CTX);
+    expect(result.resultType).toBe('input_required');
+    expect(client.request).not.toHaveBeenCalled();
+  });
+
+  it('update: a shared event previews before/after with names, and no PUT happens on phase 1', async () => {
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request').mockResolvedValue(SHARED_EVENT);
+    setup(client);
+    const preview = await callPreview(handlers.get('ofw_update_event')! as GatedHandler, { eventId: '128246904', startTime: '16:00', endTime: '16:30' });
+    expect(spy.mock.calls.map((c) => c[0])).toEqual(['GET']);
+    expect(preview.preview).toMatchObject({
+      before: { title: 'Pickup swap', startTime: '09:00', visibility: 'shared with co-parent', children: [{ userId: 2737713, name: 'Child A' }] },
+      after: { title: 'Pickup swap', startTime: '16:00', endTime: '16:30' },
+    });
+  });
+
+  it('update: an event the co-parent edited between preview and confirmation is refused — no PUT', async () => {
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request')
+      .mockResolvedValueOnce(SHARED_EVENT)
+      .mockResolvedValueOnce({ ...SHARED_EVENT, notes: 'Co-parent: I will be late' });
+    setup(client);
+    const handler = handlers.get('ofw_update_event')!;
+    const args = { eventId: '128246904', title: 'Pickup swap (moved)' };
+    const { confirmToken } = await callPreview(handler as GatedHandler, args);
+    const result = await handler({ ...args, confirmToken }, NO_ELICIT_CTX);
+    expect(result.isError).toBe(true);
+    expect(JSON.parse(result.content[0].text)).toMatchObject({ error: 'DRAFT_CHANGED', dispatched: false });
+    expect(spy.mock.calls.map((c) => c[0])).toEqual(['GET', 'GET']);
+  });
+
+  it('update: making a private event shared is gated', async () => {
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request').mockResolvedValue(EVENT_DETAIL);
+    setup(client);
+    const preview = await callPreview(handlers.get('ofw_update_event')! as GatedHandler, { eventId: '1', privateEvent: false });
+    expect(preview.preview).toMatchObject({ after: { visibility: 'shared with co-parent' } });
+    expect(spy.mock.calls.map((c) => c[0])).toEqual(['GET']);
+  });
+
+  it('delete: a shared event previews what is removed and deletes nothing on phase 1', async () => {
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request').mockResolvedValue(SHARED_EVENT);
+    setup(client);
+    const preview = await callPreview(handlers.get('ofw_delete_event')! as GatedHandler, { eventId: '128246904', includeFuture: true });
+    expect(spy.mock.calls.map((c) => c[0])).toEqual(['GET']);
+    expect(preview.preview).toMatchObject({ event: { title: 'Pickup swap', startDate: '2026-07-11' }, includeFuture: true });
+  });
+
+  it('delete: phase 2 against an event that changed since the preview is refused', async () => {
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request')
+      .mockResolvedValueOnce(SHARED_EVENT)
+      .mockResolvedValueOnce({ ...SHARED_EVENT, title: 'Pickup swap — CONFIRMED by co-parent' });
+    setup(client);
+    const handler = handlers.get('ofw_delete_event')!;
+    const { confirmToken } = await callPreview(handler as GatedHandler, { eventId: '9' });
+    const result = await handler({ eventId: '9', confirmToken }, NO_ELICIT_CTX);
+    expect(JSON.parse(result.content[0].text)).toMatchObject({ error: 'DRAFT_CHANGED', dispatched: false });
+    expect(spy.mock.calls.map((c) => c[0])).toEqual(['GET', 'GET']);
+  });
+
+  it('delete: phase 2 with the token deletes exactly once', async () => {
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request')
+      .mockResolvedValueOnce(SHARED_EVENT)
+      .mockResolvedValueOnce(SHARED_EVENT)
+      .mockResolvedValueOnce(undefined);
+    setup(client);
+    const result = await callConfirmed(handlers.get('ofw_delete_event')! as GatedHandler, { eventId: '9' }, { clearMocks: false });
+    expect(spy.mock.calls.map((c) => c[0])).toEqual(['GET', 'GET', 'DELETE']);
+    expect(result.content[0].text).toContain('deleted');
+  });
+
+  it('declares confirmToken on every calendar write and does not advertise create as harmless', () => {
+    const s = new McpServer({ name: 'test', version: '0.0.0' });
+    const configs = new Map<string, { annotations?: Record<string, unknown>; inputSchema?: z.ZodObject; description: string }>();
+    vi.spyOn(s, 'registerTool').mockImplementation((name: string, config: unknown) => {
+      configs.set(name, config as { annotations?: Record<string, unknown>; inputSchema?: z.ZodObject; description: string });
+      return undefined as never;
+    });
+    registerCalendarTools(s, new OFWClient());
+    for (const name of ['ofw_create_event', 'ofw_update_event', 'ofw_delete_event']) {
+      expect(configs.get(name)!.inputSchema!.shape).toHaveProperty('confirmToken');
+      expect(configs.get(name)!.description).toMatch(/MCP_CONFIRM_MODE/);
+    }
+    expect(configs.get('ofw_create_event')!.annotations).toMatchObject({ readOnlyHint: false, openWorldHint: true });
+  });
+});
+
+describe('ofw_create_event — unconfirmed outcome (BUG-2)', () => {
+  it('a POST that times out returns EVENT_UNCONFIRMED telling the caller NOT to retry', async () => {
+    const client = new OFWClient();
+    vi.spyOn(client, 'request').mockRejectedValue(new Error('OFW API request timed out after 30000ms: POST /pub/v3/events'));
+    setup(client);
+    const result = await handlers.get('ofw_create_event')!({ title: 'Dentist', startDate: '2026-07-11', allDay: true, privateEvent: true });
+    expect(result.isError).toBe(true);
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.result).toBe('EVENT_UNCONFIRMED');
+    expect(parsed.remedy).toMatch(/ofw_list_events/);
+  });
+
+  it('a definitive 409 rejection stays a plain error', async () => {
+    const client = new OFWClient();
+    vi.spyOn(client, 'request').mockRejectedValue(new Error('OFW API error: 409 Conflict for POST /pub/v3/events'));
+    setup(client);
+    await expect(handlers.get('ofw_create_event')!({ title: 'D', startDate: '2026-07-11', allDay: true, privateEvent: true }))
+      .rejects.toThrow(/409/);
   });
 });
 

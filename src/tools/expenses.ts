@@ -1,7 +1,8 @@
 import { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import type { OFWClient } from '../client.js';
-import { jsonResponse } from './_shared.js';
+import { jsonResponse, requestWrite, UnconfirmedWriteError, unconfirmedWriteResponse } from './_shared.js';
+import { CONFIRM_NOTE, confirmTokenParam, confirmWrite } from './_confirm.js';
 import { offsetState, readUpstreamPaging, withPaginationFirst } from './pagination.js';
 import { getWriteMode } from '../config.js';
 
@@ -49,14 +50,44 @@ export function registerExpenseTools(server: McpServer, client: OFWClient): void
   });
 
   if (allowWrites) server.registerTool('ofw_create_expense', {
-    description: 'Log a new expense in OurFamilyWizard',
-    annotations: { destructiveHint: false },
+    description: 'Log a new expense in OurFamilyWizard. The expense is a money claim that appears in the shared ledger in front of the co-parent immediately, and this server cannot delete it. If the request fails without a definitive answer the result is EXPENSE_UNCONFIRMED: the expense may already exist, so do NOT retry until ofw_list_expenses shows it did not land. ' + CONFIRM_NOTE,
+    // Not a harmless local write: the claim is co-parent-visible at once and
+    // this server has no way to take it back. destructiveHint keeps a host
+    // that auto-approves "non-destructive" tools from running it silently.
+    annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
     inputSchema: z.object({
       amount: z.number().describe('Expense amount'),
       description: z.string().describe('Expense description'),
+      confirmToken: confirmTokenParam,
     }),
-  }, async (args) => {
-    const data = await client.request('POST', '/pub/v2/expense/expenses', args);
+  }, async (args, ctx) => {
+    const { confirmToken, ...payload } = args;
+    const gate = await confirmWrite(ctx, {
+      tool: 'ofw_create_expense',
+      action: 'ofw.expense.create',
+      message: 'Review and confirm this OurFamilyWizard expense. It is logged in the shared ledger the co-parent sees immediately, and cannot be deleted through this server.',
+      target: 'expense:new',
+      payload,
+      preview: {
+        action: 'Log OurFamilyWizard expense',
+        amount: payload.amount,
+        description: payload.description,
+        warning: 'Visible to the co-parent immediately as a claim in the shared expense ledger; part of the court-visible record.',
+      },
+      confirmToken,
+    });
+    if (gate) return gate;
+    let data: unknown;
+    try {
+      data = await requestWrite(client, 'POST', '/pub/v2/expense/expenses', payload);
+    } catch (e) {
+      if (!(e instanceof UnconfirmedWriteError)) throw e;
+      return unconfirmedWriteResponse(e, {
+        result: 'EXPENSE_UNCONFIRMED',
+        what: 'log this expense',
+        checkWith: 'ofw_list_expenses (look for this amount and description among the newest expenses)',
+      });
+    }
     return jsonResponse(data);
   });
 }

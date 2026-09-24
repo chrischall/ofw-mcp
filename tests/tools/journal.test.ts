@@ -92,6 +92,25 @@ describe('ofw_create_journal_entry', () => {
     expect(result.content).toHaveLength(1);
     expect(result.content[0].type).toBe('text');
   });
+
+  it('a POST that times out returns JOURNAL_UNCONFIRMED telling the caller NOT to retry (BUG-2)', async () => {
+    const client = new OFWClient();
+    vi.spyOn(client, 'request').mockRejectedValue(new Error('OFW API request timed out after 30000ms: POST /pub/v1/journals'));
+    setup(client);
+    const result = await handlers.get('ofw_create_journal_entry')!({ title: 'Today', body: 'Good day' }) as { content: Array<{ text: string }>; isError?: boolean };
+    expect(result.isError).toBe(true);
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.result).toBe('JOURNAL_UNCONFIRMED');
+    expect(parsed.mayHaveLanded).toBe(true);
+    expect(parsed.remedy).toMatch(/ofw_list_journal_entries/);
+  });
+
+  it('a definitive 4xx rejection stays a plain error', async () => {
+    const client = new OFWClient();
+    vi.spyOn(client, 'request').mockRejectedValue(new Error('OFW API error: 422 Unprocessable Entity for POST /pub/v1/journals'));
+    setup(client);
+    await expect(handlers.get('ofw_create_journal_entry')!({ title: 'T', body: 'B' })).rejects.toThrow(/422/);
+  });
 });
 
 

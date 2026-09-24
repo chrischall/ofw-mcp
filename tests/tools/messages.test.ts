@@ -2473,13 +2473,64 @@ describe('ofw_upload_attachment', () => {
     const filePath = join(dir, 'a.pdf');
     writeFileSync(filePath, 'PDF.');
     try {
-      await handlers.get('ofw_upload_attachment')!({
+      await callConfirmed(handlers.get('ofw_upload_attachment')!, {
         path: filePath, shareClass: 'SHARED', label: 'May invoice', description: 'Itemized invoice for May',
       });
       const form = reqSpy.mock.calls[0][2] as FormData;
       expect(form.get('shareClass')).toBe('SHARED');
       expect(form.get('label')).toBe('May invoice');
       expect(form.get('description')).toBe('Itemized invoice for May');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('SHARED (SEC-2): phase 1 previews the file name, size and sharing and uploads NOTHING', async () => {
+    const client = new OFWClient();
+    const reqSpy = vi.spyOn(client, 'request').mockResolvedValue({ fileId: 1, fileName: 'a.pdf', shareClass: 'SHARED' });
+    setup(client);
+    const dir = mkdtempSync(join(tmpDir, 'ofw-up-'));
+    const filePath = join(dir, 'school-form.pdf');
+    writeFileSync(filePath, 'PDF.');
+    try {
+      const preview = await callPreview(handlers.get('ofw_upload_attachment')!, { path: filePath, shareClass: 'SHARED', label: 'School form' });
+      expect(reqSpy).not.toHaveBeenCalled();
+      expect(preview.preview).toMatchObject({ fileName: 'school-form.pdf', sizeBytes: 4, label: 'School form', shareClass: 'SHARED' });
+      expect(JSON.stringify(preview.preview)).toMatch(/co-parent/i);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('SHARED: a file whose CONTENT changed between preview and confirmation is refused', async () => {
+    const client = new OFWClient();
+    const reqSpy = vi.spyOn(client, 'request').mockResolvedValue({ fileId: 1, fileName: 'a.pdf', shareClass: 'SHARED' });
+    setup(client);
+    const dir = mkdtempSync(join(tmpDir, 'ofw-up-'));
+    const filePath = join(dir, 'a.pdf');
+    writeFileSync(filePath, 'v1..');
+    try {
+      const handler = handlers.get('ofw_upload_attachment')!;
+      const { confirmToken } = await callPreview(handler, { path: filePath, shareClass: 'SHARED' });
+      writeFileSync(filePath, 'v2..'); // same name, same size, different bytes
+      const result = await handler({ path: filePath, shareClass: 'SHARED', confirmToken }, NO_ELICIT_CTX);
+      expect(JSON.parse(result.content[0].text)).toMatchObject({ error: 'DRAFT_CHANGED', dispatched: false });
+      expect(reqSpy).not.toHaveBeenCalled();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('PRIVATE uploads are not gated', async () => {
+    const client = new OFWClient();
+    const reqSpy = vi.spyOn(client, 'request').mockResolvedValue({ fileId: 1, fileName: 'a.pdf', shareClass: 'PRIVATE' });
+    setup(client);
+    const dir = mkdtempSync(join(tmpDir, 'ofw-up-'));
+    const filePath = join(dir, 'a.pdf');
+    writeFileSync(filePath, 'PDF.');
+    try {
+      await handlers.get('ofw_upload_attachment')!({ path: filePath }, NO_ELICIT_CTX);
+      expect(reqSpy).toHaveBeenCalledTimes(1);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

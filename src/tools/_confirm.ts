@@ -1,5 +1,6 @@
 import type { CallToolResult, InputRequiredResult, ServerContext } from '@modelcontextprotocol/server';
 import { confirmationFromEnv, confirmTokenParam, requireConfirmationWithFallback } from '@chrischall/mcp-utils';
+import { fnv1a64 } from './draft-freshness.js';
 
 export { confirmTokenParam };
 
@@ -76,4 +77,13 @@ export function confirmWrite(
       }),
     }),
   );
+}
+
+/**
+ * A revision string for a target as just read from OFW (an event detail), for
+ * `ConfirmWriteOptions.revision`. Any change to the value rotates it, so a
+ * token minted against one state cannot act on another.
+ */
+export function stateRevision(value: unknown): string {
+  return `s1:${fnv1a64(JSON.stringify(value))}`;
 }
