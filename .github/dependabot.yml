@@ -63,6 +63,33 @@ updates:
         update-types:
           - minor
           - patch
+      # Majors get groups of their own rather than no group at all. Excluded
+      # from the two groups above (a major is not a drive-by merge), every
+      # major used to be a PR of its own — curtaincall's first run opened 11.
+      # Split by dependency type so the commit prefix stays right: a
+      # production major is `fix` and cuts a release, a dev major is `chore`.
+      #
+      # These declare no patterns, so they score 500 — BELOW the vitest
+      # group's exact names (1000). A vitest major still lands in `vitest`
+      # beside its coverage provider, never here (rollout.test.sh case GG).
+      production-majors:
+        dependency-type: production
+        update-types:
+          - major
+      dev-majors:
+        dependency-type: development
+        update-types:
+          - major
+      # SECURITY fixes, as ONE PR per update entry. `applies-to` is what
+      # scopes it: a group without that key defaults to version-updates, so
+      # none of the groups above ever collects an advisory, and this one never
+      # collects a routine bump. `*` rather than a dependency type so a
+      # same-day advisory across runtime and dev dependencies still lands as a
+      # single PR.
+      security:
+        applies-to: security-updates
+        patterns:
+          - "*"
 
   - package-ecosystem: github-actions
     directory: /
@@ -79,3 +106,16 @@ updates:
         update-types:
           - minor
           - patch
+      actions-majors:
+        update-types:
+          - major
+      # SECURITY fixes, as ONE PR per update entry. `applies-to` is what
+      # scopes it: a group without that key defaults to version-updates, so
+      # none of the groups above ever collects an advisory, and this one never
+      # collects a routine bump. `*` rather than a dependency type so a
+      # same-day advisory across runtime and dev dependencies still lands as a
+      # single PR.
+      security:
+        applies-to: security-updates
+        patterns:
+          - "*"
