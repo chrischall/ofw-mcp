@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { chmodSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -106,6 +106,59 @@ describe('NodeAttachmentIO.writeDownload', () => {
         .toThrow(/EACCES/);
     } finally {
       chmodSync(ro, 0o700);
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+// PRIV-1: the directory listing is itself sensitive — entries are named
+// `<fileId>-<filename>` with filenames the co-parent chose (evaluations,
+// medical forms). 0600 bytes in a 0755 directory still expose those names to
+// every local user.
+describe('NodeAttachmentIO.writeDownload — private directories (PRIV-1)', () => {
+  const mode = (p: string) => statSync(p).mode & 0o777;
+
+  it('creates the attachments root and any subdirectory 0700, and the file 0600', () => {
+    const base = mkdtempSync(join(tmpdir(), 'ofw-io-'));
+    const root = join(base, 'attachments');
+    try {
+      const dest = join(root, 'sub', '123-report.pdf');
+      new NodeAttachmentIO().writeDownload(dest, Buffer.from('x'), { root, overwrite: false });
+      expect(mode(root)).toBe(0o700);
+      expect(mode(join(root, 'sub'))).toBe(0o700);
+      expect(mode(dest)).toBe(0o600);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it('tightens an existing DEFAULT attachments dir (~/Downloads/ofw-mcp) left world-listable by an older version', () => {
+    const home = mkdtempSync(join(tmpdir(), 'ofw-home-'));
+    const prevHome = process.env.HOME;
+    const prevDir = process.env.OFW_ATTACHMENTS_DIR;
+    process.env.HOME = home;
+    delete process.env.OFW_ATTACHMENTS_DIR;
+    const root = join(home, 'Downloads', 'ofw-mcp');
+    mkdirSync(root, { recursive: true });
+    chmodSync(root, 0o755);
+    try {
+      new NodeAttachmentIO().writeDownload(join(root, '1-a.pdf'), Buffer.from('x'), { root, overwrite: false });
+      expect(mode(root)).toBe(0o700);
+    } finally {
+      if (prevHome === undefined) delete process.env.HOME; else process.env.HOME = prevHome;
+      if (prevDir !== undefined) process.env.OFW_ATTACHMENTS_DIR = prevDir;
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('leaves the mode of an existing directory the user configured alone (it may be shared on purpose)', () => {
+    const root = mkdtempSync(join(tmpdir(), 'ofw-io-'));
+    chmodSync(root, 0o755);
+    try {
+      new NodeAttachmentIO().writeDownload(join(root, '1-a.pdf'), Buffer.from('x'), { root, overwrite: false });
+      expect(mode(root)).toBe(0o755);
+      expect(mode(join(root, '1-a.pdf'))).toBe(0o600);
+    } finally {
       rmSync(root, { recursive: true, force: true });
     }
   });

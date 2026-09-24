@@ -35,6 +35,11 @@ export function getAttachmentsDir(): string {
   // Claude Desktop, so files written there are unreadable to the model that
   // just downloaded them. Downloads is the standard "user-accessible files"
   // location across macOS/Linux/Windows.
+  return getDefaultAttachmentsDir();
+}
+
+/** The dedicated default attachments directory, `~/Downloads/ofw-mcp`. */
+export function getDefaultAttachmentsDir(): string {
   return join(homedir(), 'Downloads', 'ofw-mcp');
 }
 

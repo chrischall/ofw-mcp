@@ -126,7 +126,7 @@ OFW_USERNAME=you@example.com OFW_PASSWORD=yourpass node dist/index.js
 
 ## Available tools
 
-Read-only tools run automatically. Write tools ask for your confirmation first. The *Write mode* column shows the minimum `OFW_WRITE_MODE` a tool needs to be available at all — see [Write protection](#write-protection-ofw_write_mode) below.
+Read-only tools run automatically. Writes that reach your co-parent or the court-visible record — **Confirm (server)** below — are confirmed by the server itself before anything is sent (see [Server-side confirmation](#server-side-confirmation-mcp_confirm_mode)); the other writes rely on your MCP host's own approval prompt (**Confirm**). The *Write mode* column shows the minimum `OFW_WRITE_MODE` a tool needs to be available at all — see [Write protection](#write-protection-ofw_write_mode) below.
 
 | Tool | What it does | Permission | Write mode |
 |------|-------------|------------|------------|
@@ -140,18 +140,18 @@ Read-only tools run automatically. Write tools ask for your confirmation first. 
 | `ofw_check_freshness` | Cheap live check that the cache still matches OFW — per id, whether it is still a `draft` or was `sent`/`deleted`, without a full sync | Auto | any |
 | `ofw_status` | **One live call for "where does everything stand?"** — the full verified draft inventory, and the current state of any ids or draft keys | Auto | any |
 | `ofw_download_attachment` | Download a message attachment to disk, or inline as extracted content / bytes | Auto | any |
-| `ofw_send_message` | Send a message | Confirm | `all` |
+| `ofw_send_message` | Send a message | Confirm (server) | `all` |
 | `ofw_list_drafts` | Draft messages | Auto | any |
 | `ofw_save_draft` | Create or update a draft | Confirm | `drafts` |
 | `ofw_delete_draft` | Delete a draft | Confirm | `drafts` |
-| `ofw_upload_attachment` | Upload a local file from the upload directory (`OFW_UPLOAD_DIR`, default `~/Downloads/ofw-mcp`) to My Files; returns a fileId to attach via `ofw_send_message`/`ofw_save_draft`. Sharing (`shareClass: SHARED`) needs mode `all` | Auto | `drafts` |
+| `ofw_upload_attachment` | Upload a local file from the upload directory (`OFW_UPLOAD_DIR`, default `~/Downloads/ofw-mcp`) to My Files; returns a fileId to attach via `ofw_send_message`/`ofw_save_draft`. Sharing (`shareClass: SHARED`) needs mode `all` | Auto (PRIVATE) / Confirm (server) (SHARED) | `drafts` |
 | `ofw_list_events` | Calendar events in a date range | Auto | any |
-| `ofw_create_event` | Create a calendar event | Confirm | `all` (or `drafts` + `OFW_CALENDAR_WRITES`) |
-| `ofw_update_event` | Update a calendar event | Confirm | `all` (or `drafts` + `OFW_CALENDAR_WRITES`) |
-| `ofw_delete_event` | Delete a calendar event | Confirm | `all` (or `drafts` + `OFW_CALENDAR_WRITES`) |
+| `ofw_create_event` | Create a calendar event | Confirm (server) unless private | `all` (or `drafts` + `OFW_CALENDAR_WRITES`) |
+| `ofw_update_event` | Update a calendar event | Confirm (server) if shared | `all` (or `drafts` + `OFW_CALENDAR_WRITES`) |
+| `ofw_delete_event` | Delete a calendar event | Confirm (server) if shared | `all` (or `drafts` + `OFW_CALENDAR_WRITES`) |
 | `ofw_get_expense_totals` | Expense summary totals | Auto | any |
 | `ofw_list_expenses` | Expense history | Auto | any |
-| `ofw_create_expense` | Log a new expense | Confirm | `all` |
+| `ofw_create_expense` | Log a new expense | Confirm (server) | `all` |
 | `ofw_list_journal_entries` | Journal entries | Auto | any |
 | `ofw_create_journal_entry` | Create a journal entry | Confirm | `all` |
 
@@ -222,9 +222,25 @@ A false negative ("no, that was never sent") is more dangerous than a refusal, b
 
 Every list read also carries an explicit **`complete`** boolean describing the *result set* — "this is every matching item on OurFamilyWizard as of `asOf`" — with a `completeNote` naming what is missing when it is false. Check it before stating a count.
 
+### Server-side confirmation (`MCP_CONFIRM_MODE`)
+
+The writes marked **Confirm (server)** above — sending a message, logging an expense, creating/updating/deleting a *shared* calendar event, and uploading a file as `SHARED` — are confirmed by this server, not left to the host. A client that can show a confirmation prompt (Claude Code) gets one, with a preview of exactly what would happen. A client that cannot (claude.ai, Claude Desktop) gets two steps: the first call writes **nothing** and returns that preview plus a `confirmToken`, and only a repeat call with the same arguments and that token proceeds.
+
+Previews name what you are approving — recipients by name, subject and full body, the reply target, attachment file names; the expense amount and description; the event's title, date, time, visibility and (for an update) before and after. The token is bound to exactly that: a different body, amount or recipient is refused, and so is a draft or event that changed on OurFamilyWizard after the preview (say, the co-parent edited the event), even with `force: true`. A token works once and expires.
+
+| Variable | Default | |
+|---|---|---|
+| `MCP_CONFIRM_MODE` | `ask-user` | What a gated write does on a client that cannot show a prompt. `ask-user`: two steps, and the model must get your approval in chat before using the token. `auto`: two steps, but the model may use the token after reviewing the preview itself. `refuse`: such writes are refused (do them on ourfamilywizard.com). An unrecognised value is treated as `refuse`. |
+| `MCP_CONFIRM_TTL_SECONDS` | `600` | How long a token stays valid. |
+| `MCP_CONFIRM_SECRET` | random per process | Signing key; set it only if tokens must survive a server restart. |
+
+Private events and `PRIVATE` uploads — which the co-parent never sees — are not gated. `OFW_WRITE_MODE` below stays the structural layer underneath: a tool your write mode excludes does not exist at all.
+
+**A write that times out is not a write that failed.** If `ofw_send_message`, `ofw_create_expense`, `ofw_create_event` or `ofw_create_journal_entry` loses its connection or times out without a definitive answer from OFW, the result is `SEND_UNCONFIRMED` / `EXPENSE_UNCONFIRMED` / `EVENT_UNCONFIRMED` / `JOURNAL_UNCONFIRMED`: it may have landed. Check the matching list tool (or ourfamilywizard.com) before retrying, or the co-parent sees it twice.
+
 ### Write protection (`OFW_WRITE_MODE`)
 
-The "Confirm" permission above is a *hint* to the MCP host — a host configured to auto-approve tools (or a user who clicked "always allow" once) would leave nothing between model output and a sent message. Because OurFamilyWizard is a court-of-record platform, the server also supports a structural gate: set `OFW_WRITE_MODE` in the server's `env` block and tools above your chosen level are **never registered**, so no host setting or prompt-injected instruction can invoke them.
+The host's "Confirm" permission above is a *hint* to the MCP host — a host configured to auto-approve tools (or a user who clicked "always allow" once) would leave nothing between model output and a sent message. Because OurFamilyWizard is a court-of-record platform, the server also supports a structural gate: set `OFW_WRITE_MODE` in the server's `env` block and tools above your chosen level are **never registered**, so no host setting or prompt-injected instruction can invoke them.
 
 | `OFW_WRITE_MODE` | What's available |
 |------------------|------------------|
@@ -263,6 +279,8 @@ Every outbound request passes its constructed URL through a host check before `f
 
 **"fetchproxy fallback failed"** — the env-var path wasn't configured and the extension couldn't be reached. Confirm the fetchproxy extension is installed, signed into OFW, and that it's running (open the extension popup). If you want to disable the fallback entirely, set `OFW_DISABLE_FETCHPROXY=1`.
 
+**"OFW login not attempted — this OurFamilyWizard email and password were already rejected"** — OFW refused these credentials earlier in this session. OFW counts failed sign-ins against the account, so the server does not re-send a rejected password on every call. Update `OFW_USERNAME` / `OFW_PASSWORD` to your current login (or restart the server) and try again.
+
 **403 Forbidden** — wrong credentials. Verify your username/password at [ofw.ourfamilywizard.com](https://ofw.ourfamilywizard.com).
 
 **Tools not appearing in Claude** — go to **Claude Desktop → Settings → Developer** to see connected servers and any error output. Make sure you fully quit and relaunched after editing the config.
@@ -276,6 +294,26 @@ Every outbound request passes its constructed URL through a host check before `f
 - The server authenticates with OFW using the same login flow as the web app
 - Use a strong, unique OFW password
 - Outbound requests are host-allowlisted to `ofw.ourfamilywizard.com` (see [Egress allowlist](#egress-allowlist))
+
+### Local data, and how to remove it
+
+The server keeps co-parenting data on this machine, readable only by your user account:
+
+| What | Where | Permissions |
+|---|---|---|
+| Message cache (message bodies, recipients, drafts, attachment records) | `~/.cache/ofw-mcp/<hash>.db` (plus `-wal`/`-shm`), or `OFW_CACHE_DIR` | dir `0700`, files `0600` |
+| Downloaded attachments | `~/Downloads/ofw-mcp/`, or `OFW_ATTACHMENTS_DIR` | dirs the server creates `0700`, files `0600` |
+| Session token | `$MCP_DATA_DIR/.ofw-mcp/session.json`, or `OFW_SESSION_FILE` | `0600` |
+
+The cache keeps everything it has synced until you remove it; nothing expires it. When you no longer need it — the account is closed, the case is over, or you are handing the machine on — quit your MCP host and delete it:
+
+```bash
+rm -rf ~/.cache/ofw-mcp        # or your OFW_CACHE_DIR
+rm -rf ~/Downloads/ofw-mcp     # or your OFW_ATTACHMENTS_DIR
+rm -f  ~/.ofw-mcp/session.json # or your OFW_SESSION_FILE
+```
+
+The next start rebuilds the cache from OurFamilyWizard with `ofw_sync_messages`. A directory you pointed `OFW_ATTACHMENTS_DIR` at yourself keeps its own permissions (it may be shared on purpose); only what the server creates, and the default `~/Downloads/ofw-mcp`, are locked down.
 
 ## Development
 

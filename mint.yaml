@@ -29,6 +29,26 @@ env:
       Write-tool gate: "none" registers no write tools; "drafts" registers
       draft-level writes only (save/delete drafts, upload attachments); "all"
       registers everything (default). Unrecognized values fail closed to "none".
+  - name: MCP_CONFIRM_MODE
+    required: false
+    help: >-
+      What a confirm-gated write (send message, log expense, shared calendar
+      change, SHARED upload) does on a client that cannot show a prompt, like
+      claude.ai. "ask-user" (default): the first call sends nothing and returns
+      a preview plus a confirmToken, and the model must get your approval in
+      chat before calling again with it. "auto": the model may use the token
+      after reviewing the preview itself. "refuse": such writes are refused.
+      Unrecognised values are treated as "refuse".
+  - name: MCP_CONFIRM_TTL_SECONDS
+    required: false
+    help: >-
+      Lifetime of a confirmToken in seconds (default 600).
+  - name: MCP_CONFIRM_SECRET
+    secret: true
+    required: false
+    help: >-
+      Signing key for confirmTokens. Random per process by default; set it
+      only if tokens must survive a server restart.
   - name: OFW_CALENDAR_WRITES
     required: false
     help: >-

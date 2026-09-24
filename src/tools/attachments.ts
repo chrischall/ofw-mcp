@@ -9,9 +9,9 @@
 // Keeping the interface here means src/tools/messages.ts imports nothing from
 // node:fs.
 
-import { existsSync, readFileSync, realpathSync, statSync, mkdirSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, readFileSync, realpathSync, statSync, mkdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { basename, dirname, extname, isAbsolute, relative, resolve, sep } from 'node:path';
-import { getUploadDir } from '../config.js';
+import { getDefaultAttachmentsDir, getUploadDir } from '../config.js';
 import { fileBlob, expandPath } from '@chrischall/mcp-utils';
 
 /** The upload source resolved from a tool-supplied file reference. */
@@ -221,14 +221,22 @@ export class NodeAttachmentIO implements AttachmentIO {
     // boundary. Check the REAL path of the nearest existing ancestor before
     // creating anything, so a symlinked directory inside the root cannot carry
     // the write (or even the mkdir) somewhere else.
-    mkdirSync(root, { recursive: true });
+    //
+    // Directories are created 0700: the listing itself is sensitive (entries
+    // are `<fileId>-<filename>`, with names the co-parent chose), so 0600
+    // bytes in a world-listable directory would still leak them. The
+    // DEDICATED default dir is also tightened if it already exists (an older
+    // version created it 0755); a directory the user configured themselves
+    // keeps its mode, since it may be shared on purpose.
+    mkdirSync(root, { recursive: true, mode: 0o700 });
+    if (resolve(root) === resolve(getDefaultAttachmentsDir())) chmodSync(root, 0o700);
     const realRoot = realpathSync(root);
     const parent = dirname(dest);
     const anchor = realpathSync(deepestExisting(parent));
     if (anchor !== realRoot && !isWithin(realRoot, anchor)) {
       throw new Error(`Refusing to write ${dest}: it resolves outside the attachments directory (${root}).`);
     }
-    mkdirSync(parent, { recursive: true });
+    mkdirSync(parent, { recursive: true, mode: 0o700 });
     if (overwrite) {
       // unlink removes a symlink itself, never its target.
       try { unlinkSync(dest); } catch { /* nothing there to replace */ }

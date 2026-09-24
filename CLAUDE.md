@@ -69,6 +69,7 @@ src/
     index.ts        extractAttachment(): format detection, part selection, char budget
   tools/
     _shared.ts      recipient mapping, response helpers, path expansion
+    _confirm.ts     confirmWrite(): the mcp-utils 2.6 confirm gate (requireConfirmationWithFallback + confirmationFromEnv) every co-parent-visible write goes through; CONFIRM_NOTE, stateRevision
     delivery.ts     the attachment delivery ladder (image → extracted → raw bytes)
     freshness.ts    buildFreshness() — the `freshness` block every read tool returns (source/asOf/ageSeconds/staleness/warning)
     pagination.ts   paging state that survives a lossy reader: pageState/offsetState/readUpstreamPaging/withPaginationFirst
@@ -215,6 +216,20 @@ Three paths in priority order:
 3. **Error** → tells the user how to fix it (set creds, OR install the extension and sign in).
 
 The split into `auth.ts` + `auth-password.ts` is deliberate: tests mock `auth-password.js` and `@fetchproxy/bootstrap` at the module boundary, so path-selection logic in `resolveAuth()` stays independent of either implementation. Sibling MCPs should copy this split — and take the ordering from `resolveAuthPattern` rather than re-deriving it.
+
+## Confirmation gate (`tools/_confirm.ts`)
+
+Every write that reaches the co-parent or the court-visible record calls `confirmWrite(ctx, …)` before its request: `ofw_send_message`, `ofw_create_expense`, `ofw_create_event` (unless `privateEvent`), `ofw_update_event` / `ofw_delete_event` (when the event is shared before or after), and `ofw_upload_attachment` with `shareClass: SHARED`. It is `requireConfirmationWithFallback` + `confirmationFromEnv` from `@chrischall/mcp-utils` — a real elicitation where the client supports it, otherwise the two-phase `confirmToken` flow governed by `MCP_CONFIRM_MODE` / `_TTL_SECONDS` / `_SECRET`. Do not hand-roll a `confirm` boolean.
+
+Rules for a new gated write:
+- Call it on EVERY invocation, after all reads and validation and before the write, with the freshly built payload. Pass `confirmToken: confirmTokenParam` in the input schema and end the description with `CONFIRM_NOTE`.
+- The `preview` is what a human approves: names, subjects, bodies, amounts, dates — never only numeric ids. An id with no known name is reported as `name: null`, never guessed.
+- Bind `revision` wherever a re-read exists (the draft's `draftRevision`, `stateRevision(detailToWriteArgs(event))`, a SHA-256 of an upload's bytes), so a token minted before the target changed on OFW is refused as `DRAFT_CHANGED`.
+- Tests drive both phases with `callPreview` / `callConfirmed` from `tests/tools/_confirm-helpers.ts`; a phase-2 call re-runs every read, so mocks need the read queued twice.
+
+Writes to the shared record that are not messages go through `requestWrite()` (`tools/_shared.ts`): a definitive 4xx is rethrown, anything else becomes `UnconfirmedWriteError`, which the tool turns into `EXPENSE_/EVENT_/JOURNAL_UNCONFIRMED` via `unconfirmedWriteResponse()` — "may have landed, check before retrying".
+
+`writeDownload` creates attachment directories `0700` (the `<fileId>-<filename>` listing is itself sensitive) and re-tightens the default `~/Downloads/ofw-mcp`; a user-configured `OFW_ATTACHMENTS_DIR` that already exists keeps its mode.
 
 ## Message Cache
 
