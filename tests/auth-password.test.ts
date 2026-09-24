@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { loginWithPassword } from '../src/auth-password.js';
+import { CredentialsRejectedError, loginWithPassword } from '../src/auth-password.js';
 
 interface MockResponse {
   status: number;
@@ -131,5 +131,52 @@ describe('loginWithPassword', () => {
     } catch (e) {
       expect((e as Error).message.length).toBeLessThan(300);
     }
+  });
+});
+
+// BUG-1: OFW counts failed sign-ins against the account. A password it has
+// definitively rejected must not be re-sent on every later tool call (a model
+// retrying a few tools after the user changed their password on the web would
+// otherwise walk a court-record account into a lockout).
+describe('loginWithPassword — credential-rejection latch', () => {
+  afterEach(() => vi.restoreAllMocks());
+  const loginHtml = '<!DOCTYPE html><html><body>login</body></html>';
+  const rejected = (): MockResponse[] => [
+    { status: 303, headers: { 'set-cookie': 'SESSION=x' } },
+    { status: 200, body: loginHtml, headers: { 'content-type': 'text/html' } },
+  ];
+
+  it('after OFW rejects a username/password, the same pair is refused locally — no second login POST', async () => {
+    const spy = mockFetch([...rejected(), ...rejected()]);
+    await expect(loginWithPassword('latch-a@example.test', 'old-pass')).rejects.toBeInstanceOf(CredentialsRejectedError);
+    expect(spy).toHaveBeenCalledTimes(2);
+
+    const second = loginWithPassword('latch-a@example.test', 'old-pass');
+    await expect(second).rejects.toBeInstanceOf(CredentialsRejectedError);
+    await expect(second).rejects.toThrow(/already rejected.*OFW_PASSWORD/s);
+    expect(spy).toHaveBeenCalledTimes(2); // nothing new went to OFW
+  });
+
+  it('a changed password is tried again (the latch is keyed on the credentials)', async () => {
+    const spy = mockFetch([
+      ...rejected(),
+      { status: 303, headers: { 'set-cookie': 'SESSION=y' } },
+      { status: 200, body: { auth: 'tok' }, headers: { 'content-type': 'application/json' } },
+    ]);
+    await expect(loginWithPassword('latch-b@example.test', 'old-pass')).rejects.toBeInstanceOf(CredentialsRejectedError);
+    await expect(loginWithPassword('latch-b@example.test', 'new-pass')).resolves.toMatchObject({ token: 'tok' });
+    expect(spy).toHaveBeenCalledTimes(4);
+  });
+
+  it('a transient failure (5xx) does NOT latch — the next call retries', async () => {
+    const spy = mockFetch([
+      { status: 303, headers: {} },
+      { status: 503 },
+      { status: 303, headers: {} },
+      { status: 200, body: { auth: 'tok' }, headers: { 'content-type': 'application/json' } },
+    ]);
+    await expect(loginWithPassword('latch-c@example.test', 'p')).rejects.toThrow(/503/);
+    await expect(loginWithPassword('latch-c@example.test', 'p')).resolves.toMatchObject({ token: 'tok' });
+    expect(spy).toHaveBeenCalledTimes(4);
   });
 });

@@ -25,6 +25,14 @@ turns off the library's re-mint-after-a-failed-refresh recovery, which here woul
 just repeat the call that failed. The token lasts six hours, so on a scale-to-zero
 host the cache turns most cold starts into zero-cost ones.
 
+Because nothing in the `TokenManager` remembers a failed mint, `loginWithPassword`
+latches a **definitive** credential rejection (OFW re-rendering its HTML login page):
+it keeps a SHA-256 of the rejected username+password pair in memory and refuses that
+pair locally with `CredentialsRejectedError` until the env values change or the
+process restarts. OFW counts failed sign-ins against the account, so a stale
+password must not be re-POSTed on every tool call. Transient failures (5xx,
+timeouts) do not latch. `tests/_setup.ts` resets the latch between tests.
+
 The cache is **disabled** in three cases, each deliberate: `OFW_SESSION_CACHE=false`;
 an injected `resolveAuth` (the per-user hosted path — this registration declares no
 `identity.perUserChild`, so one process can serve several people and a shared file
