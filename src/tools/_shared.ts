@@ -308,6 +308,45 @@ function isDefinitiveRejection(e: unknown): boolean {
   return m !== null && m[1] !== '408';
 }
 
+/**
+ * Issue a write that lands on the shared, court-visible record (an expense,
+ * a calendar change, a journal entry) and classify how it failed. A
+ * definitive rejection (4xx, repeated 429) is rethrown as-is: nothing landed
+ * and a retry is safe. Anything else — a timeout, a dropped connection, a
+ * 5xx, a cancellation — is an UnconfirmedWriteError, because OFW may already
+ * have accepted the write, and a model that reads a plain "request timed out"
+ * retries it and puts a duplicate in front of the co-parent.
+ */
+export async function requestWrite<T = unknown>(
+  client: OFWClient,
+  method: 'POST' | 'PUT' | 'DELETE',
+  path: string,
+  body?: unknown,
+): Promise<T> {
+  try {
+    return await client.request<T>(method, path, body);
+  } catch (e) {
+    throw isDefinitiveRejection(e) ? e : new UnconfirmedWriteError(null, e);
+  }
+}
+
+/**
+ * The `<X>_UNCONFIRMED` result for a write whose outcome is unknown: an
+ * error result (so it is not read as success) that says in words the write
+ * may have landed and names how to check before any retry.
+ */
+export function unconfirmedWriteResponse(
+  e: UnconfirmedWriteError,
+  opts: { result: string; what: string; checkWith: string },
+): ReturnType<typeof textResult> {
+  return jsonErrorResponse({
+    result: opts.result,
+    mayHaveLanded: true,
+    reason: `The request to ${opts.what} failed without a definitive answer from OFW: ${e.message}. It MAY HAVE BEEN APPLIED on OurFamilyWizard.`,
+    remedy: `Do NOT retry blindly — a second attempt can put a duplicate on the co-parent-visible record. First check with ${opts.checkWith} (or on ourfamilywizard.com), and retry only once you have confirmed it did not land.`,
+  });
+}
+
 export async function postMessageAndRefetch<T>(
   client: OFWClient,
   payload: unknown,

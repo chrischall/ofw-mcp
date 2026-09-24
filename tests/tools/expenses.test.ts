@@ -3,8 +3,9 @@ import { z } from 'zod';
 import { McpServer } from '@modelcontextprotocol/server';
 import { OFWClient } from '../../src/client.js';
 import { registerExpenseTools } from '../../src/tools/expenses.js';
+import { CAN_ASK_CTX, NO_ELICIT_CTX, callConfirmed, callPreview, type GatedHandler } from './_confirm-helpers.js';
 
-type ToolHandler = (args: Record<string, unknown>) => Promise<{ content: Array<{ type: string; text: string }> }>;
+type ToolHandler = (args: Record<string, unknown>, ctx?: unknown) => Promise<{ content: Array<{ type: string; text: string }>; isError?: boolean; resultType?: string }>;
 
 let handlers: Map<string, ToolHandler>;
 
@@ -78,7 +79,7 @@ describe('ofw_create_expense', () => {
   it('posts to /pub/v2/expense/expenses', async () => {
     const client = makeClient({ id: 99 });
     setup(client);
-    const result = await handlers.get('ofw_create_expense')!({ amount: 50, description: 'School supplies' });
+    const result = await callConfirmed(handlers.get('ofw_create_expense')! as GatedHandler, { amount: 50, description: 'School supplies' });
     expect(client.request).toHaveBeenCalledWith(
       'POST',
       '/pub/v2/expense/expenses',
@@ -89,6 +90,73 @@ describe('ofw_create_expense', () => {
   });
 });
 
+
+describe('ofw_create_expense — confirmation gate (SEC-2)', () => {
+  it('phase 1 previews the amount and description and posts NOTHING', async () => {
+    const client = makeClient({ id: 99 });
+    setup(client);
+    const preview = await callPreview(handlers.get('ofw_create_expense')! as GatedHandler, { amount: 42.5, description: 'Soccer cleats' });
+    expect(client.request).not.toHaveBeenCalled();
+    expect(preview.preview).toMatchObject({ amount: 42.5, description: 'Soccer cleats' });
+    expect(JSON.stringify(preview.preview)).toMatch(/co-parent/i);
+  });
+
+  it('phase 2 with a different amount is refused and posts nothing', async () => {
+    const client = makeClient({ id: 99 });
+    setup(client);
+    const handler = handlers.get('ofw_create_expense')!;
+    const { confirmToken } = await callPreview(handler as GatedHandler, { amount: 10, description: 'Lunch' });
+    const result = await handler({ amount: 1000, description: 'Lunch', confirmToken }, NO_ELICIT_CTX);
+    expect(result.isError).toBe(true);
+    expect(JSON.parse(result.content[0].text)).toMatchObject({ error: 'DRAFT_CHANGED', dispatched: false });
+    expect(client.request).not.toHaveBeenCalled();
+  });
+
+  it('a client that can be prompted gets the real prompt', async () => {
+    const client = makeClient({ id: 99 });
+    setup(client);
+    const result = await handlers.get('ofw_create_expense')!({ amount: 1, description: 'x' }, CAN_ASK_CTX);
+    expect(result.resultType).toBe('input_required');
+    expect(client.request).not.toHaveBeenCalled();
+  });
+
+  it('is annotated so hosts do not auto-approve it as a harmless local write', () => {
+    const server = new McpServer({ name: 'test', version: '0.0.0' });
+    const configs = new Map<string, { annotations?: Record<string, unknown>; inputSchema?: z.ZodObject; description: string }>();
+    vi.spyOn(server, 'registerTool').mockImplementation((name: string, config: unknown) => {
+      configs.set(name, config as { annotations?: Record<string, unknown>; inputSchema?: z.ZodObject; description: string });
+      return undefined as never;
+    });
+    registerExpenseTools(server, new OFWClient());
+    const tool = configs.get('ofw_create_expense')!;
+    expect(tool.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: true, openWorldHint: true });
+    expect(tool.inputSchema!.shape).toHaveProperty('confirmToken');
+    expect(tool.description).toMatch(/MCP_CONFIRM_MODE/);
+  });
+});
+
+describe('ofw_create_expense — unconfirmed outcome (BUG-2)', () => {
+  it('a POST that times out returns EXPENSE_UNCONFIRMED telling the caller NOT to retry', async () => {
+    const client = new OFWClient();
+    vi.spyOn(client, 'request').mockRejectedValue(new Error('OFW API request timed out after 30000ms: POST /pub/v2/expense/expenses'));
+    setup(client);
+    const result = await callConfirmed(handlers.get('ofw_create_expense')! as GatedHandler, { amount: 50, description: 'School supplies' });
+    expect(result.isError).toBe(true);
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.result).toBe('EXPENSE_UNCONFIRMED');
+    expect(parsed.mayHaveLanded).toBe(true);
+    expect(parsed.remedy).toMatch(/do not retry/i);
+    expect(parsed.remedy).toMatch(/ofw_list_expenses/);
+  });
+
+  it('a definitive 4xx rejection is still a plain error (nothing landed, a retry is safe)', async () => {
+    const client = new OFWClient();
+    vi.spyOn(client, 'request').mockRejectedValue(new Error('OFW API error: 400 Bad Request for POST /pub/v2/expense/expenses'));
+    setup(client);
+    await expect(callConfirmed(handlers.get('ofw_create_expense')! as GatedHandler, { amount: 50, description: 'x' }))
+      .rejects.toThrow(/400 Bad Request/);
+  });
+});
 
 describe('expense input schemas', () => {
   it('rejects negative start and non-positive/fractional max', () => {

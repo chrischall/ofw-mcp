@@ -10,6 +10,7 @@
 // `resolveAuth()` in `./auth.ts` can call it without a Client instance, and
 // so tests can mock it at the module boundary.
 
+import { createHash } from 'node:crypto';
 import { currentCallSignal } from '@chrischall/mcp-utils';
 import { BASE_URL, OFW_PROTOCOL_HEADERS, OFW_TOKEN_TTL_MS, assertOfwUrl } from './protocol.js';
 
@@ -23,10 +24,52 @@ export interface PasswordLoginResult {
   expiresAt: Date;
 }
 
+/**
+ * OFW definitively refused this username/password (it re-rendered its login
+ * page). Distinct from a transient failure (5xx, timeout), which is retried.
+ */
+export class CredentialsRejectedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'CredentialsRejectedError';
+  }
+}
+
+// ── Credential-rejection latch ───────────────────────────────────────────
+// OFW counts failed sign-ins against the account, and nothing upstream of this
+// function remembers a rejection: the TokenManager caches no failure, so every
+// later tool call (and every healthcheck) would re-POST the same stale
+// password — the realistic trigger being a password changed in the OFW web app
+// while this process keeps the old one in its env. So a DEFINITIVE rejection is
+// latched here, per credential pair, for the life of the process: the pair is
+// refused locally until OFW_USERNAME/OFW_PASSWORD change or the server
+// restarts. Only a digest of the pair is held, never the password itself.
+const rejectedPairs = new Set<string>();
+
+// Synchronous on purpose: an extra await ahead of the first fetch would shift
+// every caller's timing (config.ts already hashes with node:crypto).
+function pairDigest(username: string, password: string): string {
+  return createHash('sha256').update(`${username.length}:${username}\u0000${password}`).digest('hex');
+}
+
+/** Test hook: forget every latched rejection. */
+export function resetCredentialRejections(): void {
+  rejectedPairs.clear();
+}
+
 export async function loginWithPassword(
   username: string,
   password: string,
 ): Promise<PasswordLoginResult> {
+  const digest = pairDigest(username, password);
+  if (rejectedPairs.has(digest)) {
+    throw new CredentialsRejectedError(
+      'OFW login not attempted — this OurFamilyWizard email and password were already rejected by OFW '
+      + 'earlier in this session, and OFW counts failed sign-ins against the account, so they are not re-sent. '
+      + 'Update OFW_USERNAME / OFW_PASSWORD to the current values (or restart the server) and try again.',
+    );
+  }
+
   // Step 1: get a SESSION cookie (Spring Security refuses the POST without it).
   const initUrl = `${BASE_URL}/ofw/login.form`;
   assertOfwUrl(initUrl);
@@ -77,8 +120,10 @@ export async function loginWithPassword(
     // clean, actionable message instead of dumping the HTML page — this is what
     // a hosted deployment's login page shows the user on a failed sign-in.
     if (contentType.includes('text/html')) {
-      throw new Error(
-        'OFW login failed — your OurFamilyWizard email or password was not accepted. Check them and try again.',
+      rejectedPairs.add(digest);
+      throw new CredentialsRejectedError(
+        'OFW login failed — your OurFamilyWizard email or password was not accepted. Check them and try again. '
+        + 'They will not be re-sent until OFW_USERNAME / OFW_PASSWORD change or the server restarts.',
       );
     }
     const body = await response.text();

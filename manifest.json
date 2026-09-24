@@ -132,7 +132,7 @@
     },
     {
       "name": "ofw_send_message",
-      "description": "Send a message"
+      "description": "Send a message (confirmed first, with a preview of recipients, subject and body)"
     },
     {
       "name": "ofw_list_drafts",
@@ -152,7 +152,7 @@
     },
     {
       "name": "ofw_upload_attachment",
-      "description": "Upload a file from disk to use as an attachment on a message or draft"
+      "description": "Upload a file from disk to use as an attachment on a message or draft (sharing it with the co-parent is confirmed first)"
     },
     {
       "name": "ofw_download_attachment",
@@ -168,15 +168,15 @@
     },
     {
       "name": "ofw_create_event",
-      "description": "Create a calendar event"
+      "description": "Create a calendar event (a shared one is confirmed first)"
     },
     {
       "name": "ofw_update_event",
-      "description": "Update a calendar event"
+      "description": "Update a calendar event (a shared one is confirmed first)"
     },
     {
       "name": "ofw_delete_event",
-      "description": "Delete a calendar event"
+      "description": "Delete a calendar event (a shared one is confirmed first)"
     },
     {
       "name": "ofw_get_expense_totals",
@@ -188,7 +188,7 @@
     },
     {
       "name": "ofw_create_expense",
-      "description": "Log a new expense"
+      "description": "Log a new expense (confirmed first, with a preview of amount and description)"
     },
     {
       "name": "ofw_list_journal_entries",

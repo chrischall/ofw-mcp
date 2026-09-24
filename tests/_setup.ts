@@ -17,12 +17,22 @@ import { beforeEach, afterAll } from 'vitest';
 import { mkdtempSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
+import { resetCredentialRejections } from '../src/auth-password.js';
 
 const CACHE_DIR = mkdtempSync(join(tmpdir(), 'ofw-test-cache-'));
 
 beforeEach(() => {
   process.env.OFW_SESSION_CACHE = 'false';
   process.env.OFW_SESSION_FILE = join(CACHE_DIR, 'session.json');
+  // The confirm gate reads MCP_CONFIRM_MODE / _TTL_SECONDS / _SECRET. Tests
+  // exercise the fleet DEFAULTS (ask-user, 600 s, a per-process key); a
+  // developer's shell exporting one of these must not change the outcome.
+  delete process.env.MCP_CONFIRM_MODE;
+  delete process.env.MCP_CONFIRM_TTL_SECONDS;
+  delete process.env.MCP_CONFIRM_SECRET;
+  // The login rejection latch is process-wide; one test's rejected fixture
+  // credentials must not refuse the next test's login.
+  resetCredentialRejections();
 });
 
 afterAll(() => {

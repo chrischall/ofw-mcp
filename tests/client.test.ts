@@ -160,6 +160,17 @@ describe('OFWClient', () => {
     delete process.env.OFW_DISABLE_FETCHPROXY;
   });
 
+  it('a rejected password is not re-sent on every later tool call (BUG-1 latch)', async () => {
+    const rejected = { status: 200, body: '<html>login</html>', headers: { 'content-type': 'text/html' } };
+    const spy = mockFetch([LOGIN_INIT, rejected, LOGIN_INIT, rejected, LOGIN_INIT, rejected]);
+    const client = new OFWClient();
+    await expect(client.request('GET', '/pub/v1/a')).rejects.toThrow(/not accepted/);
+    await expect(client.request('GET', '/pub/v1/b')).rejects.toThrow(/already rejected/);
+    await expect(client.request('GET', '/pub/v1/c')).rejects.toThrow(/already rejected/);
+    // One login attempt (GET form + POST) total, however many tools retried.
+    expect(spy).toHaveBeenCalledTimes(2);
+  });
+
   it('throws if login POST returns non-2xx', async () => {
     mockFetch([
       LOGIN_INIT,

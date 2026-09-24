@@ -12,6 +12,7 @@ import type { AttachmentIO, ResolvedUpload } from '../../src/tools/attachments.j
 import { draftRevision } from '../../src/tools/draft-freshness.js';
 import { OFWCache } from '../../src/cache/node.js';
 import { sampleMessageRow } from '../_fixtures.js';
+import { CAN_ASK_CTX, NO_ELICIT_CTX, callConfirmed, callPreview } from './_confirm-helpers.js';
 import { makeXlsx, xlsxSheetData, makeDocx, makePptx } from '../extract/_ooxml.js';
 import { makePdf, showText } from '../extract/_pdf.js';
 import type {
@@ -728,7 +729,7 @@ describe('ofw_send_message', () => {
     const spy = sendMessageMocks(client, { entityId: 200 });
     setup(client);
 
-    const result = await handlers.get('ofw_send_message')!({
+    const result = await callConfirmed(handlers.get('ofw_send_message')!, {
       subject: 'Re: pickup',
       body: 'I will be there at 3pm',
       recipientIds: [123],
@@ -756,7 +757,7 @@ describe('ofw_send_message', () => {
       .mockRejectedValueOnce(new Error('OFW API request timed out after 30000ms: POST /pub/v3/messages'));
     setup(client);
 
-    const result = await handlers.get('ofw_send_message')!({ subject: 'S', body: 'B', recipientIds: [1] });
+    const result = await callConfirmed(handlers.get('ofw_send_message')!, { subject: 'S', body: 'B', recipientIds: [1] });
     const parsed = JSON.parse(result.content[0].text);
     expect(result.isError).toBe(true);
     expect(parsed.result).toBe('SEND_UNCONFIRMED');
@@ -774,7 +775,7 @@ describe('ofw_send_message', () => {
       const client = new OFWClient();
       vi.spyOn(client, 'request').mockRejectedValueOnce(err);
       setup(client);
-      const result = await handlers.get('ofw_send_message')!({ subject: 'S', body: 'B', recipientIds: [1] });
+      const result = await callConfirmed(handlers.get('ofw_send_message')!, { subject: 'S', body: 'B', recipientIds: [1] });
       expect(JSON.parse(result.content[0].text).result).toBe('SEND_UNCONFIRMED');
     }
   });
@@ -784,7 +785,7 @@ describe('ofw_send_message', () => {
     vi.spyOn(client, 'request')
       .mockRejectedValueOnce(new Error('OFW API error: 400 Bad Request for POST /pub/v3/messages'));
     setup(client);
-    await expect(handlers.get('ofw_send_message')!({ subject: 'S', body: 'B', recipientIds: [1] }))
+    await expect(callConfirmed(handlers.get('ofw_send_message')!, { subject: 'S', body: 'B', recipientIds: [1] }))
       .rejects.toThrow(/400 Bad Request/);
   });
 
@@ -794,7 +795,7 @@ describe('ofw_send_message', () => {
       .mockResolvedValueOnce({ entityId: 321 })
       .mockRejectedValueOnce(new Error('OFW API request timed out after 30000ms: GET /pub/v3/messages/321'));
     setup(client);
-    const result = await handlers.get('ofw_send_message')!({ subject: 'S', body: 'B', recipientIds: [1] });
+    const result = await callConfirmed(handlers.get('ofw_send_message')!, { subject: 'S', body: 'B', recipientIds: [1] });
     const parsed = JSON.parse(result.content[0].text);
     expect(result.isError).toBe(true);
     expect(parsed.result).toBe('SEND_UNCONFIRMED');
@@ -811,9 +812,11 @@ describe('ofw_send_message', () => {
     const spy = vi.spyOn(client, 'request')
       // Freshness guard re-reads the draft; server copy matches the cache.
       .mockResolvedValueOnce({ id: 55, subject: 'Pickup', body: 'At 3', recipients: [], date: { dateTime: '2026-05-04T12:00:00' } })
+      // (again: the confirmation gate's phase-2 call re-reads the draft too)
+      .mockResolvedValueOnce({ id: 55, subject: 'Pickup', body: 'At 3', recipients: [], date: { dateTime: '2026-05-04T12:00:00' } })
       .mockRejectedValueOnce(new Error('OFW API request timed out after 30000ms: POST /pub/v3/messages'));
     setup(client);
-    const result = await handlers.get('ofw_send_message')!({ draftId: 55, recipientIds: [1] });
+    const result = await callConfirmed(handlers.get('ofw_send_message')!, { draftId: 55, recipientIds: [1] });
     const parsed = JSON.parse(result.content[0].text);
     expect(parsed.result).toBe('SEND_UNCONFIRMED');
     expect(parsed.draftRetained).toBe(true);
@@ -827,7 +830,7 @@ describe('ofw_send_message', () => {
     const spy = sendMessageMocks(client, { entityId: 200 });
     setup(client);
 
-    await handlers.get('ofw_send_message')!({
+    await callConfirmed(handlers.get('ofw_send_message')!, {
       subject: 'Hello',
       body: 'World',
       recipientIds: [123],
@@ -843,7 +846,7 @@ describe('ofw_send_message', () => {
     const spy = sendMessageMocks(client, { entityId: 201 });
     setup(client);
 
-    await handlers.get('ofw_send_message')!({
+    await callConfirmed(handlers.get('ofw_send_message')!, {
       subject: 'Re: pickup',
       body: 'I will be there at 3pm',
       recipientIds: [123],
@@ -870,6 +873,8 @@ describe('ofw_send_message', () => {
     const spy = vi.spyOn(c, 'request')
       // Guard pre-read: the draft on OFW matches the cached base → FRESH.
       .mockResolvedValueOnce({ subject: 'Hello', body: 'World', recipients: [], replyToId: null, folder: { id: '3', name: 'Drafts' } })
+      // (again: the confirmation gate's phase-2 call re-reads the draft too)
+      .mockResolvedValueOnce({ subject: 'Hello', body: 'World', recipients: [], replyToId: null, folder: { id: '3', name: 'Drafts' } })
       .mockResolvedValueOnce({ entityId: 200 })
       .mockResolvedValueOnce({
         id: 200, subject: 'Hello', body: 'World',
@@ -879,7 +884,7 @@ describe('ofw_send_message', () => {
 
     const localHandlers = setupWithClient(c);
 
-    const result = await localHandlers.get('ofw_send_message')!({
+    const result = await callConfirmed(localHandlers.get('ofw_send_message')!, {
       subject: 'Hello',
       body: 'World',
       recipientIds: [123],
@@ -932,7 +937,7 @@ describe('ofw_send_message (thread-tip + cache write)', () => {
       });
     setup(client);
 
-    const result = await handlers.get('ofw_send_message')!({
+    const result = await callConfirmed(handlers.get('ofw_send_message')!, {
       subject: 'Re: Original',
       body: 'second reply',
       recipientIds: [1],
@@ -967,7 +972,7 @@ describe('ofw_send_message (thread-tip + cache write)', () => {
       });
     setup(client);
 
-    const result = await handlers.get('ofw_send_message')!({
+    const result = await callConfirmed(handlers.get('ofw_send_message')!, {
       subject: 'Re: Original', body: 'reply', recipientIds: [1], replyToId: 100,
     });
 
@@ -986,7 +991,7 @@ describe('ofw_send_message (thread-tip + cache write)', () => {
       });
     setup(client);
 
-    await handlers.get('ofw_send_message')!({
+    await callConfirmed(handlers.get('ofw_send_message')!, {
       subject: 'Re: Unknown', body: 'reply', recipientIds: [1], replyToId: 999,
     });
 
@@ -998,6 +1003,8 @@ describe('ofw_send_message (thread-tip + cache write)', () => {
     const client = new OFWClient();
     vi.spyOn(client, 'request')
       // Guard pre-read matches the cached base.
+      .mockResolvedValueOnce({ subject: 'Re', body: 'b', recipients: [], replyToId: null, folder: { id: '3', name: 'Drafts' } })
+      // (again: the confirmation gate's phase-2 call re-reads the draft too)
       .mockResolvedValueOnce({ subject: 'Re', body: 'b', recipients: [], replyToId: null, folder: { id: '3', name: 'Drafts' } })
       .mockResolvedValueOnce({ entityId: 200 })
       .mockResolvedValueOnce({
@@ -1012,7 +1019,7 @@ describe('ofw_send_message (thread-tip + cache write)', () => {
     });
     setup(client);
 
-    await handlers.get('ofw_send_message')!({
+    await callConfirmed(handlers.get('ofw_send_message')!, {
       subject: 'Re', body: 'b', recipientIds: [1], draftId: 50,
     });
 
@@ -1028,7 +1035,7 @@ describe('ofw_send_message (thread-tip + cache write)', () => {
         date: { dateTime: '2026-05-03T00:00:00Z' }, from: { name: 'Me' }, recipients: [],
       });
     setup(client);
-    await handlers.get('ofw_send_message')!({ subject: 's', body: 'b', recipientIds: [1] });
+    await callConfirmed(handlers.get('ofw_send_message')!, { subject: 's', body: 'b', recipientIds: [1] });
     expect(getMessage(200)?.folder).toBe('sent');
   });
 
@@ -1037,7 +1044,7 @@ describe('ofw_send_message (thread-tip + cache write)', () => {
     const spy = vi.spyOn(client, 'request')
       .mockResolvedValueOnce({ error: 'boom' });
     setup(client);
-    await handlers.get('ofw_send_message')!({ subject: 's', body: 'b', recipientIds: [1] });
+    await callConfirmed(handlers.get('ofw_send_message')!, { subject: 's', body: 'b', recipientIds: [1] });
     expect(spy).toHaveBeenCalledTimes(1);
   });
 });
@@ -1064,6 +1071,14 @@ describe('ofw_send_message with messageId (send-existing-draft)', () => {
         replyToId: null,
         folder: { id: '3', name: 'Drafts' },
       })
+      // (again: the confirmation gate's phase-2 call re-reads the draft too)
+      .mockResolvedValueOnce({
+        subject: 'Re: Weekly of 5/15 - 5/22',
+        body: 'Hi Alison,\n\nI adjusted some account settings on my end.',
+        recipients: [{ user: { userId: 3039202, name: 'Alison' }, viewed: null }],
+        replyToId: null,
+        folder: { id: '3', name: 'Drafts' },
+      })
       .mockResolvedValueOnce({ entityId: 519117514 })
       .mockResolvedValueOnce({
         id: 519117514,
@@ -1076,7 +1091,7 @@ describe('ofw_send_message with messageId (send-existing-draft)', () => {
       .mockResolvedValueOnce({});
     setup(client);
 
-    const result = await handlers.get('ofw_send_message')!({ messageId: 519117394 });
+    const result = await callConfirmed(handlers.get('ofw_send_message')!, { messageId: 519117394 });
 
     // The content posted is the SERVER draft's — no body re-supply.
     expect(spy).toHaveBeenNthCalledWith(1, 'GET', '/pub/v3/messages/519117394');
@@ -1116,6 +1131,8 @@ describe('ofw_send_message with messageId (send-existing-draft)', () => {
     const spy = vi.spyOn(client, 'request')
       // Server copy: OFW dropped the replyToId (metadata-only drift → FRESH).
       .mockResolvedValueOnce({ subject: 'S', body: 'server body', recipients: [], replyToId: null, folder: { id: '3', name: 'Drafts' } })
+      // (again: the confirmation gate's phase-2 call re-reads the draft too)
+      .mockResolvedValueOnce({ subject: 'S', body: 'server body', recipients: [], replyToId: null, folder: { id: '3', name: 'Drafts' } })
       .mockResolvedValueOnce({ entityId: 61 })
       .mockResolvedValueOnce({
         id: 61, subject: 'S', body: 'server body',
@@ -1124,7 +1141,7 @@ describe('ofw_send_message with messageId (send-existing-draft)', () => {
       .mockResolvedValueOnce({});
     setup(client);
 
-    const result = await handlers.get('ofw_send_message')!({ messageId: 60, recipientIds: [7] });
+    const result = await callConfirmed(handlers.get('ofw_send_message')!, { messageId: 60, recipientIds: [7] });
 
     const postCall = spy.mock.calls.find((c) => c[0] === 'POST');
     const sent = postCall![2] as { body: string; replyToId: number | null };
@@ -1152,6 +1169,12 @@ describe('ofw_send_message with messageId (send-existing-draft)', () => {
         recipients: [{ user: { userId: 1, name: 'A' }, viewed: null }],
         replyToId: null, folder: { id: '3', name: 'Drafts' },
       })
+      // (again: the confirmation gate's phase-2 call re-reads the draft too)
+      .mockResolvedValueOnce({
+        subject: 'Cached subject', body: 'Cached body',
+        recipients: [{ user: { userId: 1, name: 'A' }, viewed: null }],
+        replyToId: null, folder: { id: '3', name: 'Drafts' },
+      })
       .mockResolvedValueOnce({ entityId: 99 })
       .mockResolvedValueOnce({
         id: 99, subject: 'Overridden subject', body: 'Cached body',
@@ -1160,7 +1183,7 @@ describe('ofw_send_message with messageId (send-existing-draft)', () => {
       .mockResolvedValueOnce({});
     setup(client);
 
-    await handlers.get('ofw_send_message')!({ messageId: 50, subject: 'Overridden subject' });
+    await callConfirmed(handlers.get('ofw_send_message')!, { messageId: 50, subject: 'Overridden subject' });
 
     const postCall = spy.mock.calls.find((c) => c[0] === 'POST');
     const sent = postCall![2] as { subject: string; body: string; recipientIds: number[] };
@@ -1178,7 +1201,7 @@ describe('ofw_send_message with messageId (send-existing-draft)', () => {
     });
     setup(client);
 
-    const result = await handlers.get('ofw_send_message')!({ messageId: 99999 });
+    const result = await handlers.get('ofw_send_message')!({ messageId: 99999 }, NO_ELICIT_CTX);
     expect(result.isError).toBe(true);
     const parsed = JSON.parse(result.content[0].text);
     expect(parsed.error).toBe('STALE_DRAFT');
@@ -1197,7 +1220,7 @@ describe('ofw_send_message with messageId (send-existing-draft)', () => {
     const spy = vi.spyOn(client, 'request').mockRejectedValue(new Error('OFW API error: 404 Not Found'));
     setup(client);
 
-    const result = await handlers.get('ofw_send_message')!({ messageId: 70 });
+    const result = await handlers.get('ofw_send_message')!({ messageId: 70 }, NO_ELICIT_CTX);
     expect(result.isError).toBe(true);
     const parsed = JSON.parse(result.content[0].text);
     expect(parsed.error).toBe('MISSING_DRAFT');
@@ -1212,7 +1235,7 @@ describe('ofw_send_message with messageId (send-existing-draft)', () => {
     const spy = vi.spyOn(client, 'request').mockResolvedValue({});
     setup(client);
 
-    await expect(handlers.get('ofw_send_message')!({}))
+    await expect(callConfirmed(handlers.get('ofw_send_message')!, {}))
       .rejects.toThrow(/subject|body|recipient/i);
     expect(spy).not.toHaveBeenCalled();
   });
@@ -1227,7 +1250,7 @@ describe('ofw_send_message with messageId (send-existing-draft)', () => {
       });
     setup(client);
 
-    await handlers.get('ofw_send_message')!({ subject: 's', body: 'b', recipientIds: [1] });
+    await callConfirmed(handlers.get('ofw_send_message')!, { subject: 's', body: 'b', recipientIds: [1] });
     expect(spy).toHaveBeenCalledTimes(2); // POST + GET, no DELETE
   });
 
@@ -1235,7 +1258,7 @@ describe('ofw_send_message with messageId (send-existing-draft)', () => {
     const client = new OFWClient();
     const spy = vi.spyOn(client, 'request').mockResolvedValue({});
     setup(client);
-    await expect(handlers.get('ofw_send_message')!({ messageId: 1, draftId: 2 }))
+    await expect(callConfirmed(handlers.get('ofw_send_message')!, { messageId: 1, draftId: 2 }))
       .rejects.toThrow(/refer to different drafts/);
     expect(spy).not.toHaveBeenCalled();
   });
@@ -1266,6 +1289,12 @@ describe('ofw_send_message with messageId (send-existing-draft)', () => {
         recipients: [{ user: { userId: 1, name: 'Alice' }, viewed: null }],
         replyToId: 100, folder: { id: '3', name: 'Drafts' },
       })
+      // (again: the confirmation gate's phase-2 call re-reads the draft too)
+      .mockResolvedValueOnce({
+        subject: 'Re: Original', body: 'reply body',
+        recipients: [{ user: { userId: 1, name: 'Alice' }, viewed: null }],
+        replyToId: 100, folder: { id: '3', name: 'Drafts' },
+      })
       .mockResolvedValueOnce({ entityId: 200 })
       .mockResolvedValueOnce({
         id: 200, subject: 'Re: Original', body: 'reply body',
@@ -1274,7 +1303,7 @@ describe('ofw_send_message with messageId (send-existing-draft)', () => {
       .mockResolvedValueOnce({});
     setup(client);
 
-    await handlers.get('ofw_send_message')!({ messageId: 42 });
+    await callConfirmed(handlers.get('ofw_send_message')!, { messageId: 42 });
 
     const postCall = spy.mock.calls.find((c) => c[0] === 'POST');
     const payload = postCall![2] as { replyToId: number | null; includeOriginal: boolean };
@@ -1298,6 +1327,12 @@ describe('ofw_send_message with messageId (send-existing-draft)', () => {
         recipients: [{ user: { userId: 1, name: 'A' }, viewed: null }],
         replyToId: 100, folder: { id: '3', name: 'Drafts' },
       })
+      // (again: the confirmation gate's phase-2 call re-reads the draft too)
+      .mockResolvedValueOnce({
+        subject: 's', body: 'b',
+        recipients: [{ user: { userId: 1, name: 'A' }, viewed: null }],
+        replyToId: 100, folder: { id: '3', name: 'Drafts' },
+      })
       .mockResolvedValueOnce({ entityId: 200 })
       .mockResolvedValueOnce({
         id: 200, subject: 's', body: 'b',
@@ -1306,7 +1341,7 @@ describe('ofw_send_message with messageId (send-existing-draft)', () => {
       .mockResolvedValueOnce({});
     setup(client);
 
-    await handlers.get('ofw_send_message')!({ messageId: 42, replyToId: 999 });
+    await callConfirmed(handlers.get('ofw_send_message')!, { messageId: 42, replyToId: 999 });
 
     const postCall = spy.mock.calls.find((c) => c[0] === 'POST');
     expect((postCall![2] as { replyToId: number | null }).replyToId).toBe(999);
@@ -2438,13 +2473,64 @@ describe('ofw_upload_attachment', () => {
     const filePath = join(dir, 'a.pdf');
     writeFileSync(filePath, 'PDF.');
     try {
-      await handlers.get('ofw_upload_attachment')!({
+      await callConfirmed(handlers.get('ofw_upload_attachment')!, {
         path: filePath, shareClass: 'SHARED', label: 'May invoice', description: 'Itemized invoice for May',
       });
       const form = reqSpy.mock.calls[0][2] as FormData;
       expect(form.get('shareClass')).toBe('SHARED');
       expect(form.get('label')).toBe('May invoice');
       expect(form.get('description')).toBe('Itemized invoice for May');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('SHARED (SEC-2): phase 1 previews the file name, size and sharing and uploads NOTHING', async () => {
+    const client = new OFWClient();
+    const reqSpy = vi.spyOn(client, 'request').mockResolvedValue({ fileId: 1, fileName: 'a.pdf', shareClass: 'SHARED' });
+    setup(client);
+    const dir = mkdtempSync(join(tmpDir, 'ofw-up-'));
+    const filePath = join(dir, 'school-form.pdf');
+    writeFileSync(filePath, 'PDF.');
+    try {
+      const preview = await callPreview(handlers.get('ofw_upload_attachment')!, { path: filePath, shareClass: 'SHARED', label: 'School form' });
+      expect(reqSpy).not.toHaveBeenCalled();
+      expect(preview.preview).toMatchObject({ fileName: 'school-form.pdf', sizeBytes: 4, label: 'School form', shareClass: 'SHARED' });
+      expect(JSON.stringify(preview.preview)).toMatch(/co-parent/i);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('SHARED: a file whose CONTENT changed between preview and confirmation is refused', async () => {
+    const client = new OFWClient();
+    const reqSpy = vi.spyOn(client, 'request').mockResolvedValue({ fileId: 1, fileName: 'a.pdf', shareClass: 'SHARED' });
+    setup(client);
+    const dir = mkdtempSync(join(tmpDir, 'ofw-up-'));
+    const filePath = join(dir, 'a.pdf');
+    writeFileSync(filePath, 'v1..');
+    try {
+      const handler = handlers.get('ofw_upload_attachment')!;
+      const { confirmToken } = await callPreview(handler, { path: filePath, shareClass: 'SHARED' });
+      writeFileSync(filePath, 'v2..'); // same name, same size, different bytes
+      const result = await handler({ path: filePath, shareClass: 'SHARED', confirmToken }, NO_ELICIT_CTX);
+      expect(JSON.parse(result.content[0].text)).toMatchObject({ error: 'DRAFT_CHANGED', dispatched: false });
+      expect(reqSpy).not.toHaveBeenCalled();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('PRIVATE uploads are not gated', async () => {
+    const client = new OFWClient();
+    const reqSpy = vi.spyOn(client, 'request').mockResolvedValue({ fileId: 1, fileName: 'a.pdf', shareClass: 'PRIVATE' });
+    setup(client);
+    const dir = mkdtempSync(join(tmpDir, 'ofw-up-'));
+    const filePath = join(dir, 'a.pdf');
+    writeFileSync(filePath, 'PDF.');
+    try {
+      await handlers.get('ofw_upload_attachment')!({ path: filePath }, NO_ELICIT_CTX);
+      expect(reqSpy).toHaveBeenCalledTimes(1);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -2578,7 +2664,7 @@ describe('ofw_send_message with attachments', () => {
         date: { dateTime: '2026-05-14T00:00:00Z' }, from: { name: 'Me' }, recipients: [],
       });
     setup(client);
-    await handlers.get('ofw_send_message')!({
+    await callConfirmed(handlers.get('ofw_send_message')!, {
       subject: 'with attach', body: 'see attached', recipientIds: [1],
       myFileIDs: [50015547, 99887766],
     });
@@ -2600,7 +2686,7 @@ describe('ofw_send_message with attachments', () => {
         date: { dateTime: '2026-05-14T00:00:00Z' }, from: { name: 'Me' }, recipients: [],
       });
     setup(client);
-    await handlers.get('ofw_send_message')!({
+    await callConfirmed(handlers.get('ofw_send_message')!, {
       subject: 'x', body: 'y', recipientIds: [1], myFileIDs: [50015547],
     });
     // After send, the attachment should now be linked to message 200
@@ -3854,7 +3940,7 @@ describe('messages.ts — coverage backfill', () => {
 
   it('send_message: reports the missing required fields for a fresh send', async () => {
     const c = new OFWClient(); vi.spyOn(c, 'request').mockResolvedValue({}); setup(c);
-    await expect(handlers.get('ofw_send_message')!({})).rejects.toThrow(/subject|body|recipientIds/); // 244–246
+    await expect(callConfirmed(handlers.get('ofw_send_message')!, {})).rejects.toThrow(/subject|body|recipientIds/); // 244–246
   });
 });
 
@@ -3892,13 +3978,13 @@ describe('messages.ts — attachment-backfill branches', () => {
 
   it('send_message: subject+body present lists only the missing recipientIds', async () => {
     const c = new OFWClient(); vi.spyOn(c, 'request'); setup(c);
-    await expect(handlers.get('ofw_send_message')!({ subject: 'S', body: 'B' })) // 244[1],245[1]
+    await expect(callConfirmed(handlers.get('ofw_send_message')!, { subject: 'S', body: 'B' })) // 244[1],245[1]
       .rejects.toThrow(/requires recipientIds\b/);
   });
 
   it('send_message: only recipientIds present lists subject, body', async () => {
     const c = new OFWClient(); vi.spyOn(c, 'request'); setup(c);
-    await expect(handlers.get('ofw_send_message')!({ recipientIds: [1] })) // 246[1]
+    await expect(callConfirmed(handlers.get('ofw_send_message')!, { recipientIds: [1] })) // 246[1]
       .rejects.toThrow(/requires subject, body\b/);
   });
 
@@ -3908,7 +3994,7 @@ describe('messages.ts — attachment-backfill branches', () => {
       .mockResolvedValueOnce({ entityId: 500 }) // POST
       .mockResolvedValueOnce({ id: 500 }); // GET bare detail → 290-294 fallbacks
     setup(c);
-    const text = (await handlers.get('ofw_send_message')!({ subject: 'S', body: 'B', recipientIds: [1] })).content[0].text;
+    const text = (await callConfirmed(handlers.get('ofw_send_message')!, { subject: 'S', body: 'B', recipientIds: [1] })).content[0].text;
     // A detail with neither subject nor body cannot confirm the write landed.
     expect(text).toMatch(/^WARNING: the message re-fetched from OFW does not contain the subject and body/);
     const out = JSON.parse(text.slice(text.indexOf('\n\n') + 2));
@@ -3922,7 +4008,7 @@ describe('messages.ts — attachment-backfill branches', () => {
     const c = new OFWClient();
     vi.spyOn(c, 'request').mockResolvedValueOnce(null); // raw falsy, id null
     setup(c);
-    const text = (await handlers.get('ofw_send_message')!({ subject: 'S', body: 'B', recipientIds: [1] })).content[0].text;
+    const text = (await callConfirmed(handlers.get('ofw_send_message')!, { subject: 'S', body: 'B', recipientIds: [1] })).content[0].text;
     expect(text).toContain("WARNING: OFW's send response did not include a message id");
     expect(text).toContain('Message sent successfully.');
   });
@@ -3959,7 +4045,7 @@ describe('send/save write verification', () => {
     const client = new OFWClient();
     sendMessageMocks(client, { entityId: 200, detail: { subject: 'Hi', body: 'completely different' } });
     setup(client);
-    const text = (await handlers.get('ofw_send_message')!({
+    const text = (await callConfirmed(handlers.get('ofw_send_message')!, {
       subject: 'Hi', body: 'my real text', recipientIds: [1],
     })).content[0].text;
     expect(text).toMatch(/^WARNING: the message re-fetched from OFW does not contain the body that was posted/);
@@ -3969,7 +4055,7 @@ describe('send/save write verification', () => {
     const client = new OFWClient();
     sendMessageMocks(client, { entityId: 201, detail: { subject: 'RE: Hi', body: 'my reply\n\n--- original ---' } });
     setup(client);
-    const text = (await handlers.get('ofw_send_message')!({
+    const text = (await callConfirmed(handlers.get('ofw_send_message')!, {
       subject: 'Hi', body: 'my reply', recipientIds: [1],
     })).content[0].text;
     expect(text).not.toContain('WARNING');
@@ -4025,10 +4111,16 @@ describe('send_message draft preservation on unconfirmed send', () => {
         recipients: [{ user: { userId: 1, name: 'A' }, viewed: null }],
         replyToId: null, folder: { id: '3', name: 'Drafts' },
       })
+      // (again: the confirmation gate's phase-2 call re-reads the draft too)
+      .mockResolvedValueOnce({
+        subject: 'S', body: 'B',
+        recipients: [{ user: { userId: 1, name: 'A' }, viewed: null }],
+        replyToId: null, folder: { id: '3', name: 'Drafts' },
+      })
       .mockResolvedValueOnce({ error: 'boom' }); // POST → no id
     setup(client);
 
-    const text = (await handlers.get('ofw_send_message')!({ messageId: 70 })).content[0].text;
+    const text = (await callConfirmed(handlers.get('ofw_send_message')!, { messageId: 70 })).content[0].text;
 
     expect(getDraft(70)).not.toBeNull(); // draft survives
     expect(spy).not.toHaveBeenCalledWith('DELETE', expect.anything(), expect.anything());
@@ -4045,7 +4137,7 @@ describe('send_message draft preservation on unconfirmed send', () => {
     vi.spyOn(client, 'request').mockResolvedValueOnce({ error: 'boom' }); // POST → no id
     setup(client);
 
-    const text = (await handlers.get('ofw_send_message')!({
+    const text = (await callConfirmed(handlers.get('ofw_send_message')!, {
       subject: 'Hi', body: 'B', recipientIds: [1],
     })).content[0].text;
 
@@ -4128,7 +4220,7 @@ describe('response validation (issue #83)', () => {
     const client = new OFWClient();
     vi.spyOn(client, 'request').mockResolvedValueOnce({ entityId: '42' }); // string, not number
     setup(client);
-    await expect(handlers.get('ofw_send_message')!({ subject: 'S', body: 'B', recipientIds: [1] }))
+    await expect(callConfirmed(handlers.get('ofw_send_message')!, { subject: 'S', body: 'B', recipientIds: [1] }))
       .rejects.toThrow(/Unexpected POST \/pub\/v3\/messages \(ofw_send_message\) shape from the upstream API\. entityId/);
   });
 
@@ -4138,7 +4230,7 @@ describe('response validation (issue #83)', () => {
       .mockResolvedValueOnce({ entityId: 7 })
       .mockResolvedValueOnce({ subject: 123 }); // detail subject mistyped
     setup(client);
-    await expect(handlers.get('ofw_send_message')!({ subject: 'S', body: 'B', recipientIds: [1] }))
+    await expect(callConfirmed(handlers.get('ofw_send_message')!, { subject: 'S', body: 'B', recipientIds: [1] }))
       .rejects.toThrow(/Unexpected GET \/pub\/v3\/messages\/\{id\} \(ofw_send_message\) shape from the upstream API\. subject/);
   });
 
@@ -5341,7 +5433,7 @@ describe('draftKey: identity that survives the create-then-delete churn (Gap 3)'
     expect(parsed.complete).toBe(true);
 
     // Send it, and the key follows the message into Sent.
-    const sent = JSON.parse((await handlers.get('ofw_send_message')!({
+    const sent = JSON.parse((await callConfirmed(handlers.get('ofw_send_message')!, {
       messageId: v3.id, recipientIds: [7],
     })).content[0].text);
     expect(sent.draftKey).toBe(v1.draftKey);
@@ -5426,7 +5518,7 @@ describe('draftKey: identity that survives the create-then-delete churn (Gap 3)'
     });
     setup(client);
 
-    const sent = JSON.parse((await handlers.get('ofw_send_message')!({
+    const sent = JSON.parse((await callConfirmed(handlers.get('ofw_send_message')!, {
       messageId: 400, recipientIds: [7],
     })).content[0].text);
 
@@ -5688,9 +5780,11 @@ describe('ofw_send_message — send-by-draft guard & verdicts (consolidated fixe
       .mockResolvedValueOnce(serverCopy({ body: 'edited on OFW since' }));
     setup(client);
 
+    // The freshness guard refuses BEFORE the confirmation gate issues any
+    // preview, so this is a single direct call, not a two-phase one.
     const result = await handlers.get('ofw_send_message')!({
       draftId: 300, expectedRevision: staleRevision,
-    });
+    }, NO_ELICIT_CTX);
 
     expect(result.isError).toBe(true);
     const parsed = JSON.parse(result.content[0].text);
@@ -5707,6 +5801,8 @@ describe('ofw_send_message — send-by-draft guard & verdicts (consolidated fixe
     const client = new OFWClient();
     const spy = vi.spyOn(client, 'request')
       .mockResolvedValueOnce(serverCopy({ body: 'server body' }))
+      // (again: the confirmation gate's phase-2 call re-reads the draft too)
+      .mockResolvedValueOnce(serverCopy({ body: 'server body' }))
       .mockResolvedValueOnce({ entityId: 900 })
       .mockResolvedValueOnce({
         id: 900, subject: 'S', body: 'server body',
@@ -5715,7 +5811,7 @@ describe('ofw_send_message — send-by-draft guard & verdicts (consolidated fixe
       .mockResolvedValueOnce({});
     setup(client);
 
-    const result = await handlers.get('ofw_send_message')!({
+    const result = await callConfirmed(handlers.get('ofw_send_message')!, {
       draftId: 300, recipientIds: [7], expectedRevision: draftRevision(serverContent),
     });
 
@@ -5731,6 +5827,8 @@ describe('ofw_send_message — send-by-draft guard & verdicts (consolidated fixe
     const client = new OFWClient();
     const spy = vi.spyOn(client, 'request')
       .mockResolvedValueOnce(serverCopy())
+      // (again: the confirmation gate's phase-2 call re-reads the draft too)
+      .mockResolvedValueOnce(serverCopy())
       .mockResolvedValueOnce({ entityId: 901 })
       .mockResolvedValueOnce({
         id: 901, subject: 'S', body: 'draft body',
@@ -5738,7 +5836,7 @@ describe('ofw_send_message — send-by-draft guard & verdicts (consolidated fixe
       });
     setup(client);
 
-    const text = (await handlers.get('ofw_send_message')!({
+    const text = (await callConfirmed(handlers.get('ofw_send_message')!, {
       draftId: 300, recipientIds: [7], deleteDraftOnSuccess: false,
     })).content[0].text;
 
@@ -5761,7 +5859,7 @@ describe('ofw_send_message — send-by-draft guard & verdicts (consolidated fixe
       });
     setup(client);
 
-    await handlers.get('ofw_send_message')!({
+    await callConfirmed(handlers.get('ofw_send_message')!, {
       draftId: 300, subject: 'X', body: 'Y', recipientIds: [7], deleteDraftOnSuccess: false,
     });
 
@@ -5783,7 +5881,7 @@ describe('ofw_send_message — send-by-draft guard & verdicts (consolidated fixe
       });
     setup(client);
 
-    const text = (await handlers.get('ofw_send_message')!({
+    const text = (await callConfirmed(handlers.get('ofw_send_message')!, {
       draftId: 999888, subject: 'X', body: 'Y', recipientIds: [7], deleteDraftOnSuccess: false,
     })).content[0].text;
 
@@ -5809,7 +5907,7 @@ describe('ofw_send_message — send-by-draft guard & verdicts (consolidated fixe
     });
     setup(client);
 
-    const text = (await handlers.get('ofw_send_message')!({
+    const text = (await callConfirmed(handlers.get('ofw_send_message')!, {
       draftId: 300, recipientIds: [7],
     })).content[0].text;
 
@@ -5829,6 +5927,8 @@ describe('ofw_send_message — send-by-draft guard & verdicts (consolidated fixe
     const client = new OFWClient();
     const spy = vi.spyOn(client, 'request')
       .mockResolvedValueOnce(serverCopy())
+      // (again: the confirmation gate's phase-2 call re-reads the draft too)
+      .mockResolvedValueOnce(serverCopy())
       .mockResolvedValueOnce({ entityId: 905 })
       .mockResolvedValueOnce({
         id: 905, subject: 'S', body: 'something else entirely',
@@ -5836,7 +5936,7 @@ describe('ofw_send_message — send-by-draft guard & verdicts (consolidated fixe
       });
     setup(client);
 
-    const text = (await handlers.get('ofw_send_message')!({
+    const text = (await callConfirmed(handlers.get('ofw_send_message')!, {
       draftId: 300, recipientIds: [7],
     })).content[0].text;
 
@@ -5853,6 +5953,8 @@ describe('ofw_send_message — send-by-draft guard & verdicts (consolidated fixe
     const client = new OFWClient();
     vi.spyOn(client, 'request')
       .mockResolvedValueOnce(serverCopy())
+      // (again: the confirmation gate's phase-2 call re-reads the draft too)
+      .mockResolvedValueOnce(serverCopy())
       .mockResolvedValueOnce({ entityId: 906 })
       .mockResolvedValueOnce({
         id: 906, subject: 'S', body: 'draft body',
@@ -5861,7 +5963,7 @@ describe('ofw_send_message — send-by-draft guard & verdicts (consolidated fixe
       });
     setup(client);
 
-    const text = (await handlers.get('ofw_send_message')!({
+    const text = (await callConfirmed(handlers.get('ofw_send_message')!, {
       draftId: 300, recipientIds: [7],
     })).content[0].text;
 
@@ -5881,6 +5983,8 @@ describe('ofw_send_message — send-by-draft guard & verdicts (consolidated fixe
     const client = new OFWClient();
     const spy = vi.spyOn(client, 'request')
       .mockResolvedValueOnce(serverCopy())
+      // (again: the confirmation gate's phase-2 call re-reads the draft too)
+      .mockResolvedValueOnce(serverCopy())
       .mockResolvedValueOnce({ entityId: 907 })
       .mockResolvedValueOnce({
         id: 907, subject: 'S', body: 'draft body',
@@ -5889,7 +5993,7 @@ describe('ofw_send_message — send-by-draft guard & verdicts (consolidated fixe
       .mockResolvedValueOnce({});
     setup(client);
 
-    await handlers.get('ofw_send_message')!({
+    await callConfirmed(handlers.get('ofw_send_message')!, {
       draftId: 300,
       expectedRevision: draftRevision({ subject: 'S', body: 'draft body', replyToId: null, recipients: [] }),
     });
@@ -5902,6 +6006,8 @@ describe('ofw_send_message — send-by-draft guard & verdicts (consolidated fixe
     const client = new OFWClient();
     const spy = vi.spyOn(client, 'request')
       .mockResolvedValueOnce(serverCopy({ recipients: [{ user: { userId: 7, name: 'Co-parent' }, viewed: null }] }))
+      // (again: the confirmation gate's phase-2 call re-reads the draft too)
+      .mockResolvedValueOnce(serverCopy({ recipients: [{ user: { userId: 7, name: 'Co-parent' }, viewed: null }] }))
       .mockResolvedValueOnce({ entityId: 912 })
       .mockResolvedValueOnce({
         id: 912, subject: 'S', body: 'draft body',
@@ -5910,7 +6016,7 @@ describe('ofw_send_message — send-by-draft guard & verdicts (consolidated fixe
       .mockResolvedValueOnce({});
     setup(client);
 
-    await handlers.get('ofw_send_message')!({ draftId: 300 });
+    await callConfirmed(handlers.get('ofw_send_message')!, { draftId: 300 });
     const postCall = spy.mock.calls.find((c) => c[0] === 'POST');
     expect((postCall![2] as { recipientIds: number[] }).recipientIds).toEqual([7]);
   });
@@ -5918,10 +6024,13 @@ describe('ofw_send_message — send-by-draft guard & verdicts (consolidated fixe
   it('errors with the OFW-drafts-store-no-recipients explanation when nobody can supply recipients', async () => {
     seedDraft();
     const client = new OFWClient();
-    vi.spyOn(client, 'request').mockResolvedValueOnce(serverCopy());
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce(serverCopy())
+      // (again: the confirmation gate's phase-2 call re-reads the draft too)
+      .mockResolvedValueOnce(serverCopy());
     setup(client);
 
-    await expect(handlers.get('ofw_send_message')!({ draftId: 300 }))
+    await expect(callConfirmed(handlers.get('ofw_send_message')!, { draftId: 300 }))
       .rejects.toThrow(/does not persist recipients on drafts.*ofw_get_profile/s);
     expect(getDraft(300)).not.toBeNull();
   });
@@ -5931,6 +6040,8 @@ describe('ofw_send_message — send-by-draft guard & verdicts (consolidated fixe
     const client = new OFWClient();
     const spy = vi.spyOn(client, 'request')
       .mockRejectedValueOnce(new Error('OFW API error: 503'))
+      // (again: the confirmation gate's phase-2 call re-reads the draft too)
+      .mockRejectedValueOnce(new Error('OFW API error: 503'))
       .mockResolvedValueOnce({ entityId: 908 })
       .mockResolvedValueOnce({
         id: 908, subject: 'S', body: 'cached body',
@@ -5939,7 +6050,7 @@ describe('ofw_send_message — send-by-draft guard & verdicts (consolidated fixe
       .mockResolvedValueOnce({});
     setup(client);
 
-    const text = (await handlers.get('ofw_send_message')!({
+    const text = (await callConfirmed(handlers.get('ofw_send_message')!, {
       draftId: 300, recipientIds: [7], force: true,
     })).content[0].text;
 
@@ -5950,10 +6061,13 @@ describe('ofw_send_message — send-by-draft guard & verdicts (consolidated fixe
 
   it('force:true with no server read AND no cached draft demands the missing fields explicitly', async () => {
     const client = new OFWClient();
-    vi.spyOn(client, 'request').mockRejectedValueOnce(new Error('OFW API error: 503'));
+    vi.spyOn(client, 'request')
+      .mockRejectedValueOnce(new Error('OFW API error: 503'))
+      // (again: the confirmation gate's phase-2 call re-reads the draft too)
+      .mockRejectedValueOnce(new Error('OFW API error: 503'));
     setup(client);
 
-    await expect(handlers.get('ofw_send_message')!({ draftId: 777, force: true }))
+    await expect(callConfirmed(handlers.get('ofw_send_message')!, { draftId: 777, force: true }))
       .rejects.toThrow(/content was not readable.*Pass them explicitly/s);
   });
 
@@ -5967,6 +6081,8 @@ describe('ofw_send_message — send-by-draft guard & verdicts (consolidated fixe
     const client = new OFWClient();
     vi.spyOn(client, 'request')
       .mockResolvedValueOnce(serverCopy({ replyToId: 100 }))
+      // (again: the confirmation gate's phase-2 call re-reads the draft too)
+      .mockResolvedValueOnce(serverCopy({ replyToId: 100 }))
       .mockResolvedValueOnce({ entityId: 909 })
       .mockResolvedValueOnce({
         id: 909, subject: 'S', body: 'draft body',
@@ -5976,7 +6092,7 @@ describe('ofw_send_message — send-by-draft guard & verdicts (consolidated fixe
       .mockResolvedValueOnce({});
     setup(client);
 
-    const text = (await handlers.get('ofw_send_message')!({
+    const text = (await callConfirmed(handlers.get('ofw_send_message')!, {
       draftId: 300, recipientIds: [7],
     })).content[0].text;
 
@@ -5997,6 +6113,8 @@ describe('ofw_send_message — send-by-draft guard & verdicts (consolidated fixe
     const client = new OFWClient();
     vi.spyOn(client, 'request')
       .mockResolvedValueOnce(serverCopy({ replyToId: 100 }))
+      // (again: the confirmation gate's phase-2 call re-reads the draft too)
+      .mockResolvedValueOnce(serverCopy({ replyToId: 100 }))
       .mockResolvedValueOnce({ entityId: 910 })
       .mockResolvedValueOnce({
         id: 910, subject: 'S', body: 'draft body',
@@ -6006,7 +6124,7 @@ describe('ofw_send_message — send-by-draft guard & verdicts (consolidated fixe
       .mockResolvedValueOnce({});
     setup(client);
 
-    const text = (await handlers.get('ofw_send_message')!({
+    const text = (await callConfirmed(handlers.get('ofw_send_message')!, {
       draftId: 300, recipientIds: [7],
     })).content[0].text;
 
@@ -6028,6 +6146,8 @@ describe('ofw_send_message — send-by-draft guard & verdicts (consolidated fixe
     const client = new OFWClient();
     vi.spyOn(client, 'request')
       .mockResolvedValueOnce(serverCopy({ replyToId: 100 }))
+      // (again: the confirmation gate's phase-2 call re-reads the draft too)
+      .mockResolvedValueOnce(serverCopy({ replyToId: 100 }))
       .mockResolvedValueOnce({ entityId: 911 })
       .mockResolvedValueOnce({
         id: 911, subject: 'S', body: 'draft body',
@@ -6037,7 +6157,7 @@ describe('ofw_send_message — send-by-draft guard & verdicts (consolidated fixe
       .mockResolvedValueOnce({});
     setup(client);
 
-    const text = (await handlers.get('ofw_send_message')!({
+    const text = (await callConfirmed(handlers.get('ofw_send_message')!, {
       draftId: 300, recipientIds: [7],
     })).content[0].text;
 
@@ -6201,6 +6321,8 @@ describe('auto-review follow-ups for the consolidated fixes (issue #207)', () =>
     const client = new OFWClient();
     vi.spyOn(client, 'request')
       .mockResolvedValueOnce({ subject: 'S', body: 'B', recipients: [], replyToId: 100, folder: { id: '3', name: 'Drafts' } })
+      // (again: the confirmation gate's phase-2 call re-reads the draft too)
+      .mockResolvedValueOnce({ subject: 'S', body: 'B', recipients: [], replyToId: 100, folder: { id: '3', name: 'Drafts' } })
       .mockResolvedValueOnce({ entityId: 920 })
       .mockResolvedValueOnce({
         id: 920, subject: 'S', body: 'B',
@@ -6210,7 +6332,7 @@ describe('auto-review follow-ups for the consolidated fixes (issue #207)', () =>
       .mockResolvedValueOnce({});
     setup(client);
 
-    const text = (await handlers.get('ofw_send_message')!({
+    const text = (await callConfirmed(handlers.get('ofw_send_message')!, {
       draftId: 310, recipientIds: [7],
     })).content[0].text;
 
@@ -6333,6 +6455,11 @@ describe('auto-review follow-ups for the consolidated fixes (issue #207)', () =>
         subject: 'S', body: 'B', recipients: [], replyToId: null,
         folder: { id: '3', name: 'Drafts' }, files: [51, 52],
       })
+      // (again: the confirmation gate's phase-2 call re-reads the draft too)
+      .mockResolvedValueOnce({
+        subject: 'S', body: 'B', recipients: [], replyToId: null,
+        folder: { id: '3', name: 'Drafts' }, files: [51, 52],
+      })
       .mockResolvedValueOnce({ entityId: 930 })
       .mockResolvedValueOnce({
         id: 930, subject: 'S', body: 'B',
@@ -6341,7 +6468,7 @@ describe('auto-review follow-ups for the consolidated fixes (issue #207)', () =>
       .mockResolvedValueOnce({});
     setup(client);
 
-    await handlers.get('ofw_send_message')!({ draftId: 320, recipientIds: [7] });
+    await callConfirmed(handlers.get('ofw_send_message')!, { draftId: 320, recipientIds: [7] });
 
     const postCall = spy.mock.calls.find((c) => c[0] === 'POST');
     expect((postCall![2] as { attachments: { myFileIDs: number[] } }).attachments.myFileIDs).toEqual([51, 52]);
@@ -6360,6 +6487,11 @@ describe('auto-review follow-ups for the consolidated fixes (issue #207)', () =>
         subject: 'S', body: 'B', recipients: [], replyToId: null,
         folder: { id: '3', name: 'Drafts' }, files: [51],
       })
+      // (again: the confirmation gate's phase-2 call re-reads the draft too)
+      .mockResolvedValueOnce({
+        subject: 'S', body: 'B', recipients: [], replyToId: null,
+        folder: { id: '3', name: 'Drafts' }, files: [51],
+      })
       .mockResolvedValueOnce({ entityId: 931 })
       .mockResolvedValueOnce({
         id: 931, subject: 'S', body: 'B',
@@ -6368,9 +6500,160 @@ describe('auto-review follow-ups for the consolidated fixes (issue #207)', () =>
       .mockResolvedValueOnce({});
     setup(client);
 
-    await handlers.get('ofw_send_message')!({ draftId: 321, recipientIds: [7], myFileIDs: [99] });
+    await callConfirmed(handlers.get('ofw_send_message')!, { draftId: 321, recipientIds: [7], myFileIDs: [99] });
 
     const postCall = spy.mock.calls.find((c) => c[0] === 'POST');
     expect((postCall![2] as { attachments: { myFileIDs: number[] } }).attachments.myFileIDs).toEqual([99]);
+  });
+});
+
+describe('ofw_send_message — confirmation gate (SEC-1)', () => {
+  const draftOnServer = {
+    subject: 'Re: pickup', body: 'I will be there at 3pm',
+    recipients: [{ user: { userId: 123, name: 'Alison' }, viewed: null }],
+    replyToId: null, folder: { id: '3', name: 'Drafts' },
+  };
+
+  it('declares confirmToken and says so in its description', () => {
+    const server = new McpServer({ name: 'test', version: '0.0.0' });
+    const configs = new Map<string, { inputSchema?: z.ZodObject; description: string; annotations?: Record<string, unknown> }>();
+    vi.spyOn(server, 'registerTool').mockImplementation((name: string, config: unknown) => {
+      configs.set(name, config as { inputSchema?: z.ZodObject; description: string });
+      return undefined as never;
+    });
+    registerMessageTools(server, new OFWClient(), cacheProvider, attachmentIO);
+    const tool = configs.get('ofw_send_message')!;
+    expect(tool.inputSchema!.shape).toHaveProperty('confirmToken');
+    expect(tool.description).toMatch(/confirmToken/);
+    expect(tool.description).toMatch(/MCP_CONFIRM_MODE/);
+    expect(tool.annotations).toMatchObject({ destructiveHint: true });
+  });
+
+  it('phase 1: a client that cannot be prompted gets a human-readable preview and NOTHING is sent', async () => {
+    // Recipient 123 is known to the cache from an earlier sent message, so
+    // the preview can name the person — a numeric id alone is not a preview
+    // a human can approve.
+    upsertMessage(sampleMessageRow({ id: 900, folder: 'sent', recipients: [{ userId: 123, name: 'Alison', viewedAt: null }] }));
+    upsertAttachmentForMessage({
+      fileId: 5551, fileName: 'may-invoice.pdf', label: 'May invoice', mimeType: 'application/pdf',
+      sizeBytes: 10, metadata: {}, messageId: 0,
+    });
+    const client = new OFWClient();
+    const spy = sendMessageMocks(client, { entityId: 200 });
+    setup(client);
+
+    const preview = await callPreview(handlers.get('ofw_send_message')!, {
+      subject: 'Re: pickup', body: 'I will be there at 3pm', recipientIds: [123], myFileIDs: [5551],
+    });
+
+    expect(spy).not.toHaveBeenCalled();
+    expect(preview.confirmToken).toEqual(expect.any(String));
+    expect(preview.preview).toMatchObject({
+      subject: 'Re: pickup',
+      body: 'I will be there at 3pm',
+      to: [{ userId: 123, name: 'Alison' }],
+      attachments: [{ fileId: 5551, fileName: 'may-invoice.pdf' }],
+    });
+    expect(JSON.stringify(preview.preview)).toMatch(/irreversible|cannot be recalled/i);
+    expect(preview.instruction).toMatch(/approve/i);
+  });
+
+  it('phase 1 names a recipient the cache does not know as unresolved instead of inventing a name', async () => {
+    const client = new OFWClient();
+    sendMessageMocks(client, { entityId: 200 });
+    setup(client);
+    const preview = await callPreview(handlers.get('ofw_send_message')!, { subject: 'S', body: 'B', recipientIds: [4242] });
+    expect(preview.preview.to).toEqual([{ userId: 4242, name: null }]);
+    expect(JSON.stringify(preview.preview)).toMatch(/4242/);
+    expect(JSON.stringify(preview.preview)).toMatch(/no name on file/i);
+  });
+
+  it('phase 2: the same call with the token sends exactly once, and the token cannot be reused', async () => {
+    const client = new OFWClient();
+    const spy = sendMessageMocks(client, { entityId: 200 });
+    setup(client);
+    const args = { subject: 'Re: pickup', body: 'I will be there at 3pm', recipientIds: [123] };
+
+    const { confirmToken } = await callPreview(handlers.get('ofw_send_message')!, args);
+    const result = await handlers.get('ofw_send_message')!({ ...args, confirmToken }, NO_ELICIT_CTX);
+
+    expect(spy.mock.calls.filter((c) => c[0] === 'POST')).toHaveLength(1);
+    expect(result.content[0].text).toContain('"sentMessageId": 200');
+
+    // One approval acts once: replaying the spent token sends nothing.
+    const replay = await handlers.get('ofw_send_message')!({ ...args, confirmToken }, NO_ELICIT_CTX);
+    expect(replay.isError).toBe(true);
+    expect(JSON.parse(replay.content[0].text)).toMatchObject({ error: 'TOKEN_REUSED', dispatched: false });
+    expect(spy.mock.calls.filter((c) => c[0] === 'POST')).toHaveLength(1);
+  });
+
+  it('phase 2 with a body that differs from the previewed one is refused as DRAFT_CHANGED — no send', async () => {
+    const client = new OFWClient();
+    const spy = sendMessageMocks(client, { entityId: 200 });
+    setup(client);
+    const { confirmToken } = await callPreview(handlers.get('ofw_send_message')!, { subject: 'S', body: 'polite version', recipientIds: [1] });
+
+    const result = await handlers.get('ofw_send_message')!({ subject: 'S', body: 'angry version', recipientIds: [1], confirmToken }, NO_ELICIT_CTX);
+
+    expect(result.isError).toBe(true);
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed).toMatchObject({ error: 'DRAFT_CHANGED', reason: 'payload-changed', dispatched: false });
+    // A fresh preview + token for what WOULD now be sent rides along.
+    expect(parsed.preview.body).toBe('angry version');
+    expect(parsed.confirmToken).toEqual(expect.any(String));
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('force:true cannot skip the gate: a draft edited on OFW between preview and confirmation is refused, and the revision is re-read each call', async () => {
+    upsertDraft({
+      id: 55, subject: 'Pickup', body: 'At 3', recipients: [], replyToId: null,
+      modifiedAt: '2026-05-04T12:00:00', listData: {},
+    });
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request')
+      // Phase 1 guard re-read: matches the cache.
+      .mockResolvedValueOnce({ subject: 'Pickup', body: 'At 3', recipients: [], replyToId: null, folder: { id: '3', name: 'Drafts' } })
+      // Phase 2 guard re-read: the co-parent-facing body changed on OFW.
+      .mockResolvedValueOnce({ subject: 'Pickup', body: 'At 3 — and bring the forms', recipients: [], replyToId: null, folder: { id: '3', name: 'Drafts' } });
+    setup(client);
+    const args = { draftId: 55, recipientIds: [1], force: true };
+
+    const { confirmToken } = await callPreview(handlers.get('ofw_send_message')!, args);
+    const result = await handlers.get('ofw_send_message')!({ ...args, confirmToken }, NO_ELICIT_CTX);
+
+    expect(result.isError).toBe(true);
+    expect(JSON.parse(result.content[0].text)).toMatchObject({ error: 'DRAFT_CHANGED', dispatched: false });
+    expect(spy.mock.calls.map((c) => c[0])).toEqual(['GET', 'GET']);
+    expect(getDraft(55)).not.toBeNull();
+  });
+
+  it('a stale draft is still refused by the freshness guard BEFORE any preview is issued', async () => {
+    upsertDraft({ id: 56, subject: 'S', body: 'cached', recipients: [], replyToId: null, modifiedAt: '2026-05-04T12:00:00', listData: {} });
+    const client = new OFWClient();
+    vi.spyOn(client, 'request').mockResolvedValueOnce({ subject: 'S', body: 'server edit', recipients: [], replyToId: null, folder: { id: '3', name: 'Drafts' } });
+    setup(client);
+    const result = await handlers.get('ofw_send_message')!({ draftId: 56, recipientIds: [1] }, NO_ELICIT_CTX);
+    expect(JSON.parse(result.content[0].text).error).toBe('STALE_DRAFT');
+  });
+
+  it('a client that CAN be prompted gets the real elicitation prompt and nothing is sent', async () => {
+    const client = new OFWClient();
+    const spy = sendMessageMocks(client, { entityId: 200 });
+    setup(client);
+    const result = await handlers.get('ofw_send_message')!({ subject: 'S', body: 'B', recipientIds: [1] }, CAN_ASK_CTX);
+    expect(result.resultType).toBe('input_required');
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('MCP_CONFIRM_MODE=refuse: a client that cannot be prompted is refused outright, pointing at the web app', async () => {
+    process.env.MCP_CONFIRM_MODE = 'refuse';
+    const client = new OFWClient();
+    const spy = sendMessageMocks(client, { entityId: 200 });
+    setup(client);
+    const result = await handlers.get('ofw_send_message')!({ subject: 'S', body: 'B', recipientIds: [1] }, NO_ELICIT_CTX);
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.reason).toBe('confirmation-unsupported');
+    expect(parsed.note).toMatch(/ourfamilywizard\.com/);
+    expect(spy).not.toHaveBeenCalled();
   });
 });

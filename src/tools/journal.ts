@@ -1,7 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import type { OFWClient } from '../client.js';
-import { jsonResponse } from './_shared.js';
+import { jsonResponse, requestWrite, UnconfirmedWriteError, unconfirmedWriteResponse } from './_shared.js';
 import { offsetState, readUpstreamPaging, withPaginationFirst } from './pagination.js';
 import { getWriteMode } from '../config.js';
 
@@ -49,7 +49,17 @@ export function registerJournalTools(server: McpServer, client: OFWClient): void
       body: z.string().describe('Entry text content'),
     }),
   }, async (args) => {
-    const data = await client.request('POST', '/pub/v1/journals', args);
+    let data: unknown;
+    try {
+      data = await requestWrite(client, 'POST', '/pub/v1/journals', args);
+    } catch (e) {
+      if (!(e instanceof UnconfirmedWriteError)) throw e;
+      return unconfirmedWriteResponse(e, {
+        result: 'JOURNAL_UNCONFIRMED',
+        what: 'create this journal entry',
+        checkWith: 'ofw_list_journal_entries (look for this title among the newest entries)',
+      });
+    }
     return jsonResponse(data);
   });
 }

@@ -45,7 +45,7 @@ const FNV_OFFSET = 0xcbf29ce484222325n;
 const FNV_PRIME = 0x100000001b3n;
 const MASK64 = 0xffffffffffffffffn;
 
-function fnv1a64(s: string): string {
+export function fnv1a64(s: string): string {
   let h = FNV_OFFSET;
   for (let i = 0; i < s.length; i++) {
     h = (h ^ BigInt(s.charCodeAt(i))) * FNV_PRIME & MASK64;

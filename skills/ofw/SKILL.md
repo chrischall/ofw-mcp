@@ -216,6 +216,8 @@ Editing a draft mints a **new OFW id every time** — `ofw_save_draft` replaces 
 ## Caution
 
 - **Always confirm before sending messages or deleting anything** — OFW is a legal co-parenting record.
+- **The server enforces it for co-parent-visible writes.** `ofw_send_message`, `ofw_create_expense`, shared-event `ofw_create_event`/`ofw_update_event`/`ofw_delete_event` and `SHARED` `ofw_upload_attachment` either raise a confirmation prompt or, on clients that cannot (claude.ai, Claude Desktop), return `status: "confirmation-required"` with a `preview` and a `confirmToken` and write nothing. Show the user the preview, get their approval, then repeat the SAME call with `confirmToken`. A `DRAFT_CHANGED` refusal means the arguments or the target changed since the preview — show the fresh preview it returns and ask again.
+- **`*_UNCONFIRMED` means it may have landed.** Never retry a `SEND_`/`EXPENSE_`/`EVENT_`/`JOURNAL_UNCONFIRMED` write until the matching list/sync shows it did not.
 - `ofw_get_notifications` updates last-seen status — avoid calling silently in the background.
 - `ofw_get_message` marks messages read — warn the user if they want to keep something unread.
 - **Do not narrate cached state as present fact.** Before saying what "is" true on OFW right now, call `ofw_status` — one live round trip that answers drafts, ids and draft keys at once. Never assemble a status summary from earlier tool results in the conversation; re-read.
