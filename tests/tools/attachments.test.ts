@@ -1,7 +1,22 @@
-import { describe, it, expect } from 'vitest';
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, statSync } from 'node:fs';
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import * as mcpUtils from '@chrischall/mcp-utils';
+
+// Pass-through mock so a test can intercept fileBlob (the open) while the real
+// implementation still runs by default.
+const fileBlobHook = vi.hoisted(() => ({ before: undefined as undefined | (() => void) }));
+vi.mock('@chrischall/mcp-utils', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@chrischall/mcp-utils')>();
+  return {
+    ...actual,
+    fileBlob: vi.fn((...args: Parameters<typeof actual.fileBlob>) => {
+      fileBlobHook.before?.();
+      return actual.fileBlob(...args);
+    }),
+  };
+});
 import {
   normalizeMimeType, sniffImageMime, resolveDownloadMime, isHostRenderableImage, mimeFromName,
   NodeAttachmentIO,
@@ -160,6 +175,56 @@ describe('NodeAttachmentIO.writeDownload — private directories (PRIV-1)', () =
       expect(mode(join(root, '1-a.pdf'))).toBe(0o600);
     } finally {
       rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('NodeAttachmentIO.resolveUpload — confinement re-checked at open time', () => {
+  const savedUploadDir = process.env.OFW_UPLOAD_DIR;
+  afterEach(() => {
+    fileBlobHook.before = undefined;
+    vi.mocked(mcpUtils.fileBlob).mockClear();
+    if (savedUploadDir === undefined) delete process.env.OFW_UPLOAD_DIR;
+    else process.env.OFW_UPLOAD_DIR = savedUploadDir;
+  });
+
+  it('passes the realpath of the upload root to fileBlob as allowedRoots', async () => {
+    const base = mkdtempSync(join(tmpdir(), 'ofw-upload-roots-'));
+    try {
+      const root = join(base, 'uploads');
+      mkdirSync(root);
+      writeFileSync(join(root, 'form.pdf'), 'pdf');
+      process.env.OFW_UPLOAD_DIR = root;
+      const upload = await new NodeAttachmentIO().resolveUpload('form.pdf');
+      expect(upload.fileName).toBe('form.pdf');
+      expect(vi.mocked(mcpUtils.fileBlob)).toHaveBeenCalledWith(
+        realpathSync(join(root, 'form.pdf')),
+        expect.objectContaining({ allowedRoots: [realpathSync(root)] }),
+      );
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a file swapped for an outside symlink between the check and the open', async () => {
+    const base = mkdtempSync(join(tmpdir(), 'ofw-upload-race-'));
+    try {
+      const root = join(base, 'uploads');
+      mkdirSync(root);
+      const secret = join(base, 'secret.txt');
+      writeFileSync(secret, 'top secret');
+      const target = join(root, 'form.pdf');
+      writeFileSync(target, 'pdf');
+      process.env.OFW_UPLOAD_DIR = root;
+      // The swap lands after resolveUpload's own checks, just before the open.
+      fileBlobHook.before = () => {
+        unlinkSync(target);
+        symlinkSync(secret, target);
+      };
+      await expect(new NodeAttachmentIO().resolveUpload('form.pdf'))
+        .rejects.toThrow(/outside the allowed directories/);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
     }
   });
 });
