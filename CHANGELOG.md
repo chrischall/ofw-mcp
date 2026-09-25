@@ -1,5 +1,14 @@
 # Changelog
 
+## [2.19.4](https://github.com/chrischall/ofw-mcp/compare/v2.19.3...v2.19.4) (2026-09-25)
+
+
+### Bug Fixes
+
+* **attachments:** re-check the upload root when opening the file ([#332](https://github.com/chrischall/ofw-mcp/issues/332)) ([d590f1d](https://github.com/chrischall/ofw-mcp/commit/d590f1d18d89840ca6c8aef3f43507520fc9e741))
+* **deps:** bump dotenv from 18.0.0 to 18.0.2 in the production-dependencies group ([#329](https://github.com/chrischall/ofw-mcp/issues/329)) ([4782ebd](https://github.com/chrischall/ofw-mcp/commit/4782ebdc848b6bd0c0b2686d5b5009bcbdb373e2))
+* **writes:** ask before sending messages or posting co-parent-visible OFW records ([#331](https://github.com/chrischall/ofw-mcp/issues/331)) ([8a7509b](https://github.com/chrischall/ofw-mcp/commit/8a7509bcd95087cbd7ee4e50ba113fdbc9daf761))
+
 ## [2.19.3](https://github.com/chrischall/ofw-mcp/compare/v2.19.2...v2.19.3) (2026-09-23)
 
 
