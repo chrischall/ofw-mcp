@@ -204,7 +204,9 @@ export class NodeAttachmentIO implements AttachmentIO {
     const fileName = basename(abs);
     const mimeType = mimeFromName(fileName);
     // fileBlob streams the file off disk (a file-backed Blob) instead of buffering it.
-    const blob = await fileBlob(real, { type: mimeType });
+    // allowedRoots makes it re-check confinement (through symlinks) at open time,
+    // closing the window between the checks above and the open.
+    const blob = await fileBlob(real, { type: mimeType, allowedRoots: [realRoot] });
     return { blob, fileName, mimeType, sizeBytes: stat.size };
   }
 
