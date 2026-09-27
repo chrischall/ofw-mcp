@@ -8,6 +8,7 @@ import { OFWClient } from '../../src/client.js';
 import { registerMessageTools } from '../../src/tools/messages.js';
 import * as syncModule from '../../src/sync.js';
 import { NodeAttachmentIO } from '../../src/tools/attachments.js';
+import { MAX_INLINE_BYTES } from '../../src/tools/delivery.js';
 import type { AttachmentIO, ResolvedUpload } from '../../src/tools/attachments.js';
 import { draftRevision } from '../../src/tools/draft-freshness.js';
 import { OFWCache } from '../../src/cache/node.js';
@@ -3403,6 +3404,32 @@ describe('ofw_download_attachment', () => {
     const img = result.content[1];
     expect(img.type).toBe('image');
     expect(Buffer.from(img.data, 'base64').equals(bytes)).toBe(true);
+  });
+
+  it('over-cap image: tool error that suggests disk mode locally but not when hosted (mcp-host#952)', async () => {
+    const big = Buffer.concat([PNG_SIG, Buffer.alloc(MAX_INLINE_BYTES)]);
+    const mockFetch = (client: OFWClient, fileId: number): void => {
+      vi.spyOn(client, 'request').mockResolvedValueOnce({
+        fileId, fileName: 'huge.png', label: 'huge.png', fileType: 'image/png', fileSize: big.length,
+      });
+      vi.spyOn(client, 'requestBinary').mockResolvedValueOnce({
+        body: big, contentType: 'image/png', suggestedFileName: 'huge.png',
+      });
+    };
+
+    const hostedClient = new OFWClient();
+    mockFetch(hostedClient, 610);
+    const hosted = setupHosted(hostedClient);
+    const hostedErr = await hosted.get('ofw_download_attachment')!({ fileId: 610, inline: true })
+      .then(() => null, (e: Error) => e);
+    expect(hostedErr?.message).toMatch(/over the 10 MiB limit/);
+    expect(hostedErr?.message).not.toMatch(/inline:false/);
+
+    const localClient = new OFWClient();
+    mockFetch(localClient, 611);
+    setup(localClient);
+    await expect(handlers.get('ofw_download_attachment')!({ fileId: 611, inline: true }))
+      .rejects.toThrow(/pass inline:false to save it to disk/);
   });
 
   it('hosted (no disk): default inline is not marked forcedInline', async () => {

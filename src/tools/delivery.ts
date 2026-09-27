@@ -14,6 +14,7 @@
 //   2. extractable document   → the FILE'S TEXT, as text (see src/extract)
 //   3. raw bytes              → base64 EmbeddedResource, as before
 //
+// Rungs 1 and 3 are bounded by MAX_INLINE_BYTES (10 MiB raw; see below).
 // Rung 3 never disappears, so nothing regresses; rung 2 is what makes a
 // spreadsheet, PDF, Word or PowerPoint attachment readable at all. When a rung
 // is skipped or fails, the response says so by name in `deliveryAttempts` —
@@ -21,6 +22,23 @@
 
 import { extractAttachment, type Extracted } from '../extract/index.js';
 import { isHostRenderableImage } from './attachments.js';
+
+/**
+ * Upper bound on the RAW bytes this tool will return inline (as ImageContent
+ * or a base64 EmbeddedResource). Extracted text is not subject to it — that is
+ * already bounded by `maxChars`.
+ *
+ * Why 10 MiB: mcp-host, the hosted runtime that runs this MCP for claude.ai,
+ * caps any single child result at 14 MiB of serialized JSON-RPC
+ * (`CHILD_RESULT_MAX_BYTES`, chrischall/mcp-host#952) and replaces anything
+ * larger with a generic "result too large" tool error. 10 MiB raw is ~13.3 MiB
+ * as base64, which with the JSON-RPC envelope still fits under 14 MiB — so this
+ * bound fires first, with a message that says what to do instead. claude.ai
+ * itself accepts images up to 10 MB each (measured 2026-09-27), and before
+ * #952 anything over 10 MiB killed the child process outright. Real traffic
+ * for this tool has peaked at ~3 MB, so normal use never reaches it.
+ */
+export const MAX_INLINE_BYTES = 10 * 1024 * 1024;
 
 /** Which rung of the ladder produced the content in this response. */
 export type DeliveredVia = 'image' | 'extracted' | 'blob' | 'disk';
@@ -80,6 +98,31 @@ export interface InlineDeliveryInput {
   /** True when an explicit `inline:false` was overridden (no filesystem). */
   forcedInline: boolean;
   options: DeliveryOptions;
+  /**
+   * Whether disk mode (`inline:false`) can deliver the file instead. Only then
+   * does an over-cap refusal suggest it; on a hosted deployment it cannot.
+   */
+  diskAvailable?: boolean;
+}
+
+/**
+ * Refuse to inline more than {@link MAX_INLINE_BYTES}. This is a tool error
+ * rather than a fallback: the only non-inline channel is disk mode, which the
+ * hosted runtime (the one the cap protects) does not have, and silently
+ * writing to disk when the caller asked for content would not be honest.
+ */
+function assertInlineSize(input: InlineDeliveryInput, rawRequested: boolean): void {
+  const { bytes, fileName, fileId, diskAvailable } = input;
+  if (bytes.length <= MAX_INLINE_BYTES) return;
+  const hints: string[] = [];
+  if (rawRequested) hints.push('omit extract:false to get the file\'s extracted text instead, if it is a readable document type');
+  if (diskAvailable) hints.push('pass inline:false to save it to disk and get the path');
+  hints.push('or open it directly in OurFamilyWizard');
+  throw new Error(
+    `Attachment ${fileId} (${fileName}) is ${bytes.length} bytes, over the ${MAX_INLINE_BYTES / (1024 * 1024)} MiB `
+    + `limit for returning a file inline (a larger result would exceed the host's response size limit). `
+    + `To get it: ${hints.join('; ')}.`,
+  );
 }
 
 /**
@@ -99,6 +142,7 @@ export async function buildInlineDelivery(
 
   // Rung 1 — the host renders these itself, and a picture beats a description.
   if (isHostRenderableImage(mimeType)) {
+    assertInlineSize(input, false);
     meta.deliveredVia = 'image';
     return { content: [block(), { type: 'image', data: bytes.toString('base64'), mimeType }] };
   }
@@ -123,8 +167,10 @@ export async function buildInlineDelivery(
     attempts.push(outcome.reason ?? 'extraction produced no content');
   }
 
-  // Rung 3 — the bytes themselves. Always available, so a fetch that succeeded
-  // never ends with the caller holding nothing.
+  // Rung 3 — the bytes themselves. Always available up to MAX_INLINE_BYTES, so
+  // a fetch that succeeded never ends with the caller holding nothing; beyond
+  // it the caller gets a tool error that says how to reach the file instead.
+  assertInlineSize(input, options.extract === false);
   meta.deliveredVia = 'blob';
   meta.deliveryAttempts = attempts;
   meta.note = 'Returned as raw bytes. Some hosts cannot render an embedded resource of this type; '
