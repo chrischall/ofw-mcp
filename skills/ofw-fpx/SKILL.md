@@ -38,10 +38,11 @@ fpx pair -p ofw                                                       # prints a
 
 Requirements: the **ContextMint Bridge** browser extension installed
 ([releases](https://github.com/nullnet-app/contextmint-bridge/releases) —
-Chrome: load the Chrome zip unpacked; Safari: ships inside the ContextMint app), with an
+Chrome: load the Chrome zip unpacked; Safari isn't available yet, so use Chrome for now), with an
 open, signed-in `ofw.ourfamilywizard.com` (or `www.ourfamilywizard.com`)
 tab, and its Chrome **Site access** allowing `ourfamilywizard.com`. Pairing
 persists across invocations.
+ContextMint Bridge is the fetchproxy extension renamed, same maintainer (see https://github.com/chrischall/fetchproxy#extension); source at https://github.com/nullnet-app/contextmint-bridge — build it, or verify a release zip with `shasum -a 256 -c contextmint-bridge-chrome-<version>.zip.sha256`.
 
 ## Capture the token (once per shell / whenever it goes stale)
 
