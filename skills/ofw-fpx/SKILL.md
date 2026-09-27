@@ -33,10 +33,12 @@ dry-run/confirm here — curl just does it. Treat every write like the MCP's
 npm install -g @fetchproxy/cli                                       # provides `fpx`
 fpx profile add ofw --domain ourfamilywizard.com
 fpx profile declare ofw --local-storage auth --local-storage tokenExpiry
-fpx pair -p ofw                                                       # prints a pair code → approve in Transporter
+fpx pair -p ofw                                                       # prints a pair code → approve in ContextMint Bridge
 ```
 
-Requirements: the **Transporter** browser extension installed, with an
+Requirements: the **ContextMint Bridge** browser extension installed
+([releases](https://github.com/nullnet-app/contextmint-bridge/releases) —
+Chrome: load the Chrome zip unpacked; Safari: ships inside the ContextMint app), with an
 open, signed-in `ofw.ourfamilywizard.com` (or `www.ourfamilywizard.com`)
 tab, and its Chrome **Site access** allowing `ourfamilywizard.com`. Pairing
 persists across invocations.

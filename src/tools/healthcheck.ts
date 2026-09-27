@@ -68,7 +68,7 @@ export function registerHealthcheckTools(
             // The upstream `.hint` rides along in `error.message` — it carries
             // the actionable "click the toolbar icon" copy this cannot know.
             hint:
-              'The fetchproxy bridge is down, so the browser path could not be tried. This is ' +
+              'ContextMint Bridge is down, so the browser path could not be tried. This is ' +
               'not a credential problem: OFW_USERNAME/OFW_PASSWORD, if set, were not reached ' +
               'either. See error.message for the extension-specific fix.',
           }
@@ -78,7 +78,7 @@ export function registerHealthcheckTools(
       // that was tried and failed no longer lands here.
       no_credential:
         'No OFW credential is configured. Either set OFW_USERNAME + OFW_PASSWORD, or install ' +
-        'the fetchproxy extension and sign in to ourfamilywizard.com in a tab (unsetting ' +
+        'ContextMint Bridge and sign in to ourfamilywizard.com in a tab (unsetting ' +
         'OFW_DISABLE_FETCHPROXY if you set it).',
       credential_rejected:
         'OurFamilyWizard rejected the credential. If it came from `env`, the password changed or ' +

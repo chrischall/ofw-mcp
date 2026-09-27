@@ -25,7 +25,7 @@
 //
 //   2. fetchproxy fallback (new)
 //      When credentials are absent, we try to lift the user's session
-//      out of their signed-in browser tab via the fetchproxy extension.
+//      out of their signed-in browser tab via ContextMint Bridge (fetchproxy).
 //      The `@fetchproxy/bootstrap` helper spins up a one-shot WebSocket
 //      bridge, asks the extension for `localStorage["auth"]` and
 //      `localStorage["tokenExpiry"]` from any ourfamilywizard.com tab,
@@ -94,7 +94,7 @@ function fetchproxyDisabled(): boolean {
  */
 export const NO_AUTH_CONFIGURED =
   'OFW auth: set OFW_USERNAME + OFW_PASSWORD, ' +
-  'or install the fetchproxy extension and sign into ourfamilywizard.com ' +
+  'or install ContextMint Bridge and sign into ourfamilywizard.com ' +
   '(unset OFW_DISABLE_FETCHPROXY if it is set).';
 
 /**
@@ -107,7 +107,7 @@ export const NO_AUTH_CONFIGURED =
  * day the wording changed, while silently misreporting a downed bridge as an
  * unconfigured server.
  */
-export const BRIDGE_DOWN_PREFIX = 'OFW auth: fetchproxy bridge is down';
+export const BRIDGE_DOWN_PREFIX = 'OFW auth: ContextMint Bridge is down';
 
 /** True for the {@link BRIDGE_DOWN_PREFIX} failure and nothing else. */
 export function isBridgeDown(e: unknown): boolean {
@@ -167,7 +167,7 @@ export async function resolveAuth(): Promise<ResolvedAuth> {
         if (!token) {
           throw new Error(
             'localStorage["auth"] missing on ourfamilywizard.com. ' +
-              'Sign into OFW in your browser (with the fetchproxy extension installed) and retry.',
+              'Sign into OFW in your browser (with ContextMint Bridge installed) and retry.',
           );
         }
         return {

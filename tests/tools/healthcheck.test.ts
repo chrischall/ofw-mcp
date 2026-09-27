@@ -78,10 +78,10 @@ describe('ofw_healthcheck', () => {
     expect(r.ok).toBe(false);
     expect(r.error?.kind).toBe('transport');
     // The real cause, and the extension-specific fix, survive into the payload.
-    expect(r.error?.message).toMatch(/bridge is down/);
+    expect(r.error?.message).toMatch(/ContextMint Bridge is down/);
     expect(r.error?.message).toMatch(/toolbar icon/);
     // The hint names ONE cause now, instead of hedging across two.
-    expect(r.hint).toMatch(/bridge is down/i);
+    expect(r.hint).toMatch(/ContextMint Bridge is down/);
     expect(r.hint).not.toMatch(/set OFW_USERNAME/);
   });
 

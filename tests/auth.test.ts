@@ -146,6 +146,7 @@ describe('resolveAuth', () => {
 
       await expect(resolveAuth()).rejects.toThrow(/fetchproxy fallback failed/);
       await expect(resolveAuth()).rejects.toThrow(/Sign into OFW in your browser/);
+      await expect(resolveAuth()).rejects.toThrow(/ContextMint Bridge installed/);
     });
 
     it('wraps bootstrap() errors with actionable context', async () => {
@@ -201,7 +202,7 @@ describe('resolveAuth', () => {
       });
       bootstrapMock.mockRejectedValue(downErr);
 
-      await expect(resolveAuth()).rejects.toThrow(/fetchproxy bridge is down/);
+      await expect(resolveAuth()).rejects.toThrow(/ContextMint Bridge is down/);
       await expect(resolveAuth()).rejects.toThrow(downErr.hint.slice(0, 20));
     });
   });
@@ -211,6 +212,7 @@ describe('resolveAuth', () => {
       process.env.OFW_DISABLE_FETCHPROXY = '1';
 
       await expect(resolveAuth()).rejects.toThrow(/OFW_USERNAME \+ OFW_PASSWORD/);
+      await expect(resolveAuth()).rejects.toThrow(/install ContextMint Bridge/);
       expect(bootstrapMock).not.toHaveBeenCalled();
     });
 
