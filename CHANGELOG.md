@@ -1,5 +1,15 @@
 # Changelog
 
+## [2.19.5](https://github.com/chrischall/ofw-mcp/compare/v2.19.4...v2.19.5) (2026-09-27)
+
+
+### Bug Fixes
+
+* **attachments:** cap inline attachments at 10 MiB so they fail with their own message under mcp-host's 14 MiB result limit ([#333](https://github.com/chrischall/ofw-mcp/issues/333)) ([86b67f7](https://github.com/chrischall/ofw-mcp/commit/86b67f793aa8fd7ed74475d2875461a5a10aa789))
+* **deps:** bump dotenv from 18.0.2 to 18.0.3 in the production-dependencies group ([#338](https://github.com/chrischall/ofw-mcp/issues/338)) ([274d87e](https://github.com/chrischall/ofw-mcp/commit/274d87e05e30421178c8da572bb48f549905384f))
+* **deps:** move to [@fetchproxy](https://github.com/fetchproxy) 3.4 for ContextMint Bridge errors, capability subsets and managed pins ([#335](https://github.com/chrischall/ofw-mcp/issues/335)) ([eca8491](https://github.com/chrischall/ofw-mcp/commit/eca8491b9be83099d64d3dc148b04a33a118e73a))
+* **deps:** move to @chrischall/mcp-utils 2.8 and [@fetchproxy](https://github.com/fetchproxy) 3.4.1 for clearer browser-bridge errors ([#336](https://github.com/chrischall/ofw-mcp/issues/336)) ([2de9503](https://github.com/chrischall/ofw-mcp/commit/2de9503192c46a4c91eac2a1e8994ae16564fd4c))
+
 ## [2.19.4](https://github.com/chrischall/ofw-mcp/compare/v2.19.3...v2.19.4) (2026-09-25)
 
 
