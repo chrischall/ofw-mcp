@@ -43,7 +43,9 @@
         "OFW_WRITE_MODE": "${user_config.ofw_write_mode}",
         "OFW_CALENDAR_WRITES": "${user_config.ofw_calendar_writes}",
         "OFW_ALLOW_MARK_READ": "${user_config.ofw_allow_mark_read}",
-        "OFW_FETCH_UNREAD_BODIES": "${user_config.ofw_fetch_unread_bodies}"
+        "OFW_FETCH_UNREAD_BODIES": "${user_config.ofw_fetch_unread_bodies}",
+        "OFW_EXPENSE_ONLY": "${user_config.ofw_expense_only}",
+        "OFW_EXPENSE_UPLOAD_ONLY": "${user_config.ofw_expense_upload_only}"
       }
     }
   },
@@ -105,6 +107,20 @@
       "type": "boolean",
       "title": "Sync unread message bodies",
       "description": "Whether a sync also downloads unread inbox bodies by default. Each one stamps a \"First Viewed\" time. Off by default; ignored when \"Allow marking messages read\" is off.",
+      "required": false,
+      "default": false
+    },
+    "ofw_expense_only": {
+      "type": "boolean",
+      "title": "Expense-only mode",
+      "description": "Structural restriction: register only healthcheck plus expense tools. Removes profile/dashboard, messages, calendar, and journal tools entirely.",
+      "required": false,
+      "default": false
+    },
+    "ofw_expense_upload_only": {
+      "type": "boolean",
+      "title": "Expense upload-only mode",
+      "description": "Strict structural restriction: register only healthcheck, ofw_upload_expense_pdf, ofw_create_expense, and ofw_update_expense. Implies Expense-only mode and removes expense reads too.",
       "required": false,
       "default": false
     }
@@ -187,8 +203,20 @@
       "description": "List expenses"
     },
     {
+      "name": "ofw_upload_expense_pdf",
+      "description": "Upload a PDF privately to OFW My Files for attachment to an expense"
+    },
+    {
+      "name": "ofw_list_expense_categories",
+      "description": "List expense categories (preset and custom) with their split metadata"
+    },
+    {
+      "name": "ofw_update_expense",
+      "description": "Update an existing expense (full payload), e.g. publish a private expense to the co-parent (confirmed first)"
+    },
+    {
       "name": "ofw_create_expense",
-      "description": "Log a new expense (confirmed first, with a preview of amount and description)"
+      "description": "Log a new expense, optionally private and with one receipt PDF (confirmed first, with a preview of amount and title)"
     },
     {
       "name": "ofw_list_journal_entries",

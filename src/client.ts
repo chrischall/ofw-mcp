@@ -169,7 +169,12 @@ export class OFWClient {
       if (response.status === 429) throw new Error('Rate limited by OFW API');
     }
     if (!response.ok) {
-      throw new Error(`OFW API error: ${response.status} ${response.statusText} for ${method} ${path}`);
+      const errorBody = await response.text();
+      const safeBody = redactSecrets(errorBody).replace(/\s+/g, ' ').trim().slice(0, 4000);
+      throw new Error(
+        `OFW API error: ${response.status} ${response.statusText} for ${method} ${path}` +
+        (safeBody ? ` — ${safeBody}` : ''),
+      );
     }
     return response;
   }

@@ -64,6 +64,18 @@
           "description": "Absolute path for the session cache file. Defaults to $MCP_DATA_DIR/.ofw-mcp/session.json.",
           "isRequired": false,
           "format": "string"
+        },
+        {
+          "name": "OFW_EXPENSE_ONLY",
+          "description": "Set true to register only healthcheck plus expense tools. All profile/dashboard, message, calendar, and journal tools are structurally absent.",
+          "isRequired": false,
+          "format": "string"
+        },
+        {
+          "name": "OFW_EXPENSE_UPLOAD_ONLY",
+          "description": "Set true for strict reimbursement upload mode: only healthcheck, ofw_upload_expense_pdf, ofw_create_expense, and ofw_update_expense register. Implies OFW_EXPENSE_ONLY.",
+          "isRequired": false,
+          "format": "string"
         }
       ]
     }

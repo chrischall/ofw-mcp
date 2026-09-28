@@ -197,18 +197,69 @@ curl -s -X DELETE "https://ofw.ourfamilywizard.com/pub/v1/calendar/events/${EVEN
 curl -s 'https://ofw.ourfamilywizard.com/pub/v2/expense/expenses/totals' "${AUTH_HEADERS[@]}" | jq .
 ```
 
-**List expenses** (offset-based, 0-indexed `start`):
+**List expenses** (page-based, 1-indexed `page`):
+
+OFW currently ignores the legacy `start`/`max` query parameters and returns
+page 1 repeatedly. Use `page`/`size` and follow the response metadata's
+`last` flag / `currentPage`.
 
 ```sh
-curl -s 'https://ofw.ourfamilywizard.com/pub/v2/expense/expenses?start=0&max=20' "${AUTH_HEADERS[@]}" | jq .
+curl -s 'https://ofw.ourfamilywizard.com/pub/v2/expense/expenses?page=1&size=20' "${AUTH_HEADERS[@]}" | jq .
 ```
+
+**Upload a receipt PDF** (write to My Files). It must be `SHARED` — that is the
+share class OFW accepts in an expense's `fileIds` — and a SHARED file is
+visible to the co-parent in My Files as soon as it lands:
+
+```sh
+curl -s -X POST 'https://ofw.ourfamilywizard.com/pub/v3/myfiles/multipart' \
+  "${AUTH_HEADERS[@]}" \
+  -F "file=@/path/to/receipt.pdf;type=application/pdf" \
+  -F 'source=expense' \
+  -F 'description=receipt.pdf' \
+  -F 'label=receipt.pdf' \
+  -F 'fileName=receipt.pdf' \
+  -F 'shared=true' \
+  -F 'shareClass=SHARED' | jq .
+```
+
+Use the returned `fileId` as `receiptFileId` when creating the expense.
 
 **Create an expense** (write):
 
+The current OFW expense form requires a complete expense record. In addition to
+the amount, send the expense title, purchase date, category id, parent who owes
+(`payerId`), and at least one child user id. Description, visibility, and a
+single receipt file are optional.
+
 ```sh
-curl -s -X POST 'https://ofw.ourfamilywizard.com/pub/v2/expense/expenses' \
+curl -s -X POST 'https://ofw.ourfamilywizard.com/pub/v2/expense' \
   "${AUTH_HEADERS[@]}" -H 'Content-Type: application/json' \
-  --data '{"amount": 45.00, "description": "Cleats for soccer"}' | jq .
+  --data '{
+    "title":"Soccer cleats",
+    "amount":45.00,
+    "purchaseDate":"2026-09-28",
+    "categoryId":1,
+    "payerId":<PAYER_USER_ID>,
+    "children":[<CHILD_USER_ID>],
+    "description":"Cleats for soccer",
+    "isPrivate":false,
+    "fileIds":[<RECEIPT_FILE_ID>]
+  }' | jq .
+```
+
+Use OFW numeric ids, not display labels, for `categoryId`, `payerId`, and
+`children`. For a private expense (visible only to you), send `isPrivate:true`;
+the MCP tools expose this as `privateExpense`. The MCP tools attach at most one
+receipt, sent as a one-element `fileIds` array.
+
+**Update an expense** (write; full payload, not a patch — e.g. publish a
+private expense by sending `isPrivate:false`):
+
+```sh
+curl -s -X PUT "https://ofw.ourfamilywizard.com/pub/v2/expense/expenses/${EXPENSE_ID}" \
+  "${AUTH_HEADERS[@]}" -H 'Content-Type: application/json' \
+  --data '{ …every current field…, "isPrivate":false }' | jq .
 ```
 
 ## 8. Journal

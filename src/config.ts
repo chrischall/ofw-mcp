@@ -55,6 +55,45 @@ export function getUploadDir(): string {
   return getAttachmentsDir();
 }
 
+/**
+ * Structural surface restrictions for deployments dedicated to reimbursement
+ * automation.
+ *
+ * OFW_EXPENSE_ONLY=true removes every non-expense registrar except the
+ * healthcheck. Message, calendar, journal and profile/dashboard tools simply do
+ * not exist in the server's tools/list response.
+ *
+ * OFW_EXPENSE_UPLOAD_ONLY=true is stricter and implies OFW_EXPENSE_ONLY: only
+ * ofw_upload_expense_pdf + ofw_create_expense + ofw_update_expense (plus
+ * ofw_healthcheck) register.
+ * Expense reads such as totals/list are omitted as well.
+ *
+ * These are startup-time structural controls. They cannot be raised by a tool
+ * argument, prompt injection, or host permission setting.
+ *
+ * Unrecognized non-empty values fail CLOSED to true. A typo in a restriction
+ * flag must never silently widen the server surface.
+ */
+function restrictiveBoolEnv(name: string): boolean {
+  const raw = process.env[name];
+  if (typeof raw !== 'string' || raw.trim().length === 0) return false;
+  const value = raw.trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(value)) return true;
+  if (['0', 'false', 'no', 'off'].includes(value)) return false;
+  console.error(
+    `[ofw-mcp] Unrecognized ${name} "${raw.trim()}" — failing closed to "true" (restriction enabled). Valid values: true, false.`,
+  );
+  return true;
+}
+
+export function getExpenseUploadOnly(): boolean {
+  return restrictiveBoolEnv('OFW_EXPENSE_UPLOAD_ONLY');
+}
+
+export function getExpenseOnly(): boolean {
+  return getExpenseUploadOnly() || restrictiveBoolEnv('OFW_EXPENSE_ONLY');
+}
+
 export type WriteMode = 'none' | 'drafts' | 'all';
 
 /**

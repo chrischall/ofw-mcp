@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DEFAULT_FRESHNESS_TTL_SECONDS, getAllowMarkRead, getAttachmentsDir, getCacheDbPath, getCalendarWritesAllowed, getDefaultInlineAttachments, getCacheDir, getFetchUnreadBodies, getFreshnessTtlSeconds, getSyncMaxRequests, getUploadDir, getWriteMode } from '../src/config.js';
+import { DEFAULT_FRESHNESS_TTL_SECONDS, getAllowMarkRead, getAttachmentsDir, getCacheDbPath, getCalendarWritesAllowed, getDefaultInlineAttachments, getCacheDir, getExpenseOnly, getExpenseUploadOnly, getFetchUnreadBodies, getFreshnessTtlSeconds, getSyncMaxRequests, getUploadDir, getWriteMode } from '../src/config.js';
 
 describe('getCacheDbPath', () => {
   let tmp: string;
@@ -260,6 +260,67 @@ describe('getFetchUnreadBodies', () => {
     expect(getFetchUnreadBodies()).toBe(true);
     process.env[KEY] = 'nonsense';
     expect(getFetchUnreadBodies()).toBe(false);
+  });
+});
+
+
+describe('expense-only surface restrictions', () => {
+  const ONLY = 'OFW_EXPENSE_ONLY';
+  const UPLOAD = 'OFW_EXPENSE_UPLOAD_ONLY';
+  let prevOnly: string | undefined;
+  let prevUpload: string | undefined;
+
+  beforeEach(() => {
+    prevOnly = process.env[ONLY];
+    prevUpload = process.env[UPLOAD];
+    delete process.env[ONLY];
+    delete process.env[UPLOAD];
+  });
+
+  afterEach(() => {
+    if (prevOnly === undefined) delete process.env[ONLY];
+    else process.env[ONLY] = prevOnly;
+    if (prevUpload === undefined) delete process.env[UPLOAD];
+    else process.env[UPLOAD] = prevUpload;
+    vi.restoreAllMocks();
+  });
+
+  it('defaults to the full tool surface', () => {
+    expect(getExpenseOnly()).toBe(false);
+    expect(getExpenseUploadOnly()).toBe(false);
+  });
+
+  it('OFW_EXPENSE_ONLY restricts the server to expense tools', () => {
+    process.env[ONLY] = 'true';
+    expect(getExpenseOnly()).toBe(true);
+    expect(getExpenseUploadOnly()).toBe(false);
+  });
+
+  it('OFW_EXPENSE_UPLOAD_ONLY implies expense-only and removes expense reads', () => {
+    process.env[UPLOAD] = 'true';
+    expect(getExpenseUploadOnly()).toBe(true);
+    expect(getExpenseOnly()).toBe(true);
+  });
+
+  it('upload-only wins even if OFW_EXPENSE_ONLY is explicitly false', () => {
+    process.env[ONLY] = 'false';
+    process.env[UPLOAD] = 'true';
+    expect(getExpenseOnly()).toBe(true);
+  });
+
+  it('an explicit false leaves the full tool surface', () => {
+    process.env[ONLY] = 'off';
+    process.env[UPLOAD] = 'false';
+    expect(getExpenseUploadOnly()).toBe(false);
+    expect(getExpenseOnly()).toBe(false);
+  });
+
+  it('fails closed when a restriction flag contains an unrecognized value', () => {
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    process.env[UPLOAD] = 'treu';
+    expect(getExpenseUploadOnly()).toBe(true);
+    expect(getExpenseOnly()).toBe(true);
+    expect(err).toHaveBeenCalledWith(expect.stringContaining('OFW_EXPENSE_UPLOAD_ONLY'));
   });
 });
 
