@@ -20,6 +20,7 @@ import { registerExpenseTools } from './tools/expenses.js';
 import { registerJournalTools } from './tools/journal.js';
 import { OFWCache } from './cache/node.js';
 import { getCacheDbPath } from './config.js';
+import { selectToolRegistrars } from './tool-surface.js';
 import { NodeAttachmentIO } from './tools/attachments.js';
 import type { CacheStore } from './cache/store.js';
 
@@ -38,18 +39,28 @@ const nodeAttachmentIO = new NodeAttachmentIO();
 // is preserved: `client` is constructed at module load in ./client.js (auth is
 // resolved lazily on the first tool call), so the host's initial tools/list
 // always succeeds before any credential check runs.
+const expenseRegistrar = (server: Parameters<typeof registerExpenseTools>[0], deps: typeof client) =>
+  registerExpenseTools(server, deps, nodeAttachmentIO);
+
+const messageRegistrar = (
+  server: Parameters<typeof registerMessageTools>[0],
+  deps: typeof client,
+) => registerMessageTools(server, deps, nodeCacheProvider, nodeAttachmentIO);
+
+const tools = selectToolRegistrars({
+  healthcheck: registerHealthcheckTools,
+  user: registerUserTools,
+  messages: messageRegistrar,
+  calendar: registerCalendarTools,
+  expenses: expenseRegistrar,
+  journal: registerJournalTools,
+});
+
 await runMcp({
   name: 'ofw',
   version: '2.19.5', // x-release-please-version
   deps: client,
-  tools: [
-    registerHealthcheckTools,
-    registerUserTools,
-    (server, deps) => registerMessageTools(server, deps, nodeCacheProvider, nodeAttachmentIO),
-    registerCalendarTools,
-    registerExpenseTools,
-    registerJournalTools,
-  ],
+  tools,
   banner:
     '[ofw-mcp] This project was developed and is maintained by AI (Claude Sonnet 4.6). Use at your own discretion.',
 });

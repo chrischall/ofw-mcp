@@ -151,7 +151,8 @@ Read-only tools run automatically. Writes that reach your co-parent or the court
 | `ofw_delete_event` | Delete a calendar event | Confirm (server) if shared | `all` (or `drafts` + `OFW_CALENDAR_WRITES`) |
 | `ofw_get_expense_totals` | Expense summary totals | Auto | any |
 | `ofw_list_expenses` | Expense history | Auto | any |
-| `ofw_create_expense` | Log a new expense | Confirm (server) | `all` |
+| `ofw_upload_expense_pdf` | Upload a receipt PDF to My Files for an expense (SHARED, so it can be attached) | — | `all` |
+| `ofw_create_expense` | Log a new expense; supports private entries and one receipt PDF | Confirm (server) | `all` |
 | `ofw_list_journal_entries` | Journal entries | Auto | any |
 | `ofw_create_journal_entry` | Create a journal entry | Confirm | `all` |
 
@@ -249,6 +250,26 @@ The host's "Confirm" permission above is a *hint* to the MCP host — a host con
 | `all` | Everything (the default — fully backward compatible). |
 
 Unrecognized values fail closed to `none`, with a warning on stderr — a typo never silently grants write access.
+
+#### Expense-only deployments
+
+For a dedicated reimbursement integration, you can also structurally remove unrelated OFW capabilities:
+
+| Setting | Registered surface |
+|---|---|
+| `OFW_EXPENSE_ONLY=true` | `ofw_healthcheck` plus the expense tools only. Profile/dashboard, messages, calendar, and journal tools do not exist. |
+| `OFW_EXPENSE_UPLOAD_ONLY=true` | Strictest mode: `ofw_healthcheck`, `ofw_upload_expense_pdf`, `ofw_create_expense`, and `ofw_update_expense` only. Expense totals/listing are removed too. This flag implies `OFW_EXPENSE_ONLY`. |
+
+These flags are registration-time restrictions, not prompt instructions. A host cannot call a tool that was never registered. Unrecognized non-empty flag values fail closed to the restricted state. `OFW_WRITE_MODE` still applies underneath; for the strict upload workflow set `OFW_WRITE_MODE=all` so expense creation is available.
+
+Recommended reimbursement-only deployment:
+
+```env
+OFW_EXPENSE_UPLOAD_ONLY=true
+OFW_WRITE_MODE=all
+OFW_ALLOW_MARK_READ=false
+```
+
 
 ### Reading is a write, too (`OFW_ALLOW_MARK_READ`)
 

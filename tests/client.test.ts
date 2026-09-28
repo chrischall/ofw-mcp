@@ -218,6 +218,35 @@ describe('OFWClient', () => {
     await expect(client.request('GET', '/pub/v1/test')).rejects.toThrow('500');
   });
 
+  it('includes the (whitespace-collapsed) error body in the thrown message', async () => {
+    mockFetch([
+      LOGIN_INIT,
+      LOGIN_SUCCESS,
+      { status: 409, body: { validationErrors: [{ field: 'payerId', text: 'Must be a parent' }] } },
+    ]);
+
+    const client = new OFWClient();
+    await expect(client.request('POST', '/pub/v2/expense', {})).rejects.toThrow(
+      /OFW API error: 409 409 for POST \/pub\/v2\/expense — .*Must be a parent/,
+    );
+  });
+
+  it('omits the separator when the error body is empty', async () => {
+    const spy = mockFetch([LOGIN_INIT, LOGIN_SUCCESS]);
+    const client = new OFWClient();
+    await client.request('GET', '/pub/v1/warmup');
+    spy.mockResolvedValueOnce({
+      ok: false,
+      status: 502,
+      statusText: 'Bad Gateway',
+      headers: { get: () => null, getSetCookie: () => [] },
+      text: async () => '   ',
+    } as unknown as Response);
+    await expect(client.request('GET', '/pub/v1/test')).rejects.toThrow(
+      /^OFW API error: 502 Bad Gateway for GET \/pub\/v1\/test$/,
+    );
+  });
+
   it('sends Authorization header with token', async () => {
     const spy = mockFetch([
       LOGIN_INIT,

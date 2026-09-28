@@ -46,7 +46,7 @@ function registeredToolNames(): string[] {
   registerUserTools(server, client);
   registerMessageTools(server, client, cacheProvider, new NodeAttachmentIO());
   registerCalendarTools(server, client);
-  registerExpenseTools(server, client);
+  registerExpenseTools(server, client, new NodeAttachmentIO());
   registerJournalTools(server, client);
   return names;
 }
@@ -56,12 +56,20 @@ describe('manifest.json tool roster', () => {
   // full surface — so the comparison has to be made in the mode that registers
   // everything, or the test would "pass" by hiding the write tools too.
   const saved = process.env.OFW_WRITE_MODE;
+  const savedExpenseOnly = process.env.OFW_EXPENSE_ONLY;
+  const savedExpenseUploadOnly = process.env.OFW_EXPENSE_UPLOAD_ONLY;
   beforeAll(() => {
     process.env.OFW_WRITE_MODE = 'all';
+    delete process.env.OFW_EXPENSE_ONLY;
+    delete process.env.OFW_EXPENSE_UPLOAD_ONLY;
   });
   afterEach(() => {
     if (saved === undefined) delete process.env.OFW_WRITE_MODE;
     else process.env.OFW_WRITE_MODE = saved;
+    if (savedExpenseOnly === undefined) delete process.env.OFW_EXPENSE_ONLY;
+    else process.env.OFW_EXPENSE_ONLY = savedExpenseOnly;
+    if (savedExpenseUploadOnly === undefined) delete process.env.OFW_EXPENSE_UPLOAD_ONLY;
+    else process.env.OFW_EXPENSE_UPLOAD_ONLY = savedExpenseUploadOnly;
   });
 
   it('lists every registered tool', () => {
