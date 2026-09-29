@@ -172,7 +172,7 @@ describe('ofw_upload_expense_pdf', () => {
     const io = makeAttachmentIO();
     setup(client, io);
 
-    const result = await handlers.get('ofw_upload_expense_pdf')!({ path: '/tmp/receipt.pdf' });
+    const result = await callConfirmed(handlers.get('ofw_upload_expense_pdf')! as GatedHandler, { path: '/tmp/receipt.pdf' });
     expect(io.resolveUpload).toHaveBeenCalledWith('/tmp/receipt.pdf');
 
     const call = vi.mocked(client.request).mock.calls[0];
@@ -199,7 +199,7 @@ describe('ofw_upload_expense_pdf', () => {
     });
     const io = makeAttachmentIO();
 
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
       new Response(new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x34, 0x0a]), {
         status: 200,
         headers: {
@@ -210,7 +210,7 @@ describe('ofw_upload_expense_pdf', () => {
     );
 
     setup(client, io);
-    const result = await handlers.get('ofw_upload_expense_pdf')!({
+    const result = await callConfirmed(handlers.get('ofw_upload_expense_pdf')! as GatedHandler, {
       url: 'https://example.oaiusercontent.com/files/receipt/raw?sig=test',
       fileName: 'receipt.pdf',
     });
@@ -706,15 +706,15 @@ describe('expense tools — edge-case coverage', () => {
 
     it('fills response fields from the local file when OFW echoes only the fileId', async () => {
       setup(makeClient({ fileId: 5 }), makeAttachmentIO());
-      const parsed = JSON.parse((await handlers.get('ofw_upload_expense_pdf')!({ path: '/a.pdf', label: 'L', description: 'D' })).content[0].text);
+      const parsed = JSON.parse((await callConfirmed(handlers.get('ofw_upload_expense_pdf')! as GatedHandler, { path: '/a.pdf', label: 'L', description: 'D' })).content[0].text);
       expect(parsed).toMatchObject({ fileId: 5, fileName: 'receipt.pdf', mimeType: 'application/pdf', sizeBytes: 9, shareClass: 'SHARED' });
     });
 
     it('defaults a remote upload to receipt.pdf when no filename is given', async () => {
-      vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(PDF, { status: 200 }));
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(PDF, { status: 200 }));
       const client = makeClient({ fileId: 6 });
       setup(client, makeAttachmentIO());
-      await handlers.get('ofw_upload_expense_pdf')!({ url: URL_OK });
+      await callConfirmed(handlers.get('ofw_upload_expense_pdf')! as GatedHandler, { url: URL_OK });
       const form = vi.mocked(client.request).mock.calls[0][2] as FormData;
       expect(form.get('fileName')).toBe('receipt.pdf');
     });
@@ -796,6 +796,146 @@ describe('expense tools — edge-case coverage', () => {
       setup(client, makeAttachmentIO());
       await expect(callConfirmed(handlers.get('ofw_update_expense')! as GatedHandler, { ...base, privateExpense: false }))
         .rejects.toThrow(/400 Bad Request/);
+    });
+  });
+
+  describe('ofw_upload_expense_pdf — confirmation gate', () => {
+    it('phase 1 previews the SHARED upload and uploads NOTHING', async () => {
+      const client = makeClient({ fileId: 5 });
+      setup(client, makeAttachmentIO());
+      const preview = await callPreview(handlers.get('ofw_upload_expense_pdf')! as GatedHandler, { path: '/a.pdf' });
+      expect(client.request).not.toHaveBeenCalled();
+      expect(preview.preview).toMatchObject({ fileName: 'receipt.pdf', shareClass: 'SHARED', from: 'local file' });
+      expect(String(preview.preview.warning)).toMatch(/co-parent/);
+    });
+
+    it('names the hosted source in the preview', async () => {
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(PDF, { status: 200 }));
+      setup(makeClient({ fileId: 5 }), makeAttachmentIO());
+      const preview = await callPreview(handlers.get('ofw_upload_expense_pdf')! as GatedHandler, { url: URL_OK });
+      expect(preview.preview.from).toBe('hosted file (files.oaiusercontent.com)');
+    });
+
+    it('refuses a token when the file content changed between preview and approval', async () => {
+      const client = makeClient({ fileId: 5 });
+      const io = makeAttachmentIO();
+      setup(client, io);
+      const handler = handlers.get('ofw_upload_expense_pdf')!;
+      const { confirmToken } = await callPreview(handler as GatedHandler, { path: '/a.pdf' });
+      vi.mocked(io.resolveUpload).mockResolvedValue({
+        blob: new Blob(['%PDF-1.7 different'], { type: 'application/pdf' }),
+        fileName: 'receipt.pdf', mimeType: 'application/pdf', sizeBytes: 9,
+      });
+      const result = await handler({ path: '/a.pdf', confirmToken }, NO_ELICIT_CTX);
+      expect(result.isError).toBe(true);
+      expect(JSON.parse(result.content[0].text)).toMatchObject({ error: 'DRAFT_CHANGED' });
+      expect(client.request).not.toHaveBeenCalled();
+    });
+
+    it('declares the confirm token and the open-world hint', () => {
+      const server = new McpServer({ name: 'test', version: '0.0.0' });
+      const configs = new Map<string, { annotations?: Record<string, unknown>; inputSchema?: z.ZodObject; description: string }>();
+      vi.spyOn(server, 'registerTool').mockImplementation((name: string, config: unknown) => {
+        configs.set(name, config as { annotations?: Record<string, unknown>; inputSchema?: z.ZodObject; description: string });
+        return undefined as never;
+      });
+      registerExpenseTools(server, new OFWClient(), makeAttachmentIO());
+      const tool = configs.get('ofw_upload_expense_pdf')!;
+      expect(tool.annotations).toMatchObject({ readOnlyHint: false, openWorldHint: true });
+      expect(tool.inputSchema!.shape).toHaveProperty('confirmToken');
+      expect(tool.description).toMatch(/MCP_CONFIRM_MODE/);
+    });
+
+    it('rejects a local file named .pdf whose bytes are not a PDF', async () => {
+      const client = makeClient({ fileId: 5 });
+      const io = makeAttachmentIO();
+      vi.mocked(io.resolveUpload).mockResolvedValue({
+        blob: new Blob(['GIF89a'], { type: 'application/pdf' }),
+        fileName: 'receipt.pdf', mimeType: 'application/pdf', sizeBytes: 6,
+      });
+      setup(client, io);
+      await expect(handlers.get('ofw_upload_expense_pdf')!({ path: '/a.pdf' }, NO_ELICIT_CTX)).rejects.toThrow(/PDF header/);
+      expect(client.request).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('remote receipt fetch hardening', () => {
+    it('follows a redirect that stays on oaiusercontent.com, re-checking each hop', async () => {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+        const url = String(input);
+        if (url.startsWith('https://files.oaiusercontent.com/')) {
+          return new Response(null, { status: 302, headers: { location: 'https://cdn.oaiusercontent.com/blob' } });
+        }
+        return new Response(PDF, { status: 200 });
+      });
+      setup(makeClient({ fileId: 5 }), makeAttachmentIO());
+      await callPreview(handlers.get('ofw_upload_expense_pdf')! as GatedHandler, { url: URL_OK });
+      expect(fetchSpy.mock.calls.map((c) => String(c[0]))).toEqual([URL_OK, 'https://cdn.oaiusercontent.com/blob']);
+      expect(fetchSpy.mock.calls[0][1]).toMatchObject({ redirect: 'manual' });
+    });
+
+    it('refuses a redirect that leaves the allowlist without fetching it', async () => {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+        new Response(null, { status: 302, headers: { location: 'https://169.254.169.254/latest/meta-data' } }));
+      const client = makeClient({});
+      setup(client, makeAttachmentIO());
+      await expect(handlers.get('ofw_upload_expense_pdf')!({ url: URL_OK }, NO_ELICIT_CTX)).rejects.toThrow(/oaiusercontent\.com/);
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      expect(client.request).not.toHaveBeenCalled();
+    });
+
+    it('gives up after too many redirects', async () => {
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+        new Response(null, { status: 302, headers: { location: 'https://files.oaiusercontent.com/again' } }));
+      setup(makeClient({}), makeAttachmentIO());
+      await expect(handlers.get('ofw_upload_expense_pdf')!({ url: URL_OK }, NO_ELICIT_CTX)).rejects.toThrow(/redirected more than 5 times/);
+    });
+
+    it('treats a 3xx with no Location as the final (failed) response', async () => {
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(null, { status: 304 }));
+      setup(makeClient({}), makeAttachmentIO());
+      await expect(handlers.get('ofw_upload_expense_pdf')!({ url: URL_OK }, NO_ELICIT_CTX)).rejects.toThrow(/HTTP 304/);
+    });
+
+    it('stops reading an undeclared-length body as soon as it passes the cap', async () => {
+      const chunk = new Uint8Array(1024 * 1024);
+      let pulled = 0;
+      const body = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          pulled++;
+          controller.enqueue(chunk);
+          if (pulled > 100) controller.close();
+        },
+      });
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(body, { status: 200 }));
+      setup(makeClient({}), makeAttachmentIO());
+      await expect(handlers.get('ofw_upload_expense_pdf')!({ url: URL_OK }, NO_ELICIT_CTX)).rejects.toThrow(/exceeds/);
+      expect(pulled).toBeLessThan(30);
+    });
+
+    it('treats a bodiless 200 as an empty (non-PDF) file', async () => {
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(null, { status: 200 }));
+      setup(makeClient({}), makeAttachmentIO());
+      await expect(handlers.get('ofw_upload_expense_pdf')!({ url: URL_OK }, NO_ELICIT_CTX)).rejects.toThrow(/not a valid PDF/);
+    });
+  });
+
+  describe('expense previews name the parties', () => {
+    it('create shows who the claim is billed to, the category and the children', async () => {
+      setup(makeClient({ id: 1 }), makeAttachmentIO());
+      const preview = await callPreview(handlers.get('ofw_create_expense')! as GatedHandler, {
+        title: 'T', amount: 5, purchaseDate: '2026-09-20', categoryId: 7, payerId: 101, children: [203, 204],
+      });
+      expect(preview.preview).toMatchObject({ payerUserId: 101, categoryId: 7, childUserIds: [203, 204] });
+    });
+
+    it('update shows the parties, description and receipt', async () => {
+      setup(makeClient({ id: 1 }), makeAttachmentIO());
+      const preview = await callPreview(handlers.get('ofw_update_expense')! as GatedHandler, {
+        expenseId: 9, title: 'T', amount: 5, purchaseDate: '2026-09-20', categoryId: 7, payerId: 101, children: [203],
+        description: 'D', receiptFileId: 77, privateExpense: false,
+      });
+      expect(preview.preview).toMatchObject({ payerUserId: 101, categoryId: 7, childUserIds: [203], description: 'D', receiptFileId: 77 });
     });
   });
 });

@@ -204,7 +204,7 @@
     },
     {
       "name": "ofw_upload_expense_pdf",
-      "description": "Upload a PDF privately to OFW My Files for attachment to an expense"
+      "description": "Upload a receipt PDF to OFW My Files, SHARED so it can be attached to an expense (co-parent-visible; confirmed first)"
     },
     {
       "name": "ofw_list_expense_categories",

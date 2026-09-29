@@ -1,7 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import type { OFWClient } from '../client.js';
-import type { AttachmentIO } from './attachments.js';
+import { MAX_UPLOAD_BYTES, type AttachmentIO } from './attachments.js';
 import { jsonResponse, requestWrite, UnconfirmedWriteError, unconfirmedWriteResponse } from './_shared.js';
 import { CONFIRM_NOTE, confirmTokenParam, confirmWrite } from './_confirm.js';
 import { readUpstreamPaging } from './pagination.js';
@@ -18,7 +18,63 @@ const UploadedExpenseFileSchema = z.looseObject({
 });
 
 const PDF_MIME = 'application/pdf';
-const MAX_REMOTE_PDF_BYTES = 25 * 1024 * 1024;
+const MAX_REMOTE_PDF_BYTES = MAX_UPLOAD_BYTES;
+const MAX_REMOTE_REDIRECTS = 5;
+const REMOTE_FETCH_TIMEOUT_MS = 30_000;
+
+/** `%PDF-` — the one check that holds whatever the name or Content-Type claim. */
+function isPdf(bytes: Uint8Array): boolean {
+  return bytes.byteLength >= 5
+    && bytes[0] === 0x25 && bytes[1] === 0x50 && bytes[2] === 0x44 && bytes[3] === 0x46 && bytes[4] === 0x2d;
+}
+
+/**
+ * The remote-receipt allowlist, applied to EVERY hop. Following redirects
+ * automatically would let the first (allowlisted) hop hand the request to any
+ * host at all — including one on the machine's own network — so each Location
+ * is re-checked before it is fetched.
+ */
+function assertReceiptUrl(url: URL): void {
+  if (url.protocol !== 'https:') {
+    throw new Error('Remote expense receipt URLs must use HTTPS.');
+  }
+  if (!url.hostname.toLowerCase().endsWith('.oaiusercontent.com')) {
+    throw new Error('Remote expense receipt URLs must be signed oaiusercontent.com file URLs.');
+  }
+}
+
+/**
+ * Read a response body, refusing as soon as it passes `cap` — a missing or
+ * understated Content-Length must not let the whole body into memory before
+ * the size check runs.
+ */
+async function readCapped(response: Response, cap: number): Promise<Uint8Array<ArrayBuffer>> {
+  const tooLarge = () => new Error(`Expense receipt exceeds ${cap} bytes.`);
+  const declared = Number(response.headers.get('content-length') ?? 0);
+  if (Number.isFinite(declared) && declared > cap) throw tooLarge();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  if (response.body) {
+    const reader = response.body.getReader();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > cap) {
+        await reader.cancel();
+        throw tooLarge();
+      }
+      chunks.push(value);
+    }
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
+}
 
 async function resolveRemotePdf(urlValue: string, fileNameValue?: string): Promise<{
   blob: Blob;
@@ -26,42 +82,30 @@ async function resolveRemotePdf(urlValue: string, fileNameValue?: string): Promi
   mimeType: string;
   sizeBytes: number;
 }> {
-  const url = new URL(urlValue);
-  if (url.protocol !== 'https:') {
-    throw new Error('Remote expense receipt URLs must use HTTPS.');
-  }
-  if (!url.hostname.toLowerCase().endsWith('.oaiusercontent.com')) {
-    throw new Error('Remote expense receipt URLs must be signed oaiusercontent.com file URLs.');
+  const fileName = fileNameValue?.trim() || 'receipt.pdf';
+  if (!fileName.toLowerCase().endsWith('.pdf')) {
+    throw new Error(`Expense receipts must use a .pdf filename; received ${fileName}`);
   }
 
-  const response = await fetch(url, { redirect: 'follow' });
+  let url = new URL(urlValue);
+  let response: Response | undefined;
+  for (let hop = 0; ; hop++) {
+    assertReceiptUrl(url);
+    response = await fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(REMOTE_FETCH_TIMEOUT_MS) });
+    const location = response.headers.get('location');
+    if (response.status < 300 || response.status >= 400 || location === null) break;
+    if (hop >= MAX_REMOTE_REDIRECTS) {
+      throw new Error(`Remote expense receipt redirected more than ${MAX_REMOTE_REDIRECTS} times.`);
+    }
+    url = new URL(location, url);
+  }
   if (!response.ok) {
     throw new Error(`Unable to fetch remote expense receipt: HTTP ${response.status}`);
   }
 
-  const declaredLength = Number(response.headers.get('content-length') ?? 0);
-  if (Number.isFinite(declaredLength) && declaredLength > MAX_REMOTE_PDF_BYTES) {
-    throw new Error(`Expense receipt exceeds ${MAX_REMOTE_PDF_BYTES} bytes.`);
-  }
-
-  const bytes = new Uint8Array(await response.arrayBuffer());
-  if (bytes.byteLength > MAX_REMOTE_PDF_BYTES) {
-    throw new Error(`Expense receipt exceeds ${MAX_REMOTE_PDF_BYTES} bytes.`);
-  }
-  if (
-    bytes.byteLength < 5 ||
-    bytes[0] !== 0x25 ||
-    bytes[1] !== 0x50 ||
-    bytes[2] !== 0x44 ||
-    bytes[3] !== 0x46 ||
-    bytes[4] !== 0x2d
-  ) {
+  const bytes = await readCapped(response, MAX_REMOTE_PDF_BYTES);
+  if (!isPdf(bytes)) {
     throw new Error('Remote expense receipt is not a valid PDF file.');
-  }
-
-  const fileName = fileNameValue?.trim() || 'receipt.pdf';
-  if (!fileName.toLowerCase().endsWith('.pdf')) {
-    throw new Error(`Expense receipts must use a .pdf filename; received ${fileName}`);
   }
 
   return {
@@ -69,6 +113,21 @@ async function resolveRemotePdf(urlValue: string, fileNameValue?: string): Promi
     fileName,
     mimeType: PDF_MIME,
     sizeBytes: bytes.byteLength,
+  };
+}
+
+/**
+ * Who a claim is against and what it is for, for a confirm preview. A person
+ * approving a money claim has to see who it is billed to; these are OFW ids
+ * this server has no names for, so they are labelled as ids rather than
+ * dressed up as names.
+ */
+function expenseParties(args: { payerId: number; categoryId: number; children: number[] }): Record<string, unknown> {
+  return {
+    payerUserId: args.payerId,
+    categoryId: args.categoryId,
+    childUserIds: args.children,
+    idsNote: 'payerUserId is the parent this claim is billed to; confirm it names the right parent before approving (ofw_get_profile, where registered, or the OFW web app). categoryId is from ofw_list_expense_categories.',
   };
 }
 
@@ -154,16 +213,17 @@ export function registerExpenseTools(
   });
 
   if (allowReceiptUploads) server.registerTool('ofw_upload_expense_pdf', {
-    description: 'Upload a PDF to OurFamilyWizard My Files for later attachment to an expense. Accepts either a local path or a signed ChatGPT/oaiusercontent HTTPS URL plus fileName. Exactly one of path or url must be supplied. This tool accepts PDF files only and uploads them using the same SHARED file metadata as the OFW expense form so the returned fileId can be attached to an expense. Expense visibility is controlled separately by ofw_create_expense privateExpense.',
-    annotations: { readOnlyHint: false, destructiveHint: false },
+    description: 'Upload a PDF to OurFamilyWizard My Files for later attachment to an expense. Accepts either a local path or a signed ChatGPT/oaiusercontent HTTPS URL plus fileName. Exactly one of path or url must be supplied. This tool accepts PDF files only and uploads them using the same SHARED file metadata as the OFW expense form so the returned fileId can be attached to an expense. A SHARED file is visible to the co-parent in My Files immediately, whatever the visibility of the expense it is later attached to (that is set separately by ofw_create_expense privateExpense). ' + CONFIRM_NOTE,
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     inputSchema: z.object({
-      path: z.string().describe('Absolute path to a local PDF file. Tilde (~) is expanded by the configured attachment I/O implementation. Mutually exclusive with url.').optional(),
+      path: z.string().describe('Path to a local PDF file inside the upload directory (OFW_UPLOAD_DIR). Tilde (~) is expanded by the configured attachment I/O implementation. Mutually exclusive with url.').optional(),
       url: z.string().describe('Signed HTTPS oaiusercontent.com URL for a PDF supplied by the ChatGPT host. Mutually exclusive with path.').optional(),
       fileName: z.string().describe('Filename to use for a remote URL upload. Must end in .pdf. Defaults to receipt.pdf.').optional(),
       label: z.string().describe('Display label for the file in OFW (default: filename)').optional(),
       description: z.string().describe('Description shown in OFW My Files (default: filename)').optional(),
+      confirmToken: confirmTokenParam,
     }),
-  }, async (args) => {
+  }, async (args, ctx) => {
     const io = attachmentIO!;
     if ((args.path ? 1 : 0) + (args.url ? 1 : 0) !== 1) {
       throw new Error('Pass exactly one of path or url to ofw_upload_expense_pdf.');
@@ -175,6 +235,37 @@ export function registerExpenseTools(
     if (!fileName.toLowerCase().endsWith('.pdf') || mimeType !== PDF_MIME) {
       throw new Error(`Expense receipts must be PDF files; received ${fileName} (${mimeType})`);
     }
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    // The name and type say PDF; the bytes have to agree. The remote path
+    // already checked, but a local file is only as honest as its extension.
+    if (!isPdf(bytes)) {
+      throw new Error(`Expense receipts must be PDF files; ${fileName} does not start with a PDF header.`);
+    }
+
+    // The upload is SHARED — in front of the co-parent in My Files at once,
+    // with no later step to review it in — so it is confirmed first, exactly
+    // like ofw_upload_attachment's SHARED path. The token binds a SHA-256 of
+    // the bytes: a file (or signed URL) whose content changed between preview
+    // and approval is refused, not shared unseen.
+    const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
+    const sha256 = Array.from(digest, (b) => b.toString(16).padStart(2, '0')).join('');
+    const label = args.label ?? fileName;
+    const description = args.description ?? fileName;
+    const gate = await confirmWrite(ctx, {
+      tool: 'ofw_upload_expense_pdf',
+      action: 'ofw.file.share',
+      message: `Review and confirm uploading the receipt "${fileName}" to OurFamilyWizard. It is uploaded SHARED, so the co-parent can see it in My Files immediately — even if the expense it is attached to is private.`,
+      target: `file:${fileName}`,
+      payload: { fileName, sizeBytes, sha256, label, description, shareClass: 'SHARED', source: 'expense' },
+      preview: {
+        action: 'Upload and SHARE an expense receipt on OurFamilyWizard',
+        fileName, sizeBytes, mimeType, label, description, shareClass: 'SHARED',
+        from: args.url ? `hosted file (${new URL(args.url).hostname})` : 'local file',
+        warning: 'Visible to the co-parent immediately in My Files, whatever the visibility of the expense it is attached to; the file becomes part of the court-visible record.',
+      },
+      confirmToken: args.confirmToken,
+    });
+    if (gate) return gate;
 
     const form = new FormData();
     form.append('file', blob, fileName);
@@ -248,7 +339,10 @@ export function registerExpenseTools(
         title: args.title,
         amount: args.amount,
         purchaseDate: args.purchaseDate,
+        ...expenseParties(args),
+        ...(args.description !== undefined ? { description: args.description } : {}),
         visibility: args.privateExpense ? 'private (only you)' : 'shared with the co-parent',
+        ...(args.receiptFileId !== undefined ? { receiptFileId: args.receiptFileId } : {}),
         ...(args.privateExpense ? {} : { warning: 'Visible to the co-parent immediately as a claim in the shared expense ledger; part of the court-visible record.' }),
       },
       confirmToken: args.confirmToken,
@@ -319,6 +413,7 @@ export function registerExpenseTools(
         title: args.title,
         amount: args.amount,
         purchaseDate: args.purchaseDate,
+        ...expenseParties(args),
         ...(args.description !== undefined ? { description: args.description } : {}),
         visibility: isPrivate ? 'private (only you)' : 'shared with the co-parent',
         ...(args.receiptFileId !== undefined ? { receiptFileId: args.receiptFileId } : {}),

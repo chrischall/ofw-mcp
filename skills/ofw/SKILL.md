@@ -122,7 +122,7 @@ When `OFW_EXPENSE_ONLY=true`, only the healthcheck and expense tools exist. When
 | `ofw_get_expense_totals` | Summary of owed/paid totals |
 | `ofw_list_expenses(page?, size?)` | Paginated (1-based page); default size 20; follow `nextPage` |
 | `ofw_list_expense_categories` | Category ids and split metadata (use the id in create/update) |
-| `ofw_upload_expense_pdf(path \| url, fileName?, label?, description?)` | Upload one receipt PDF to My Files (SHARED, co-parent-visible) for later attachment; mode `all` only |
+| `ofw_upload_expense_pdf(path \| url, fileName?, label?, description?)` | Upload one receipt PDF to My Files (SHARED, co-parent-visible even on a private expense) for later attachment; confirm-gated; mode `all` only |
 | `ofw_create_expense(title, amount, purchaseDate, categoryId, payerId, children, description?, privateExpense?, receiptFileId?)` | Log a new expense; confirm-gated; optionally private with one receipt |
 | `ofw_update_expense(expenseId, …all current fields…, privateExpense)` | Full-payload update; `privateExpense:false` publishes a private expense; confirm-gated |
 
