@@ -254,9 +254,12 @@ the MCP tools expose this as `privateExpense`. The MCP tools attach at most one
 receipt, sent as a one-element `fileIds` array.
 
 **Update an expense** (write; full payload, not a patch — e.g. publish a
-private expense by sending `isPrivate:false`):
+private expense by sending `isPrivate:false`). A field left out of the PUT is
+erased, so GET the expense first and send back every field you are not
+changing (the MCP's `ofw_update_expense` does this for you):
 
 ```sh
+curl -s "https://ofw.ourfamilywizard.com/pub/v2/expense/expenses/${EXPENSE_ID}" "${AUTH_HEADERS[@]}" | jq .
 curl -s -X PUT "https://ofw.ourfamilywizard.com/pub/v2/expense/expenses/${EXPENSE_ID}" \
   "${AUTH_HEADERS[@]}" -H 'Content-Type: application/json' \
   --data '{ …every current field…, "isPrivate":false }' | jq .

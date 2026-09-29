@@ -154,7 +154,7 @@ Read-only tools run automatically. Writes that reach your co-parent or the court
 | `ofw_list_expense_categories` | Expense category ids and split metadata | Auto | any |
 | `ofw_upload_expense_pdf` | Upload a receipt PDF to My Files for an expense (SHARED — the co-parent sees it in My Files at once, even on a private expense) | Confirm (server) | `all` |
 | `ofw_create_expense` | Log a new expense; supports private entries and one receipt PDF | Confirm (server) | `all` |
-| `ofw_update_expense` | Full-payload expense update, e.g. publish a private expense | Confirm (server) | `all` |
+| `ofw_update_expense` | Change an expense, e.g. publish a private one. Pass only the fields to change; it reads the expense first so the rest are kept | Confirm (server) | `all` |
 | `ofw_list_journal_entries` | Journal entries | Auto | any |
 | `ofw_create_journal_entry` | Create a journal entry | Confirm | `all` |
 

@@ -212,7 +212,7 @@
     },
     {
       "name": "ofw_update_expense",
-      "description": "Update an existing expense (full payload), e.g. publish a private expense to the co-parent (confirmed first)"
+      "description": "Change an existing expense, e.g. publish a private one; pass only the fields to change and the rest are kept (confirmed first)"
     },
     {
       "name": "ofw_create_expense",

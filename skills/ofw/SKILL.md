@@ -124,7 +124,7 @@ When `OFW_EXPENSE_ONLY=true`, only the healthcheck and expense tools exist. When
 | `ofw_list_expense_categories` | Category ids and split metadata (use the id in create/update) |
 | `ofw_upload_expense_pdf(path \| url, fileName?, label?, description?)` | Upload one receipt PDF to My Files (SHARED, co-parent-visible even on a private expense) for later attachment; confirm-gated; mode `all` only |
 | `ofw_create_expense(title, amount, purchaseDate, categoryId, payerId, children, description?, privateExpense?, receiptFileId?)` | Log a new expense; confirm-gated; optionally private with one receipt |
-| `ofw_update_expense(expenseId, …all current fields…, privateExpense)` | Full-payload update; `privateExpense:false` publishes a private expense; confirm-gated |
+| `ofw_update_expense(expenseId, …only the fields to change…)` | Reads the expense and keeps every field you omit; `privateExpense:false` publishes a private expense; `receiptFileId` replaces all receipts, `null` clears it or `description`; refuses as `EXPENSE_FIELDS_UNREADABLE` (naming the fields) rather than erase one it can't read; confirm-gated |
 
 ### Journal
 | Tool | Notes |

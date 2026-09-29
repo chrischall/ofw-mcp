@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { z } from 'zod';
 import { McpServer } from '@modelcontextprotocol/server';
 import { OFWClient } from '../../src/client.js';
-import { registerExpenseTools } from '../../src/tools/expenses.js';
+import { readExpenseState, registerExpenseTools } from '../../src/tools/expenses.js';
 import type { AttachmentIO } from '../../src/tools/attachments.js';
 import { CAN_ASK_CTX, NO_ELICIT_CTX, callConfirmed, callPreview, type GatedHandler } from './_confirm-helpers.js';
 
@@ -409,81 +409,6 @@ describe('ofw_create_expense', () => {
   });
 });
 
-describe('ofw_update_expense', () => {
-  let original: string | undefined;
-  beforeEach(() => {
-    original = process.env.OFW_WRITE_MODE;
-    process.env.OFW_WRITE_MODE = 'all';
-  });
-  afterEach(() => {
-    if (original === undefined) delete process.env.OFW_WRITE_MODE;
-    else process.env.OFW_WRITE_MODE = original;
-  });
-
-  it('publishes a private expense with the full OFW web-app payload', async () => {
-    const client = makeClient({ id: 9001 });
-    setup(client, makeAttachmentIO());
-    await callConfirmed(handlers.get('ofw_update_expense')! as GatedHandler, {
-      expenseId: 9001,
-      title: 'Sample recurring service expense',
-      categoryId: 304873,
-      amount: 35.87,
-      purchaseDate: '2026-09-09',
-      receiptFileId: 7001,
-      privateExpense: false,
-      payerId: 101,
-      children: [203],
-    });
-
-    expect(client.request).toHaveBeenCalledWith(
-      'PUT',
-      '/pub/v2/expense/expenses/9001',
-      {
-        title: 'Sample recurring service expense',
-        amount: 35.87,
-        purchaseDate: '2026-09-09',
-        categoryId: 304873,
-        payerId: 101,
-        children: [203],
-        isPrivate: false,
-        fileIds: [7001],
-      },
-    );
-  });
-
-  it('requires a complete resource payload including privacy', () => {
-    const server = new McpServer({ name: 'test', version: '0.0.0' });
-    const configs = new Map<string, { inputSchema?: z.ZodObject }>();
-    vi.spyOn(server, 'registerTool').mockImplementation((name: string, config: unknown) => {
-      configs.set(name, config as { inputSchema?: z.ZodObject });
-      return undefined as never;
-    });
-    process.env.OFW_WRITE_MODE = 'all';
-    registerExpenseTools(server, new OFWClient(), makeAttachmentIO());
-
-    const schema = configs.get('ofw_update_expense')!.inputSchema!;
-    expect(schema.safeParse({
-      expenseId: 123,
-      title: 'Expense',
-      amount: 10,
-      purchaseDate: '2026-09-28',
-      categoryId: 1,
-      payerId: 101,
-      children: [203],
-      privateExpense: false,
-    }).success).toBe(true);
-    expect(schema.safeParse({
-      expenseId: 123,
-      title: 'Expense',
-      amount: 10,
-      purchaseDate: '2026-09-28',
-      categoryId: 1,
-      payerId: 101,
-      children: [203],
-    }).success).toBe(false);
-  });
-});
-
 describe('ofw_create_expense — confirmation gate (SEC-2)', () => {
   it('phase 1 previews the amount and description and posts NOTHING', async () => {
     const client = makeClient({ id: 99 });
@@ -661,7 +586,7 @@ describe('OFW_EXPENSE_UPLOAD_ONLY gating', () => {
 
   it.each([
     ['ofw_create_expense', base],
-    ['ofw_update_expense', { ...base, expenseId: 9, privateExpense: true }],
+    ['ofw_update_expense', { ...base, expenseId: 9, privateExpense: true, description: null, receiptFileId: null }],
   ])('%s EXPENSE_UNCONFIRMED points at the web app, not the unregistered list tool', async (tool, args) => {
     setup(timeout(), makeAttachmentIO());
     const result = await callConfirmed(handlers.get(tool)! as GatedHandler, args);
@@ -797,47 +722,6 @@ describe('expense tools — edge-case coverage', () => {
     });
   });
 
-  describe('ofw_update_expense', () => {
-    const base = { expenseId: 9, title: 'T', amount: 5, purchaseDate: '2026-09-20', categoryId: 1, payerId: 101, children: [203] };
-
-    it('sends the description and previews a private update without the co-parent warning', async () => {
-      const client = makeClient({ id: 9 });
-      setup(client, makeAttachmentIO());
-      const h = handlers.get('ofw_update_expense')! as GatedHandler;
-      const preview = await callPreview(h, { ...base, privateExpense: true, description: 'D' });
-      expect(preview.preview).toMatchObject({ visibility: 'private (only you)' });
-      expect(preview.preview).not.toHaveProperty('warning');
-      await callConfirmed(h, { ...base, privateExpense: true, description: 'D' });
-      expect(client.request).toHaveBeenCalledWith('PUT', '/pub/v2/expense/expenses/9', expect.objectContaining({ description: 'D', isPrivate: true }));
-    });
-
-    it('warns that publishing makes the expense co-parent-visible', async () => {
-      setup(makeClient({ id: 9 }), makeAttachmentIO());
-      const preview = await callPreview(handlers.get('ofw_update_expense')! as GatedHandler, { ...base, privateExpense: false });
-      expect(preview.preview).toMatchObject({ visibility: 'shared with the co-parent' });
-      expect(String(preview.preview.warning)).toMatch(/co-parent/);
-    });
-
-    it('a PUT that times out returns EXPENSE_UNCONFIRMED', async () => {
-      const client = new OFWClient();
-      vi.spyOn(client, 'request').mockRejectedValue(new Error('OFW API request timed out after 30000ms: PUT /pub/v2/expense/expenses/9'));
-      setup(client, makeAttachmentIO());
-      const result = await callConfirmed(handlers.get('ofw_update_expense')! as GatedHandler, { ...base, privateExpense: false });
-      expect(result.isError).toBe(true);
-      const parsed = JSON.parse(result.content[0].text);
-      expect(parsed.result).toBe('EXPENSE_UNCONFIRMED');
-      expect(parsed.remedy).toMatch(/ofw_list_expenses/);
-    });
-
-    it('a definitive 4xx rejection is still a plain error', async () => {
-      const client = new OFWClient();
-      vi.spyOn(client, 'request').mockRejectedValue(new Error('OFW API error: 400 Bad Request for PUT /pub/v2/expense/expenses/9'));
-      setup(client, makeAttachmentIO());
-      await expect(callConfirmed(handlers.get('ofw_update_expense')! as GatedHandler, { ...base, privateExpense: false }))
-        .rejects.toThrow(/400 Bad Request/);
-    });
-  });
-
   describe('ofw_upload_expense_pdf — confirmation gate', () => {
     it('phase 1 previews the SHARED upload and uploads NOTHING', async () => {
       const client = makeClient({ fileId: 5 });
@@ -968,13 +852,262 @@ describe('expense tools — edge-case coverage', () => {
       expect(preview.preview).toMatchObject({ payerUserId: 101, categoryId: 7, childUserIds: [203, 204] });
     });
 
-    it('update shows the parties, description and receipt', async () => {
-      setup(makeClient({ id: 1 }), makeAttachmentIO());
-      const preview = await callPreview(handlers.get('ofw_update_expense')! as GatedHandler, {
-        expenseId: 9, title: 'T', amount: 5, purchaseDate: '2026-09-20', categoryId: 7, payerId: 101, children: [203],
-        description: 'D', receiptFileId: 77, privateExpense: false,
-      });
-      expect(preview.preview).toMatchObject({ payerUserId: 101, categoryId: 7, childUserIds: [203], description: 'D', receiptFileId: 77 });
+  });
+});
+
+describe('ofw_update_expense — read, merge, write (never erase an omitted field)', () => {
+  let original: string | undefined;
+  beforeEach(() => {
+    original = process.env.OFW_WRITE_MODE;
+    process.env.OFW_WRITE_MODE = 'all';
+  });
+  afterEach(() => {
+    if (original === undefined) delete process.env.OFW_WRITE_MODE;
+    else process.env.OFW_WRITE_MODE = original;
+  });
+
+  // A private expense with a description and TWO receipts, in OFW's nested
+  // read shape. Every one of those is what a full PUT from caller args alone
+  // would have erased.
+  const NESTED = {
+    data: {
+      id: 9001,
+      title: 'Copay',
+      amount: '35.87',
+      purchaseDate: { dateTime: '2026-09-09T00:00:00' },
+      category: { id: 304873, title: 'Medical' },
+      payer: { userId: 101, name: 'Parent B' },
+      children: [{ userId: 203, name: 'Child' }],
+      isPrivate: true,
+      description: 'Follow-up visit',
+      files: [{ fileId: 7001 }, { fileId: 7002 }],
+    },
+  };
+
+  /**
+   * A client whose GET serves `state.detail` (an Error rejects) and whose PUT
+   * records the payload. `state.readback`, when set, is what the post-PUT
+   * GET sees instead.
+   */
+  function routed(state: { detail: unknown; readback?: unknown; put?: unknown }) {
+    const client = new OFWClient();
+    let putDone = false;
+    vi.spyOn(client, 'request').mockImplementation(async (method: string) => {
+      if (method === 'PUT') {
+        if (state.put instanceof Error) throw state.put;
+        putDone = true;
+        return state.put ?? { id: 9001 };
+      }
+      const value = putDone && 'readback' in state ? state.readback : state.detail;
+      if (value instanceof Error) throw value;
+      return value;
     });
+    return client;
+  }
+  const puts = (c: OFWClient) => vi.mocked(c.request).mock.calls.filter((call) => call[0] === 'PUT');
+  const update = () => handlers.get('ofw_update_expense')! as GatedHandler;
+
+  it('publishing sends only the change and keeps every other field as OFW has it', async () => {
+    const client = routed({ detail: NESTED, readback: { data: { ...NESTED.data, isPrivate: false } } });
+    setup(client, makeAttachmentIO());
+    const result = await callConfirmed(update(), { expenseId: 9001, privateExpense: false });
+    expect(puts(client)).toEqual([['PUT', '/pub/v2/expense/expenses/9001', {
+      title: 'Copay',
+      amount: 35.87,
+      purchaseDate: '2026-09-09',
+      categoryId: 304873,
+      payerId: 101,
+      children: [203],
+      isPrivate: false,
+      description: 'Follow-up visit',
+      fileIds: [7001, 7002],
+    }]]);
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed).toMatchObject({ result: 'EXPENSE_UPDATED', expenseId: 9001, changed: ['privateExpense'] });
+    expect(parsed.kept).toEqual(['title', 'amount', 'purchaseDate', 'categoryId', 'payerId', 'children', 'description', 'receiptFileId']);
+    expect(parsed).not.toHaveProperty('warnings');
+  });
+
+  it('previews the change as from → to, the full result, and the co-parent warning when shared', async () => {
+    setup(routed({ detail: NESTED }), makeAttachmentIO());
+    const preview = await callPreview(update(), { expenseId: 9001, privateExpense: false });
+    expect(preview.preview).toMatchObject({
+      action: 'Update shared OurFamilyWizard expense',
+      changes: { privateExpense: { from: true, to: false } },
+      after: { title: 'Copay', amount: 35.87, payerUserId: 101, description: 'Follow-up visit', receiptFileIds: [7001, 7002], visibility: 'shared with the co-parent' },
+    });
+    expect(String(preview.preview.warning)).toMatch(/co-parent/);
+    expect(preview.preview).not.toHaveProperty('baseNote');
+  });
+
+  it('an update that stays private carries no co-parent warning, and an unchanged value is not listed as a change', async () => {
+    setup(routed({ detail: NESTED }), makeAttachmentIO());
+    const preview = await callPreview(update(), { expenseId: 9001, amount: 40, title: 'Copay' });
+    expect(preview.preview.changes).toEqual({ amount: { from: 35.87, to: 40 } });
+    expect(preview.preview).not.toHaveProperty('warning');
+  });
+
+  it('reads the flat write-vocabulary shape too; no description and no receipt stay omitted', async () => {
+    const client = routed({ detail: {
+      title: 'Lunch', amount: 12, purchaseDate: '2026-09-01', categoryId: 1, payerId: 101,
+      children: [203, 204], private: false, description: null, fileIds: [],
+    } });
+    setup(client, makeAttachmentIO());
+    await callConfirmed(update(), { expenseId: 5, amount: 15 });
+    expect(puts(client)[0][2]).toEqual({
+      title: 'Lunch', amount: 15, purchaseDate: '2026-09-01', categoryId: 1, payerId: 101, children: [203, 204], isPrivate: false,
+    });
+  });
+
+  it('receiptFileId replaces every current receipt; null removes them and description:null removes it', async () => {
+    const client = routed({ detail: NESTED });
+    setup(client, makeAttachmentIO());
+    await callConfirmed(update(), { expenseId: 9001, receiptFileId: 8000 });
+    expect(puts(client)[0][2]).toMatchObject({ fileIds: [8000] });
+
+    vi.mocked(client.request).mockClear();
+    await callConfirmed(update(), { expenseId: 9001, receiptFileId: null, description: null });
+    const sent = puts(client)[0][2] as Record<string, unknown>;
+    expect(sent).not.toHaveProperty('fileIds');
+    expect(sent).not.toHaveProperty('description');
+  });
+
+  it('refuses, naming the fields, when an omitted field cannot be read back — and sends nothing', async () => {
+    const { description: _d, files: _f, ...rest } = NESTED.data;
+    const client = routed({ detail: rest });
+    setup(client, makeAttachmentIO());
+    const result = await update()({ expenseId: 9001, privateExpense: false }, NO_ELICIT_CTX);
+    expect(result.isError).toBe(true);
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed).toMatchObject({ result: 'EXPENSE_FIELDS_UNREADABLE', expenseId: 9001, missing: ['description', 'receiptFileId'] });
+    expect(parsed.reason).toMatch(/did not include a readable value/);
+    expect(parsed.remedy).toMatch(/erase/);
+    expect(puts(client)).toEqual([]);
+
+    // Supplying them (here: "none") unblocks it.
+    await callConfirmed(update(), { expenseId: 9001, privateExpense: false, description: null, receiptFileId: null });
+    expect(puts(client)).toHaveLength(1);
+  });
+
+  it('a failed read is never a blind write: every omitted field is refused, with the read error', async () => {
+    const client = routed({ detail: new Error('OFW API error: 404 Not Found for GET /pub/v2/expense/expenses/9001') });
+    setup(client, makeAttachmentIO());
+    const parsed = JSON.parse((await update()({ expenseId: 9001, privateExpense: false }, NO_ELICIT_CTX)).content[0].text);
+    expect(parsed.result).toBe('EXPENSE_FIELDS_UNREADABLE');
+    expect(parsed.missing).toEqual(['title', 'amount', 'purchaseDate', 'categoryId', 'payerId', 'children', 'description', 'receiptFileId']);
+    expect(parsed.reason).toMatch(/404 Not Found/);
+    expect(puts(client)).toEqual([]);
+  });
+
+  it('with the read failing, a call that supplies every field still goes through and says nothing was carried over', async () => {
+    const client = routed({ detail: new Error('boom'), readback: new Error('still down') });
+    setup(client, makeAttachmentIO());
+    const all = {
+      expenseId: 9001, title: 'T', amount: 5, purchaseDate: '2026-09-20', categoryId: 1, payerId: 101, children: [203],
+      privateExpense: true, description: 'D', receiptFileId: 7001,
+    };
+    const preview = await callPreview(update(), all);
+    expect(String(preview.preview.baseNote)).toMatch(/could not be read.*boom/);
+    expect((preview.preview.changes as Record<string, { from: unknown }>).title.from).toBe('unknown (not readable from OFW)');
+    const result = await callConfirmed(update(), all);
+    expect(puts(client)).toHaveLength(1);
+    expect(JSON.parse(result.content[0].text).warnings).toEqual([expect.stringMatching(/could not be read back.*still down/)]);
+  });
+
+  it('a stringly-typed non-Error read failure is reported too', async () => {
+    const client = new OFWClient();
+    vi.spyOn(client, 'request').mockRejectedValue('socket hang up');
+    setup(client, makeAttachmentIO());
+    const parsed = JSON.parse((await update()({ expenseId: 1, title: 'T' }, NO_ELICIT_CTX)).content[0].text);
+    expect(parsed.reason).toMatch(/socket hang up/);
+  });
+
+  it('refuses a call that changes nothing', async () => {
+    const client = routed({ detail: NESTED });
+    setup(client, makeAttachmentIO());
+    const result = await update()({ expenseId: 9001 }, NO_ELICIT_CTX);
+    expect(result.isError).toBe(true);
+    expect(JSON.parse(result.content[0].text).result).toBe('NO_CHANGES');
+    expect(client.request).not.toHaveBeenCalled();
+  });
+
+  it('a token minted before the expense changed on OFW is refused, not applied over that change', async () => {
+    const state = { detail: NESTED as unknown };
+    const client = routed(state);
+    setup(client, makeAttachmentIO());
+    const { confirmToken } = await callPreview(update(), { expenseId: 9001, privateExpense: false });
+    state.detail = { data: { ...NESTED.data, amount: 99 } };
+    const result = await update()({ expenseId: 9001, privateExpense: false, confirmToken }, NO_ELICIT_CTX);
+    expect(JSON.parse(result.content[0].text)).toMatchObject({ error: 'DRAFT_CHANGED' });
+    expect(puts(client)).toEqual([]);
+  });
+
+  it('reports any field OFW reads back differently from what was sent', async () => {
+    const client = routed({ detail: NESTED, readback: { data: { ...NESTED.data, isPrivate: false, files: [] } } });
+    setup(client, makeAttachmentIO());
+    const parsed = JSON.parse((await callConfirmed(update(), { expenseId: 9001, privateExpense: false })).content[0].text);
+    expect(parsed.warnings).toEqual([expect.stringMatching(/receiptFileId as \[\] after the update, not the \[7001,7002\]/)]);
+  });
+
+  it('a non-Error readback failure still becomes a warning', async () => {
+    const client = routed({ detail: NESTED });
+    let n = 0;
+    const real = vi.mocked(client.request).getMockImplementation()!;
+    vi.mocked(client.request).mockImplementation(async (method: string, ...rest: unknown[]) => {
+      if (method === 'GET' && ++n === 3) throw 'gone';
+      return (real as (...a: unknown[]) => Promise<unknown>)(method, ...rest);
+    });
+    setup(client, makeAttachmentIO());
+    const parsed = JSON.parse((await callConfirmed(update(), { expenseId: 9001, amount: 1 })).content[0].text);
+    expect(parsed.warnings).toEqual([expect.stringMatching(/could not be read back to verify it \(gone\)/)]);
+  });
+
+  it('a PUT that times out is EXPENSE_UNCONFIRMED; a definitive 4xx is a plain error', async () => {
+    const client = routed({ detail: NESTED, put: new Error('OFW API request timed out after 30000ms: PUT /pub/v2/expense/expenses/9001') });
+    setup(client, makeAttachmentIO());
+    const parsed = JSON.parse((await callConfirmed(update(), { expenseId: 9001, privateExpense: false })).content[0].text);
+    expect(parsed).toMatchObject({ result: 'EXPENSE_UNCONFIRMED', mayHaveLanded: true });
+    expect(parsed.remedy).toMatch(/ofw_list_expenses/);
+
+    setup(routed({ detail: NESTED, put: new Error('OFW API error: 400 Bad Request for PUT /pub/v2/expense/expenses/9001') }), makeAttachmentIO());
+    await expect(callConfirmed(update(), { expenseId: 9001, privateExpense: false })).rejects.toThrow(/400 Bad Request/);
+  });
+
+  it('requires only expenseId; accepts null to clear description and receipt', () => {
+    const server = new McpServer({ name: 'test', version: '0.0.0' });
+    const configs = new Map<string, { inputSchema?: z.ZodObject; description: string }>();
+    vi.spyOn(server, 'registerTool').mockImplementation((name: string, config: unknown) => {
+      configs.set(name, config as { inputSchema?: z.ZodObject; description: string });
+      return undefined as never;
+    });
+    registerExpenseTools(server, new OFWClient(), makeAttachmentIO());
+    const tool = configs.get('ofw_update_expense')!;
+    expect(tool.inputSchema!.safeParse({ expenseId: 1 }).success).toBe(true);
+    expect(tool.inputSchema!.safeParse({ expenseId: 1, description: null, receiptFileId: null }).success).toBe(true);
+    expect(tool.inputSchema!.safeParse({ title: 'T' }).success).toBe(false);
+    expect(tool.description).toMatch(/every field you omit keeps its current value/);
+  });
+});
+
+describe('readExpenseState', () => {
+  it('reads nothing from a non-object', () => {
+    expect(readExpenseState(null)).toEqual({});
+    expect(readExpenseState([1])).toEqual({});
+  });
+
+  it('leaves unrecognised values unknown rather than empty', () => {
+    expect(readExpenseState({
+      title: '  ', amount: 'abc', purchaseDate: 'soon', categoryId: 0, category: 'x', payerId: -1, payer: { name: 'n' },
+      children: [], isPrivate: 'yes', description: 42, fileIds: 'x', files: [{ fileId: 1 }],
+    })).toEqual({});
+  });
+
+  it('treats a child list with an unreadable entry as unknown', () => {
+    expect(readExpenseState({ children: [203, { name: 'no id' }] })).toEqual({});
+  });
+
+  it('reads ids given as {id}, a null file list as none, and an empty description as none', () => {
+    expect(readExpenseState({ payer: { id: 7 }, children: [{ id: 8 }], files: null, description: '' }))
+      .toEqual({ payerId: 7, children: [8], fileIds: [], description: null });
   });
 });

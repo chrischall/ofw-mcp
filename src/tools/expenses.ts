@@ -2,8 +2,8 @@ import { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import type { OFWClient } from '../client.js';
 import { MAX_UPLOAD_BYTES, type AttachmentIO } from './attachments.js';
-import { jsonResponse, requestWrite, UnconfirmedWriteError, unconfirmedWriteResponse } from './_shared.js';
-import { CONFIRM_NOTE, confirmTokenParam, confirmWrite } from './_confirm.js';
+import { jsonErrorResponse, jsonResponse, requestWrite, UnconfirmedWriteError, unconfirmedWriteResponse } from './_shared.js';
+import { CONFIRM_NOTE, confirmTokenParam, confirmWrite, stateRevision } from './_confirm.js';
 import { readUpstreamPaging } from './pagination.js';
 import { getExpenseUploadOnly, getWriteMode } from '../config.js';
 import { parseLenient } from '@chrischall/mcp-utils';
@@ -129,6 +129,103 @@ function expenseParties(args: { payerId: number; categoryId: number; children: n
     childUserIds: args.children,
     idsNote: 'payerUserId is the parent this claim is billed to; confirm it names the right parent before approving (ofw_get_profile, where registered, or the OFW web app). categoryId is from ofw_list_expense_categories.',
   };
+}
+
+/**
+ * The fields OFW's expense PUT needs, in its own vocabulary. PUT is a full
+ * replace: a field left out of the payload is not "unchanged", it is gone.
+ */
+interface ExpenseState {
+  title: string;
+  amount: number;
+  purchaseDate: string;
+  categoryId: number;
+  payerId: number;
+  children: number[];
+  isPrivate: boolean;
+  /** null = the expense has no description. */
+  description: string | null;
+  /** [] = the expense has no receipt. */
+  fileIds: number[];
+}
+
+type ExpenseField = keyof ExpenseState;
+
+const EXPENSE_FIELDS: ExpenseField[] = [
+  'title', 'amount', 'purchaseDate', 'categoryId', 'payerId', 'children', 'isPrivate', 'description', 'fileIds',
+];
+
+/** The input argument a caller passes to supply each field by hand. */
+const ARG_FOR: Record<ExpenseField, string> = {
+  title: 'title', amount: 'amount', purchaseDate: 'purchaseDate', categoryId: 'categoryId', payerId: 'payerId',
+  children: 'children', isPrivate: 'privateExpense', description: 'description', fileIds: 'receiptFileId',
+};
+
+const isRecord = (v: unknown): v is Record<string, unknown> =>
+  typeof v === 'object' && v !== null && !Array.isArray(v);
+const positiveInt = (v: unknown): number | undefined =>
+  typeof v === 'number' && Number.isInteger(v) && v > 0 ? v : undefined;
+/** A user/file id given as a bare number or as `{userId}` / `{fileId}` / `{id}`. */
+const refId = (v: unknown, key: 'userId' | 'fileId'): number | undefined =>
+  positiveInt(v) ?? (isRecord(v) ? positiveInt(v[key]) ?? positiveInt(v.id) : undefined);
+const idList = (v: unknown, key: 'userId' | 'fileId'): number[] | undefined => {
+  if (!Array.isArray(v)) return undefined;
+  const ids = v.map((x) => refId(x, key));
+  return ids.every((id): id is number => id !== undefined) ? ids : undefined;
+};
+
+/**
+ * Read an expense as OFW returned it into the fields a PUT needs — every
+ * field it can read, and ONLY those. A field whose key is absent, or whose
+ * value is a shape this does not recognise, is left out: "unknown" is never
+ * rounded to "empty", because merging an unknown field as empty is exactly
+ * the silent wipe this read exists to prevent. A key that is present and
+ * null/empty IS read, as "the expense has none".
+ *
+ * The detail shape has not been verified live (no account with an expense
+ * was available), so the reader accepts both the flat write vocabulary
+ * (`categoryId`, `payerId`, `fileIds`) and the nested read shapes OFW uses on
+ * other endpoints (`category.id`, `payer.userId`, `files[].fileId`,
+ * `{dateTime}`); anything else lands in "unknown" and the tool refuses.
+ */
+export function readExpenseState(raw: unknown): Partial<ExpenseState> {
+  const d = isRecord(raw) && isRecord(raw.data) ? raw.data : raw;
+  if (!isRecord(d)) return {};
+  const out: Partial<ExpenseState> = {};
+
+  if (typeof d.title === 'string' && d.title.trim()) out.title = d.title;
+
+  const amount = typeof d.amount === 'string' ? Number(d.amount) : d.amount;
+  if (typeof amount === 'number' && Number.isFinite(amount) && amount > 0) out.amount = amount;
+
+  const dateRaw = isRecord(d.purchaseDate) ? d.purchaseDate.dateTime : d.purchaseDate;
+  if (typeof dateRaw === 'string' && /^\d{4}-\d{2}-\d{2}/.test(dateRaw)) out.purchaseDate = dateRaw.slice(0, 10);
+
+  const categoryId = positiveInt(d.categoryId) ?? (isRecord(d.category) ? positiveInt(d.category.id) : undefined);
+  if (categoryId !== undefined) out.categoryId = categoryId;
+
+  const payerId = positiveInt(d.payerId) ?? refId(d.payer, 'userId');
+  if (payerId !== undefined) out.payerId = payerId;
+
+  const children = idList(d.children, 'userId');
+  if (children !== undefined && children.length > 0) out.children = children;
+
+  const isPrivate = typeof d.isPrivate === 'boolean' ? d.isPrivate : d.private;
+  if (typeof isPrivate === 'boolean') out.isPrivate = isPrivate;
+
+  if ('description' in d) {
+    if (d.description === null || d.description === '') out.description = null;
+    else if (typeof d.description === 'string') out.description = d.description;
+  }
+
+  for (const key of ['fileIds', 'files'] as const) {
+    if (!(key in d)) continue;
+    const ids = d[key] === null ? [] : idList(d[key], 'fileId');
+    if (ids !== undefined) out.fileIds = ids;
+    break;
+  }
+
+  return out;
 }
 
 export function registerExpenseTools(
@@ -303,70 +400,158 @@ export function registerExpenseTools(
   });
 
   if (allowWrites) server.registerTool('ofw_update_expense', {
-    description: `Update an existing OurFamilyWizard expense using the current web-app full-resource update contract. Supply the complete current expense fields plus expenseId. Set privateExpense=false to publish a previously private/staged expense to the co-parent. This is a full update, not a partial patch. If the request fails without a definitive answer the result is EXPENSE_UNCONFIRMED: the update may already have been applied, so check ${checkIn} before retrying. ` + CONFIRM_NOTE,
+    description: `Change an existing OurFamilyWizard expense. Pass expenseId plus ONLY the fields you want to change; every field you omit keeps its current value. The tool reads the expense from OFW first and sends the merged result, because OFW's update replaces the whole expense and a field left out would otherwise be erased. If a field you did not pass cannot be read back from OFW, the update is refused as EXPENSE_FIELDS_UNREADABLE and names the field; pass it explicitly (description:null or receiptFileId:null to send none). receiptFileId REPLACES all current receipts; omit it to keep them. Set privateExpense=false to publish a private expense to the co-parent. The confirmation is bound to the expense exactly as read, so if it changes on OFW in between, the update is refused instead of overwriting that change. If the request fails without a definitive answer the result is EXPENSE_UNCONFIRMED: the update may already have been applied, so check ${checkIn} before retrying. ` + CONFIRM_NOTE,
     annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
     inputSchema: z.object({
       expenseId: z.number().int().positive().describe('Existing OFW expense entity id'),
-      title: z.string().trim().min(1).describe('Current expense title/name shown in OFW'),
-      amount: z.number().positive().describe('Current full expense amount'),
-      purchaseDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).describe('Current expense date, YYYY-MM-DD'),
-      categoryId: z.number().int().positive().describe('Current OFW expense category id'),
-      payerId: z.number().int().positive().describe('Current OFW payer/reimbursing parent userId'),
-      children: z.array(z.number().int().positive()).min(1).describe('Current OFW child userIds associated with the expense'),
-      description: z.string().trim().min(1).describe('Current supporting description/details, when present').optional(),
-      privateExpense: z.boolean().describe('true = visible only to you; false = shared with co-parent'),
-      receiptFileId: z.number().int().positive().describe('Current single OFW receipt fileId, when present').optional(),
+      title: z.string().trim().min(1).describe('New title (omit to keep)').optional(),
+      amount: z.number().positive().describe('New full expense amount (omit to keep)').optional(),
+      purchaseDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).describe('New expense date, YYYY-MM-DD (omit to keep)').optional(),
+      categoryId: z.number().int().positive().describe('New OFW expense category id (omit to keep)').optional(),
+      payerId: z.number().int().positive().describe('New payer: the userId of the parent who owes (omit to keep)').optional(),
+      children: z.array(z.number().int().positive()).min(1).describe('New child userIds, replacing the current list (omit to keep)').optional(),
+      description: z.string().trim().min(1).nullable().describe('New description; null removes it (omit to keep)').optional(),
+      privateExpense: z.boolean().describe('true = visible only to you; false = shared with the co-parent (omit to keep)').optional(),
+      receiptFileId: z.number().int().positive().nullable().describe('Receipt fileId that REPLACES all current receipts; null removes them (omit to keep)').optional(),
       confirmToken: confirmTokenParam,
     }),
   }, async (args, ctx) => {
+    const { expenseId, confirmToken } = args;
+    const path = `/pub/v2/expense/expenses/${expenseId}`;
+
+    // What the caller asked to change, in OFW's vocabulary. `null` is a
+    // deliberate "send none"; `undefined` is "keep what is there".
+    const supplied: Partial<ExpenseState> = {};
+    if (args.title !== undefined) supplied.title = args.title;
+    if (args.amount !== undefined) supplied.amount = args.amount;
+    if (args.purchaseDate !== undefined) supplied.purchaseDate = args.purchaseDate;
+    if (args.categoryId !== undefined) supplied.categoryId = args.categoryId;
+    if (args.payerId !== undefined) supplied.payerId = args.payerId;
+    if (args.children !== undefined) supplied.children = args.children;
+    if (args.privateExpense !== undefined) supplied.isPrivate = args.privateExpense;
+    if (args.description !== undefined) supplied.description = args.description;
+    if (args.receiptFileId !== undefined) supplied.fileIds = args.receiptFileId === null ? [] : [args.receiptFileId];
+    if (Object.keys(supplied).length === 0) {
+      return jsonErrorResponse({
+        result: 'NO_CHANGES',
+        expenseId,
+        remedy: 'Pass the fields to change alongside expenseId (for example privateExpense:false to publish it). Nothing was sent.',
+      });
+    }
+
+    // Re-read on EVERY call (phase 1 and phase 2 alike): the merge base and
+    // the confirmation's revision both come from this read. A failed read is
+    // not a reason to guess — it leaves every omitted field unknown, and the
+    // refusal below names them.
+    let current: Partial<ExpenseState> = {};
+    let readError: string | undefined;
+    try {
+      const raw = await client.request('GET', path);
+      current = readExpenseState(parseLenient(z.looseObject({}), raw, { label: 'ofw-mcp', context: `GET ${path}` }));
+    } catch (e) {
+      readError = e instanceof Error ? e.message : String(e);
+    }
+
+    const merged: Partial<ExpenseState> = { ...current, ...supplied };
+    const missing = EXPENSE_FIELDS.filter((f) => merged[f] === undefined);
+    if (missing.length > 0) {
+      return jsonErrorResponse({
+        result: 'EXPENSE_FIELDS_UNREADABLE',
+        expenseId,
+        missing: missing.map((f) => ARG_FOR[f]),
+        reason: readError !== undefined
+          ? `Could not read expense ${expenseId} from OFW (${readError}), so the fields you did not pass have no known value.`
+          : `OFW's copy of expense ${expenseId} did not include a readable value for these fields.`,
+        remedy: `OFW replaces the whole expense on update, so sending without these would erase them. Pass them explicitly (description:null or receiptFileId:null if the expense should have none). Nothing was sent.`,
+      });
+    }
+    const next = merged as ExpenseState;
+
     const payload: Record<string, unknown> = {
-      title: args.title,
-      amount: args.amount,
-      purchaseDate: args.purchaseDate,
-      categoryId: args.categoryId,
-      payerId: args.payerId,
-      children: args.children,
-      isPrivate: args.privateExpense,
+      title: next.title,
+      amount: next.amount,
+      purchaseDate: next.purchaseDate,
+      categoryId: next.categoryId,
+      payerId: next.payerId,
+      children: next.children,
+      isPrivate: next.isPrivate,
     };
+    // Same convention as create: no description / no receipt is an omitted
+    // key, the shape OFW's form is known to accept.
+    if (next.description !== null) payload.description = next.description;
+    if (next.fileIds.length > 0) payload.fileIds = next.fileIds;
 
-    if (args.description !== undefined) payload.description = args.description;
-    if (args.receiptFileId !== undefined) payload.fileIds = [args.receiptFileId];
-
+    const changes: Record<string, { from: unknown; to: unknown }> = {};
+    for (const f of Object.keys(supplied) as ExpenseField[]) {
+      const from = current[f];
+      if (JSON.stringify(from) !== JSON.stringify(next[f])) {
+        changes[ARG_FOR[f]] = { from: from === undefined ? 'unknown (not readable from OFW)' : from, to: next[f] };
+      }
+    }
+    const baseRead = readError === undefined;
     const gate = await confirmWrite(ctx, {
       tool: 'ofw_update_expense',
       action: 'ofw.expense.update',
-      message: args.privateExpense
-        ? 'Review and confirm this update to a private OurFamilyWizard expense.'
-        : 'Review and confirm this OurFamilyWizard expense update. The expense will be SHARED: it appears in the ledger the co-parent sees immediately, and cannot be deleted through this server.',
-      target: `expense:${args.expenseId}`,
+      message: next.isPrivate
+        ? `Review and confirm this update to the private OurFamilyWizard expense "${next.title}".`
+        : `Review and confirm this update to the OurFamilyWizard expense "${next.title}". The expense will be SHARED: it appears in the ledger the co-parent sees immediately, and cannot be deleted through this server.`,
+      target: `expense:${expenseId}`,
+      ...(baseRead ? { revision: stateRevision(current) } : {}),
       payload,
       preview: {
-        action: args.privateExpense ? 'Update private OurFamilyWizard expense' : 'Update shared OurFamilyWizard expense',
-        expenseId: args.expenseId,
-        title: args.title,
-        amount: args.amount,
-        purchaseDate: args.purchaseDate,
-        ...expenseParties(args),
-        ...(args.description !== undefined ? { description: args.description } : {}),
-        visibility: args.privateExpense ? 'private (only you)' : 'shared with the co-parent',
-        ...(args.receiptFileId !== undefined ? { receiptFileId: args.receiptFileId } : {}),
-        ...(args.privateExpense ? {} : { warning: 'Visible to the co-parent immediately as a claim in the shared expense ledger; part of the court-visible record.' }),
+        action: next.isPrivate ? 'Update private OurFamilyWizard expense' : 'Update shared OurFamilyWizard expense',
+        expenseId,
+        changes,
+        after: {
+          title: next.title,
+          amount: next.amount,
+          purchaseDate: next.purchaseDate,
+          ...expenseParties(next),
+          description: next.description,
+          visibility: next.isPrivate ? 'private (only you)' : 'shared with the co-parent',
+          receiptFileIds: next.fileIds,
+        },
+        ...(baseRead ? {} : { baseNote: `The current expense could not be read from OFW (${readError}); every field comes from this call, and nothing is carried over.` }),
+        ...(next.isPrivate ? {} : { warning: 'Visible to the co-parent immediately as a claim in the shared expense ledger; part of the court-visible record.' }),
       },
-      confirmToken: args.confirmToken,
+      confirmToken,
     });
     if (gate) return gate;
+
     let data: unknown;
     try {
-      data = await requestWrite(client, 'PUT', `/pub/v2/expense/expenses/${args.expenseId}`, payload);
+      data = await requestWrite(client, 'PUT', path, payload);
     } catch (e) {
       if (!(e instanceof UnconfirmedWriteError)) throw e;
       return unconfirmedWriteResponse(e, {
         result: 'EXPENSE_UNCONFIRMED',
-        what: `update expense ${args.expenseId}`,
+        what: `update expense ${expenseId}`,
         checkWith: `${checkIn} (compare this expense against the values you sent)`,
       });
     }
-    return jsonResponse(data);
+
+    // Read it back: the PUT response is not the record. Any field OFW now
+    // reports differently from what was sent is surfaced, never assumed.
+    const warnings: string[] = [];
+    try {
+      const after = readExpenseState(await client.request('GET', path));
+      for (const f of EXPENSE_FIELDS) {
+        if (after[f] !== undefined && JSON.stringify(after[f]) !== JSON.stringify(next[f])) {
+          warnings.push(`OFW reports ${ARG_FOR[f]} as ${JSON.stringify(after[f])} after the update, not the ${JSON.stringify(next[f])} that was sent.`);
+        }
+      }
+    } catch (e) {
+      warnings.push(`The update was accepted but could not be read back to verify it (${e instanceof Error ? e.message : String(e)}); check ${checkIn}.`);
+    }
+
+    return jsonResponse({
+      result: 'EXPENSE_UPDATED',
+      expenseId,
+      changed: Object.keys(changes),
+      kept: EXPENSE_FIELDS.filter((f) => supplied[f] === undefined).map((f) => ARG_FOR[f]),
+      ...(warnings.length > 0 ? { warnings } : {}),
+      response: data,
+    });
   });
 
   if (allowWrites) server.registerTool('ofw_create_expense', {
