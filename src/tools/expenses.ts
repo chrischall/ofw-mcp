@@ -489,6 +489,17 @@ export function registerExpenseTools(
       }
     }
     const baseRead = readError === undefined;
+    // Every supplied field already matches OFW: a full-replace PUT would only
+    // re-send what is there, through a confirmation that approves nothing.
+    // (With the read failed, every supplied field is a change from "unknown",
+    // so this never swallows a call it cannot compare.)
+    if (baseRead && Object.keys(changes).length === 0) {
+      return jsonErrorResponse({
+        result: 'NO_CHANGES',
+        expenseId,
+        remedy: 'Every field you passed already has that value on OFW, so there is nothing to update. Nothing was sent.',
+      });
+    }
     const gate = await confirmWrite(ctx, {
       tool: 'ofw_update_expense',
       action: 'ofw.expense.update',

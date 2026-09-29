@@ -1031,6 +1031,18 @@ describe('ofw_update_expense — read, merge, write (never erase an omitted fiel
     expect(client.request).not.toHaveBeenCalled();
   });
 
+  it('refuses a call whose fields all equal what OFW already holds, before any confirmation or PUT', async () => {
+    const client = routed({ detail: NESTED });
+    setup(client, makeAttachmentIO());
+    // Already private; same amount; same receipts in the same order.
+    const result = await update()({ expenseId: 9001, privateExpense: true, amount: 35.87, title: 'Copay' }, NO_ELICIT_CTX);
+    expect(result.isError).toBe(true);
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed).toMatchObject({ result: 'NO_CHANGES', expenseId: 9001 });
+    expect(parsed.remedy).toMatch(/already has that value/);
+    expect(puts(client)).toEqual([]);
+  });
+
   it('a token minted before the expense changed on OFW is refused, not applied over that change', async () => {
     const state = { detail: NESTED as unknown };
     const client = routed(state);
