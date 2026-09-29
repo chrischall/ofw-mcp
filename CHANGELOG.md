@@ -1,5 +1,19 @@
 # Changelog
 
+## [2.20.0](https://github.com/chrischall/ofw-mcp/compare/v2.19.5...v2.20.0) (2026-09-29)
+
+
+### Features
+
+* **expenses:** full expense create/update, receipt PDF upload, categories, and expense-only modes ([#340](https://github.com/chrischall/ofw-mcp/issues/340)) ([2234863](https://github.com/chrischall/ofw-mcp/commit/22348635db4fdff24767475292daecbc2daf591f))
+
+
+### Bug Fixes
+
+* **expenses:** point upload-only EXPENSE_UNCONFIRMED recovery at the OFW web app ([#343](https://github.com/chrischall/ofw-mcp/issues/343)) ([66e5015](https://github.com/chrischall/ofw-mcp/commit/66e50151661804112fc91e20e2728f828f68a5d7))
+* **expenses:** refuse an ofw_update_expense call whose fields already match OFW ([#348](https://github.com/chrischall/ofw-mcp/issues/348)) ([dc5af08](https://github.com/chrischall/ofw-mcp/commit/dc5af0835c94b5225dee3277e2d298a956dafa6f))
+* **expenses:** stop naming ourfamilywizard.com twice in the upload-only retry remedy ([#345](https://github.com/chrischall/ofw-mcp/issues/345)) ([2696d44](https://github.com/chrischall/ofw-mcp/commit/2696d44cd709cb34c64e5a48177186f466d13b99))
+
 ## [2.19.5](https://github.com/chrischall/ofw-mcp/compare/v2.19.4...v2.19.5) (2026-09-27)
 
 
