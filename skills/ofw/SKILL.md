@@ -173,7 +173,7 @@ Message and draft reads come from a local cache, so **a result can be stale with
 |---|---|
 | How old is this data? | `freshness` — `staleness` (`fresh`/`unverified`/`stale`), `asOf`, `ageSeconds`, a quotable `warning` |
 | Is this the WHOLE answer? | `complete` on `ofw_list_messages` / `ofw_list_drafts` / `ofw_get_unread_sent` / `ofw_status` |
-| If not, how do I get the rest? | `nextPage` (message tools) or `nextStart` (`ofw_list_expenses` / `ofw_list_journal_entries`) — null means there is no more |
+| If not, how do I get the rest? | `nextPage` (message tools and `ofw_list_expenses`) or `nextStart` (`ofw_list_journal_entries`) — null means there is no more |
 | Is this entity still what I think it is? | `state` from `ofw_status` / `ofw_check_freshness` |
 
 Rules:

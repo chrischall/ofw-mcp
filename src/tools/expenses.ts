@@ -139,6 +139,13 @@ export function registerExpenseTools(
   // Expense writes land on the court-visible record — OFW_WRITE_MODE 'all' only.
   const writeMode = getWriteMode();
   const uploadOnly = getExpenseUploadOnly();
+  // Where a caller checks whether an ambiguous write landed. Upload-only mode
+  // does not register ofw_list_expenses, and naming a tool the caller cannot
+  // call leaves it guessing — a guessed retry logs a duplicate money claim in
+  // front of the co-parent. So that mode names the web app instead.
+  const checkIn = uploadOnly
+    ? 'the Expenses log on ourfamilywizard.com (ofw_list_expenses is not available in this deployment)'
+    : 'ofw_list_expenses';
   const allowWrites = writeMode === 'all';
   // The receipt is uploaded SHARED (the only share class OFW accepts in an
   // expense's fileIds), and a SHARED My Files entry is co-parent-visible at
@@ -296,7 +303,7 @@ export function registerExpenseTools(
   });
 
   if (allowWrites) server.registerTool('ofw_update_expense', {
-    description: 'Update an existing OurFamilyWizard expense using the current web-app full-resource update contract. Supply the complete current expense fields plus expenseId. Set privateExpense=false to publish a previously private/staged expense to the co-parent. This is a full update, not a partial patch. If the request fails without a definitive answer the result is EXPENSE_UNCONFIRMED: the update may already have been applied, so check ofw_list_expenses before retrying. ' + CONFIRM_NOTE,
+    description: `Update an existing OurFamilyWizard expense using the current web-app full-resource update contract. Supply the complete current expense fields plus expenseId. Set privateExpense=false to publish a previously private/staged expense to the co-parent. This is a full update, not a partial patch. If the request fails without a definitive answer the result is EXPENSE_UNCONFIRMED: the update may already have been applied, so check ${checkIn} before retrying. ` + CONFIRM_NOTE,
     annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
     inputSchema: z.object({
       expenseId: z.number().int().positive().describe('Existing OFW expense entity id'),
@@ -356,14 +363,14 @@ export function registerExpenseTools(
       return unconfirmedWriteResponse(e, {
         result: 'EXPENSE_UNCONFIRMED',
         what: `update expense ${args.expenseId}`,
-        checkWith: 'ofw_list_expenses (compare this expense against the values you sent)',
+        checkWith: `${checkIn} (compare this expense against the values you sent)`,
       });
     }
     return jsonResponse(data);
   });
 
   if (allowWrites) server.registerTool('ofw_create_expense', {
-    description: 'Log a new expense in OurFamilyWizard using the current web-app expense contract. Required fields are title, amount, purchaseDate, categoryId, payerId (the parent who owes), and at least one child user id. Supports one previously-uploaded receipt PDF and private entries. privateExpense=true creates an expense visible only to you; false/default creates the normal shared expense. receiptFileId should come from ofw_upload_expense_pdf. A shared expense is a money claim that appears in the ledger in front of the co-parent immediately, and this server cannot delete it. If the request fails without a definitive answer the result is EXPENSE_UNCONFIRMED: the expense may already exist, so do NOT retry until ofw_list_expenses shows it did not land. ' + CONFIRM_NOTE,
+    description: `Log a new expense in OurFamilyWizard using the current web-app expense contract. Required fields are title, amount, purchaseDate, categoryId, payerId (the parent who owes), and at least one child user id. Supports one previously-uploaded receipt PDF and private entries. privateExpense=true creates an expense visible only to you; false/default creates the normal shared expense. receiptFileId should come from ofw_upload_expense_pdf. A shared expense is a money claim that appears in the ledger in front of the co-parent immediately, and this server cannot delete it. If the request fails without a definitive answer the result is EXPENSE_UNCONFIRMED: the expense may already exist, so do NOT retry until ${checkIn} shows it did not land. ` + CONFIRM_NOTE,
     // Not a harmless local write: a shared claim is co-parent-visible at once
     // and this server has no way to take it back. destructiveHint keeps a host
     // that auto-approves "non-destructive" tools from running it silently.
@@ -430,7 +437,7 @@ export function registerExpenseTools(
       return unconfirmedWriteResponse(e, {
         result: 'EXPENSE_UNCONFIRMED',
         what: 'log this expense',
-        checkWith: 'ofw_list_expenses (look for this title and amount among the newest expenses)',
+        checkWith: `${checkIn} (look for this title and amount among the newest expenses)`,
       });
     }
     return jsonResponse(data);

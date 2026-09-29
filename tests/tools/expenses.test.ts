@@ -646,6 +646,41 @@ describe('OFW_EXPENSE_UPLOAD_ONLY gating', () => {
       'ofw_upload_expense_pdf',
     ]);
   });
+
+  // ofw_list_expenses is not registered here, so recovery guidance that names
+  // it leaves the caller no way to check — and a guessed retry logs a
+  // duplicate claim. It must point at the web app instead.
+  const timeout = () => {
+    const client = new OFWClient();
+    vi.spyOn(client, 'request').mockRejectedValue(new Error('OFW API request timed out after 30000ms'));
+    return client;
+  };
+  const base = { title: 'T', amount: 50, purchaseDate: '2026-09-20', categoryId: 1, payerId: 101, children: [203] };
+
+  it.each([
+    ['ofw_create_expense', base],
+    ['ofw_update_expense', { ...base, expenseId: 9, privateExpense: true }],
+  ])('%s EXPENSE_UNCONFIRMED points at the web app, not the unregistered list tool', async (tool, args) => {
+    setup(timeout(), makeAttachmentIO());
+    const result = await callConfirmed(handlers.get(tool)! as GatedHandler, args);
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.result).toBe('EXPENSE_UNCONFIRMED');
+    expect(parsed.remedy).toMatch(/ourfamilywizard\.com/);
+    expect(parsed.remedy).toMatch(/ofw_list_expenses is not available/);
+  });
+
+  it('tool descriptions name the web app as the place to check', () => {
+    const server = new McpServer({ name: 'test', version: '0.0.0' });
+    const descriptions = new Map<string, string>();
+    vi.spyOn(server, 'registerTool').mockImplementation((name: string, config: unknown) => {
+      descriptions.set(name, (config as { description: string }).description);
+      return undefined as never;
+    });
+    registerExpenseTools(server, new OFWClient(), makeAttachmentIO());
+    for (const tool of ['ofw_create_expense', 'ofw_update_expense']) {
+      expect(descriptions.get(tool)).toMatch(/Expenses log on ourfamilywizard\.com \(ofw_list_expenses is not available/);
+    }
+  });
 });
 
 
