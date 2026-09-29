@@ -339,11 +339,15 @@ export function unconfirmedWriteResponse(
   e: UnconfirmedWriteError,
   opts: { result: string; what: string; checkWith: string },
 ): ReturnType<typeof textResult> {
+  // The web app is the fallback for a checkWith that names a tool. A checkWith
+  // that already sends the caller to the web app (a deployment where the list
+  // tool is not registered) needs no second mention of it.
+  const fallback = /ourfamilywizard\.com/i.test(opts.checkWith) ? '' : ' (or on ourfamilywizard.com)';
   return jsonErrorResponse({
     result: opts.result,
     mayHaveLanded: true,
     reason: `The request to ${opts.what} failed without a definitive answer from OFW: ${e.message}. It MAY HAVE BEEN APPLIED on OurFamilyWizard.`,
-    remedy: `Do NOT retry blindly — a second attempt can put a duplicate on the co-parent-visible record. First check with ${opts.checkWith} (or on ourfamilywizard.com), and retry only once you have confirmed it did not land.`,
+    remedy: `Do NOT retry blindly — a second attempt can put a duplicate on the co-parent-visible record. First check with ${opts.checkWith}${fallback}, and retry only once you have confirmed it did not land.`,
   });
 }
 

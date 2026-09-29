@@ -540,6 +540,8 @@ describe('ofw_create_expense — unconfirmed outcome (BUG-2)', () => {
     expect(parsed.mayHaveLanded).toBe(true);
     expect(parsed.remedy).toMatch(/do not retry/i);
     expect(parsed.remedy).toMatch(/ofw_list_expenses/);
+    // checkWith names a tool, so the web app is still offered as the fallback.
+    expect(parsed.remedy).toMatch(/\(or on ourfamilywizard\.com\)/);
   });
 
   it('a definitive 4xx rejection is still a plain error (nothing landed, a retry is safe)', async () => {
@@ -667,6 +669,8 @@ describe('OFW_EXPENSE_UPLOAD_ONLY gating', () => {
     expect(parsed.result).toBe('EXPENSE_UNCONFIRMED');
     expect(parsed.remedy).toMatch(/ourfamilywizard\.com/);
     expect(parsed.remedy).toMatch(/ofw_list_expenses is not available/);
+    // checkWith already points at the web app; the fallback must not repeat it.
+    expect(parsed.remedy.match(/ourfamilywizard\.com/g)).toHaveLength(1);
   });
 
   it('tool descriptions name the web app as the place to check', () => {
