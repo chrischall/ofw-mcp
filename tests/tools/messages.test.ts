@@ -3264,7 +3264,7 @@ describe('ofw_download_attachment', () => {
       supportsDisk: false,
       resolveUpload: (): Promise<ResolvedUpload> => Promise.reject(new Error('no disk')),
       readDownloaded: (): Buffer | null => { throw new Error('no disk'); },
-      writeDownload: (): void => { throw new Error('no disk'); },
+      writeDownload: async (): Promise<void> => { throw new Error('no disk'); },
     };
     const server = new McpServer({ name: 'test', version: '0.0.0' });
     const localHandlers = new Map<string, ToolHandler>();

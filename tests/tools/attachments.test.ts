@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as mcpUtils from '@chrischall/mcp-utils';
@@ -7,6 +7,7 @@ import * as mcpUtils from '@chrischall/mcp-utils';
 // Pass-through mock so a test can intercept fileBlob (the open) while the real
 // implementation still runs by default.
 const fileBlobHook = vi.hoisted(() => ({ before: undefined as undefined | (() => void) }));
+const writeHook = vi.hoisted(() => ({ before: undefined as undefined | (() => void) }));
 vi.mock('@chrischall/mcp-utils', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@chrischall/mcp-utils')>();
   return {
@@ -14,6 +15,10 @@ vi.mock('@chrischall/mcp-utils', async (importOriginal) => {
     fileBlob: vi.fn((...args: Parameters<typeof actual.fileBlob>) => {
       fileBlobHook.before?.();
       return actual.fileBlob(...args);
+    }),
+    writeFileSafe: vi.fn((...args: Parameters<typeof actual.writeFileSafe>) => {
+      writeHook.before?.();
+      return actual.writeFileSafe(...args);
     }),
   };
 });
@@ -111,17 +116,54 @@ describe('mimeFromName (existing helper, sanity)', () => {
 });
 
 describe('NodeAttachmentIO.writeDownload', () => {
-  it('rethrows a write failure that is not "already exists"', () => {
+  it('rethrows a write failure that is not "already exists"', async () => {
     const root = mkdtempSync(join(tmpdir(), 'ofw-io-'));
     const ro = join(root, 'ro');
     mkdirSync(ro);
     chmodSync(ro, 0o500);
     try {
-      expect(() => new NodeAttachmentIO().writeDownload(join(ro, 'f.bin'), Buffer.from('x'), { root, overwrite: false }))
-        .toThrow(/EACCES/);
+      await expect(new NodeAttachmentIO().writeDownload(join(ro, 'f.bin'), Buffer.from('x'), { root, overwrite: false }))
+        .rejects.toThrow(/EACCES/);
     } finally {
       chmodSync(ro, 0o700);
       rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('NodeAttachmentIO.writeDownload — confinement re-checked at write time', () => {
+  afterEach(() => { writeHook.before = undefined; });
+
+  it('refuses when a directory on the path is swapped for an outside symlink after the pre-check', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'ofw-io-'));
+    const outside = mkdtempSync(join(tmpdir(), 'ofw-outside-'));
+    try {
+      const dest = join(root, 'sub', '1-a.pdf');
+      writeHook.before = () => {
+        rmSync(join(root, 'sub'), { recursive: true });
+        symlinkSync(outside, join(root, 'sub'));
+      };
+      await expect(new NodeAttachmentIO().writeDownload(dest, Buffer.from('x'), { root, overwrite: false }))
+        .rejects.toThrow(/resolves outside the attachments directory/);
+      expect(readdirSync(outside)).toEqual([]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a symlink planted at the destination after the pre-check, even with overwrite', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'ofw-io-'));
+    const outside = mkdtempSync(join(tmpdir(), 'ofw-outside-'));
+    try {
+      const dest = join(root, '1-a.pdf');
+      writeHook.before = () => symlinkSync(join(outside, 'victim'), dest);
+      await expect(new NodeAttachmentIO().writeDownload(dest, Buffer.from('x'), { root, overwrite: true }))
+        .rejects.toThrow(/Refusing to overwrite/);
+      expect(readdirSync(outside)).toEqual([]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+      rmSync(outside, { recursive: true, force: true });
     }
   });
 });
@@ -133,12 +175,12 @@ describe('NodeAttachmentIO.writeDownload', () => {
 describe('NodeAttachmentIO.writeDownload — private directories (PRIV-1)', () => {
   const mode = (p: string) => statSync(p).mode & 0o777;
 
-  it('creates the attachments root and any subdirectory 0700, and the file 0600', () => {
+  it('creates the attachments root and any subdirectory 0700, and the file 0600', async () => {
     const base = mkdtempSync(join(tmpdir(), 'ofw-io-'));
     const root = join(base, 'attachments');
     try {
       const dest = join(root, 'sub', '123-report.pdf');
-      new NodeAttachmentIO().writeDownload(dest, Buffer.from('x'), { root, overwrite: false });
+      await new NodeAttachmentIO().writeDownload(dest, Buffer.from('x'), { root, overwrite: false });
       expect(mode(root)).toBe(0o700);
       expect(mode(join(root, 'sub'))).toBe(0o700);
       expect(mode(dest)).toBe(0o600);
@@ -147,7 +189,7 @@ describe('NodeAttachmentIO.writeDownload — private directories (PRIV-1)', () =
     }
   });
 
-  it('tightens an existing DEFAULT attachments dir (~/Downloads/ofw-mcp) left world-listable by an older version', () => {
+  it('tightens an existing DEFAULT attachments dir (~/Downloads/ofw-mcp) left world-listable by an older version', async () => {
     const home = mkdtempSync(join(tmpdir(), 'ofw-home-'));
     const prevHome = process.env.HOME;
     const prevDir = process.env.OFW_ATTACHMENTS_DIR;
@@ -157,7 +199,7 @@ describe('NodeAttachmentIO.writeDownload — private directories (PRIV-1)', () =
     mkdirSync(root, { recursive: true });
     chmodSync(root, 0o755);
     try {
-      new NodeAttachmentIO().writeDownload(join(root, '1-a.pdf'), Buffer.from('x'), { root, overwrite: false });
+      await new NodeAttachmentIO().writeDownload(join(root, '1-a.pdf'), Buffer.from('x'), { root, overwrite: false });
       expect(mode(root)).toBe(0o700);
     } finally {
       if (prevHome === undefined) delete process.env.HOME; else process.env.HOME = prevHome;
@@ -166,11 +208,11 @@ describe('NodeAttachmentIO.writeDownload — private directories (PRIV-1)', () =
     }
   });
 
-  it('leaves the mode of an existing directory the user configured alone (it may be shared on purpose)', () => {
+  it('leaves the mode of an existing directory the user configured alone (it may be shared on purpose)', async () => {
     const root = mkdtempSync(join(tmpdir(), 'ofw-io-'));
     chmodSync(root, 0o755);
     try {
-      new NodeAttachmentIO().writeDownload(join(root, '1-a.pdf'), Buffer.from('x'), { root, overwrite: false });
+      await new NodeAttachmentIO().writeDownload(join(root, '1-a.pdf'), Buffer.from('x'), { root, overwrite: false });
       expect(mode(root)).toBe(0o755);
       expect(mode(join(root, '1-a.pdf'))).toBe(0o600);
     } finally {

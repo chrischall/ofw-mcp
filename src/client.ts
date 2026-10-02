@@ -28,6 +28,11 @@ export interface BinaryResponse {
 
 // Parse a Content-Disposition header for a filename. Prefers RFC 6266
 // `filename*=UTF-8''…` (percent-decoded) and falls back to `filename="…"`.
+// Kept local rather than mcp-utils' parseContentDispositionFilename (as of
+// 2.12.0), which is narrower: it requires the `UTF-8''` charset prefix, matches
+// `filename` case-sensitively, and drops a `filename*=` token with broken
+// percent-encoding instead of keeping it raw — all cases pinned in
+// tests/client.test.ts.
 function parseContentDispositionFilename(cd: string): string | null {
   const extMatch = /filename\*=(?:UTF-8'')?([^;]+)/i.exec(cd);
   if (extMatch) {

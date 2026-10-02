@@ -29,7 +29,7 @@ function makeAttachmentIO(
       sizeBytes: 9,
     }),
     readDownloaded: () => null,
-    writeDownload: () => undefined,
+    writeDownload: async () => undefined,
   };
 }
 

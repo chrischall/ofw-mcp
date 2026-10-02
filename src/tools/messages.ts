@@ -1791,7 +1791,7 @@ export function registerMessageTools(
     }
 
     const response = await client.requestBinary('GET', `/pub/v1/myfiles/${fileId}/data`);
-    attachmentIO.writeDownload(dest, response.body, { root, overwrite: args.force === true });
+    await attachmentIO.writeDownload(dest, response.body, { root, overwrite: args.force === true });
     await cache.markAttachmentDownloaded(fileId, dest);
 
     const fileName = response.suggestedFileName ?? cached.fileName;

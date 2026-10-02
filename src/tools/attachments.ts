@@ -9,10 +9,17 @@
 // Keeping the interface here means src/tools/messages.ts imports nothing from
 // node:fs.
 
-import { chmodSync, existsSync, readFileSync, realpathSync, statSync, mkdirSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, readFileSync, realpathSync, statSync, mkdirSync, unlinkSync } from 'node:fs';
 import { basename, dirname, extname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { getDefaultAttachmentsDir, getUploadDir } from '../config.js';
-import { fileBlob, expandPath } from '@chrischall/mcp-utils';
+import {
+  assertPathWithinRoots,
+  expandPath,
+  fileBlob,
+  FileWriteRefusedError,
+  sniffMimeBytes,
+  writeFileSafe,
+} from '@chrischall/mcp-utils';
 
 /** The upload source resolved from a tool-supplied file reference. */
 export interface ResolvedUpload {
@@ -54,7 +61,7 @@ export interface AttachmentIO {
    * must resolve (symlinks included) inside `root`, and an existing file is
    * replaced only when `overwrite` is set.
    */
-  writeDownload(dest: string, bytes: Buffer, opts: WriteDownloadOptions): void;
+  writeDownload(dest: string, bytes: Buffer, opts: WriteDownloadOptions): Promise<void>;
 }
 
 export interface WriteDownloadOptions {
@@ -71,13 +78,6 @@ export interface WriteDownloadOptions {
 export function isWithin(root: string, candidate: string): boolean {
   const rel = relative(root, candidate);
   return rel !== '' && !rel.startsWith('..') && !isAbsolute(rel);
-}
-
-/** The deepest ancestor of `path` (itself included) that exists on disk. */
-function deepestExisting(path: string): string {
-  let current = path;
-  while (!existsSync(current)) current = dirname(current);
-  return current;
 }
 
 // Lightweight mime sniff from extension. OFW re-derives mime from the filename
@@ -138,18 +138,11 @@ export function normalizeMimeType(raw: string | null | undefined): string {
  * onto them), so the actual bytes are the authoritative signal. Returns the
  * bare media type, or null when the bytes aren't a PNG/JPEG/GIF/WEBP.
  */
-const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-const JPEG_MAGIC = Buffer.from([0xff, 0xd8, 0xff]);
-
 export function sniffImageMime(bytes: Buffer): string | null {
-  if (bytes.length >= 8 && bytes.subarray(0, 8).equals(PNG_MAGIC)) return 'image/png';
-  if (bytes.length >= 3 && bytes.subarray(0, 3).equals(JPEG_MAGIC)) return 'image/jpeg';
-  if (bytes.length >= 6 && bytes.toString('ascii', 0, 4) === 'GIF8') return 'image/gif';
-  if (bytes.length >= 12 &&
-    bytes.toString('ascii', 0, 4) === 'RIFF' && bytes.toString('ascii', 8, 12) === 'WEBP') {
-    return 'image/webp';
-  }
-  return null;
+  // mcp-utils' shared magic-byte table, narrowed to what a host renders inline
+  // (it also names PDF, zip, MIDI and HEIC/MP4 — not ImageContent material).
+  const sniffed = sniffMimeBytes(bytes);
+  return sniffed !== undefined && HOST_RENDERABLE_IMAGE_MIMES.has(sniffed) ? sniffed : null;
 }
 
 /**
@@ -189,10 +182,12 @@ export class NodeAttachmentIO implements AttachmentIO {
     // against the upload dir instead, and only expand a leading ~.
     const abs = resolve(root, path.startsWith('~') ? expandPath(path) : path);
     const outside = new Error(`Refusing to upload ${abs}: it is outside the upload directory (${root}). Only files placed in that directory can be uploaded — ask the user to copy the file there, or set OFW_UPLOAD_DIR.`);
+    // Lexical check first (a path that merely names somewhere else is refused
+    // even if a symlink there leads back in), then the shared real-path check.
     if (!isWithin(root, abs)) throw outside;
     const real = realpathSync(abs); // throws if missing
     const realRoot = realpathSync(root);
-    if (!isWithin(realRoot, real)) throw outside;
+    try { assertPathWithinRoots(real, [realRoot]); } catch { throw outside; }
     if (relative(realRoot, real).split(sep).some((segment) => segment.startsWith('.'))) {
       throw new Error(`Refusing to upload ${abs}: hidden files and files in hidden directories (dotfiles, credential stores) are never uploaded.`);
     }
@@ -218,7 +213,7 @@ export class NodeAttachmentIO implements AttachmentIO {
     }
   }
 
-  writeDownload(dest: string, bytes: Buffer, { root, overwrite }: WriteDownloadOptions): void {
+  async writeDownload(dest: string, bytes: Buffer, { root, overwrite }: WriteDownloadOptions): Promise<void> {
     // The bytes are co-parent-supplied, so where they land is the security
     // boundary. Check the REAL path of the nearest existing ancestor before
     // creating anything, so a symlinked directory inside the root cannot carry
@@ -234,21 +229,26 @@ export class NodeAttachmentIO implements AttachmentIO {
     if (resolve(root) === resolve(getDefaultAttachmentsDir())) chmodSync(root, 0o700);
     const realRoot = realpathSync(root);
     const parent = dirname(dest);
-    const anchor = realpathSync(deepestExisting(parent));
-    if (anchor !== realRoot && !isWithin(realRoot, anchor)) {
-      throw new Error(`Refusing to write ${dest}: it resolves outside the attachments directory (${root}).`);
-    }
+    const outside = () =>
+      new Error(`Refusing to write ${dest}: it resolves outside the attachments directory (${root}).`);
+    // Real path of the nearest existing ancestor (mcp-utils assertPathWithinRoots).
+    try { assertPathWithinRoots(parent, [realRoot]); } catch { throw outside(); }
     mkdirSync(parent, { recursive: true, mode: 0o700 });
     if (overwrite) {
-      // unlink removes a symlink itself, never its target.
+      // Replace by unlink + exclusive create, NOT an O_TRUNC overwrite: unlink
+      // removes a symlink (or a hard link) itself, never its target, so a link
+      // planted at `dest` can't make "replace" rewrite a file elsewhere.
       try { unlinkSync(dest); } catch { /* nothing there to replace */ }
     }
     try {
-      // 'wx' fails on ANY existing entry, a symlink (even dangling) included,
-      // so nothing already at `dest` is ever clobbered or followed.
-      writeFileSync(dest, bytes, { flag: 'wx', mode: 0o600 });
+      // writeFileSafe: an O_CREAT|O_EXCL|O_NOFOLLOW open, so ANY existing
+      // entry — a symlink (even dangling) included — is refused, never
+      // clobbered or followed. allowedRoots re-confines the parent at write
+      // time, closing the window since the check above (and the mkdir).
+      await writeFileSafe(dest, bytes, { mode: 0o600, allowedRoots: [realRoot] });
     } catch (e) {
-      if ((e as NodeJS.ErrnoException).code === 'EEXIST') {
+      if (e instanceof FileWriteRefusedError) {
+        if (e.reason === 'outside-roots') throw outside();
         throw new Error(`Refusing to overwrite ${dest}: a file already exists there. Pass force:true to replace it, or choose another saveTo.`);
       }
       throw e;
