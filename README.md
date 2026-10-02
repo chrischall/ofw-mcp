@@ -235,7 +235,7 @@ Previews name what you are approving — recipients by name, subject and full bo
 |---|---|---|
 | `MCP_CONFIRM_MODE` | `ask-user` | What a gated write does on a client that cannot show a prompt. `ask-user`: two steps, and the model must get your approval in chat before using the token. `auto`: two steps, but the model may use the token after reviewing the preview itself. `refuse`: such writes are refused (do them on ourfamilywizard.com). An unrecognised value is treated as `refuse`. |
 | `MCP_CONFIRM_TTL_SECONDS` | `600` | How long a token stays valid. |
-| `MCP_CONFIRM_SECRET` | random per process | Signing key; set it only if tokens must survive a server restart. |
+| `MCP_CONFIRM_SECRET` | random per process | Signing key; set it only if tokens must survive a server restart. On mcp-host the host supplies a stable per-child key (`MCP_HOST_CONFIRM_SECRET`) and spent tokens are recorded under `MCP_DATA_DIR`, so an approval survives an idle restart. |
 
 Private events and `PRIVATE` uploads — which the co-parent never sees — are not gated. `OFW_WRITE_MODE` below stays the structural layer underneath: a tool your write mode excludes does not exist at all.
 
