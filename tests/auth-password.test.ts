@@ -96,6 +96,24 @@ describe('loginWithPassword', () => {
     await expect(loginWithPassword('u', 'bad')).rejects.toThrow(/OFW login failed: 401/);
   });
 
+  it('still reports the status when a non-2xx login body cannot be read', async () => {
+    // The edge-block check reads the body; a body that errors mid-read must
+    // not replace the login failure with a stream error.
+    const spy = mockFetch([
+      { status: 303, headers: { 'set-cookie': 'SESSION=x' } },
+      { status: 401, body: {}, headers: { 'content-type': 'application/json' } },
+    ]);
+    const real = spy.getMockImplementation()!;
+    let call = 0;
+    spy.mockImplementation(async (...args) => {
+      const res = await real(...(args as Parameters<typeof fetch>));
+      return ++call === 2
+        ? ({ ...res, text: async () => Promise.reject(new Error('stream reset')) } as unknown as Response)
+        : res;
+    });
+    await expect(loginWithPassword('u', 'bad')).rejects.toThrow(/OFW login failed: 401/);
+  });
+
   it('throws a clean credentials message (not the HTML dump) when OFW re-serves its login page', async () => {
     const loginHtml = '<!DOCTYPE html><html lang="en"><head><title>OurFamilyWizard</title></head><body>...</body></html>';
     mockFetch([
