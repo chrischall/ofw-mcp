@@ -11,7 +11,7 @@
 // so tests can mock it at the module boundary.
 
 import { createHash } from 'node:crypto';
-import { currentCallSignal } from '@chrischall/mcp-utils';
+import { EdgeBlockedError, currentCallSignal, detectEdgeBlock } from '@chrischall/mcp-utils';
 import { BASE_URL, OFW_PROTOCOL_HEADERS, OFW_TOKEN_TTL_MS, assertOfwUrl } from './protocol.js';
 
 interface LoginResponse {
@@ -110,6 +110,22 @@ export async function loginWithPassword(
   });
 
   if (!response.ok) {
+    // A CDN/WAF refusal page is not OFW judging the password: name it, so the
+    // healthcheck reports edge_blocked instead of a missing credential, and
+    // nothing is latched as rejected (chrischall/mcp-host#1015). The page
+    // itself stays out of the message.
+    const edge = detectEdgeBlock({
+      body: await response.text().catch(() => ''),
+      headers: response.headers,
+      status: response.status,
+    });
+    if (edge !== null) {
+      throw new EdgeBlockedError(response.status, edge.vendor, {
+        service: 'OurFamilyWizard',
+        method: 'POST',
+        path: '/ofw/login',
+      });
+    }
     throw new Error(`OFW login failed: ${response.status} ${response.statusText}`);
   }
 
