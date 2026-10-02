@@ -78,23 +78,44 @@ function getRequestTimeoutMs(): number {
 const OFW_REFRESH_SENTINEL = 'ofw';
 
 /**
- * Throw {@link EdgeBlockedError} when `response` is a CDN/WAF refusal that its
- * HEADERS alone prove (Cloudflare's `cf-mitigated`). Body-only markers are
- * judged where the error body is read anyway, in `fetchAuthed`, so a 2xx body
- * is never consumed here.
+ * Throw {@link EdgeBlockedError} when `response` is a CDN/WAF refusal.
+ *
+ * Its HEADERS are always judged (Cloudflare's `cf-mitigated`). Its BODY is
+ * judged only for a 429: that response is about to be waited out and replayed,
+ * or turned into "Rate limited", so a challenge page served as 429 without the
+ * header would otherwise never reach the body check below the retry and would
+ * be reported as a rate limit (chrischall/mcp-host#1015). The body is read
+ * from a clone, and never when it is JSON — no refusal page is. Other non-2xx
+ * bodies are judged where the error body is read anyway, in `fetchAuthed`, and
+ * a 2xx body is never consumed here.
  */
 async function throwIfEdgeBlocked(response: Response, method: string, path: string): Promise<void> {
   if (response.ok) return;
-  const edge = detectEdgeBlock({ headers: response.headers, status: response.status });
-  if (edge !== null) {
-    // Release the connection: the page is never read. A cancel that fails
-    // changes nothing about the answer, so it is not awaited into the throw.
+  let edge = detectEdgeBlock({ headers: response.headers, status: response.status });
+  if (edge === null && response.status === 429 && !/json/i.test(response.headers.get('content-type') ?? '')) {
+    let body = '';
     try {
-      await response.body?.cancel();
+      body = await response.clone().text();
     } catch {
-      /* already settled */
+      /* unreadable: not shown to be a block */
     }
+    edge = detectEdgeBlock({ body, headers: response.headers, status: response.status });
+  }
+  if (edge !== null) {
+    await releaseBody(response);
     throw new EdgeBlockedError(response.status, edge.vendor, { service: 'OurFamilyWizard', method, path });
+  }
+}
+
+/**
+ * Release a response's connection without reading it. A cancel that fails
+ * changes nothing about the answer, so its failure is swallowed.
+ */
+async function releaseBody(response: Response): Promise<void> {
+  try {
+    await response.body?.cancel();
+  } catch {
+    /* already settled */
   }
 }
 
@@ -202,12 +223,17 @@ export class OFWClient {
     // "OFW API error" with the page dumped into it (chrischall/mcp-host#1015).
     await throwIfEdgeBlocked(response, method, path);
     if (response.status === 429) {
+      // The first 429's body is never read: release it before the replay.
+      await releaseBody(response);
       await new Promise<void>((r) => setTimeout(r, 2000));
       response = await this.getTokenManager().withAuth((token) =>
         this.fetchOnce(method, path, body, accept, token, true),
       );
       await throwIfEdgeBlocked(response, method, path);
-      if (response.status === 429) throw new Error('Rate limited by OFW API');
+      if (response.status === 429) {
+        await releaseBody(response);
+        throw new Error('Rate limited by OFW API');
+      }
     }
     if (!response.ok) {
       const errorBody = await response.text();

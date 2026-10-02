@@ -158,6 +158,16 @@ describe('a block on a tool request throws EdgeBlockedError', () => {
     );
   }
 
+  /** The same challenge page with no `cf-mitigated` header: provable only from the body. */
+  function challengedBodyOnly(status: number): Response {
+    return new Response(
+      '<!DOCTYPE html><html lang="en-US"><head><title>Just a moment...</title></head><body>' +
+        '<noscript>Enable JavaScript and cookies to continue</noscript>' +
+        '<script src="/cdn-cgi/challenge-platform/h/g/orchestrate/chl_page/v1"></script></body></html>',
+      { status, headers: { 'content-type': 'text/html; charset=UTF-8', server: 'cloudflare' } },
+    );
+  }
+
   beforeEach(() => {
     fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
@@ -214,6 +224,72 @@ describe('a block on a tool request throws EdgeBlockedError', () => {
 
     expect(err).toBeInstanceOf(EdgeBlockedError);
     expect(apiCalls()).toBe(1);
+  });
+
+  it('a 429 challenge provable only from its body is not replayed as a rate limit', async () => {
+    // No `cf-mitigated` header: only the page itself says Cloudflare refused it.
+    fetchMock.mockImplementation(ofw(() => challengedBodyOnly(429)));
+
+    const err = await new OFWClient().request('GET', '/pub/v2/profiles').catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(EdgeBlockedError);
+    expect((err as EdgeBlockedError).vendor).toBe('Cloudflare');
+    expect((err as EdgeBlockedError).status).toBe(429);
+    expect(apiCalls()).toBe(1);
+  });
+
+  it('a genuine 429 that turns into a body-only block on the replay is reported as the block', async () => {
+    vi.useFakeTimers();
+    try {
+      let n = 0;
+      fetchMock.mockImplementation(
+        ofw(() => (n++ === 0 ? json(429, { message: 'Too many requests' }) : challengedBodyOnly(429))),
+      );
+
+      const pending = new OFWClient().request('GET', '/pub/v2/profiles').catch((e: unknown) => e);
+      await vi.advanceTimersByTimeAsync(2000);
+      const err = await pending;
+
+      expect(err).toBeInstanceOf(EdgeBlockedError);
+      expect(apiCalls()).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('control: a genuine 429 still retries once, then reports a rate limit', async () => {
+    vi.useFakeTimers();
+    try {
+      fetchMock.mockImplementation(ofw(() => json(429, { message: 'Too many requests' })));
+
+      const pending = new OFWClient().request('GET', '/pub/v2/profiles').catch((e: unknown) => e);
+      await vi.advanceTimersByTimeAsync(2000);
+      const err = await pending;
+
+      expect(err).not.toBeInstanceOf(EdgeBlockedError);
+      expect((err as Error).message).toBe('Rate limited by OFW API');
+      expect(apiCalls()).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('control: an empty-bodied 429 still retries once, then succeeds', async () => {
+    vi.useFakeTimers();
+    try {
+      let n = 0;
+      fetchMock.mockImplementation(
+        ofw(() => (n++ === 0 ? new Response(null, { status: 429 }) : json(200, { ok: true }))),
+      );
+
+      const pending = new OFWClient().request('GET', '/pub/v2/profiles');
+      await vi.advanceTimersByTimeAsync(2000);
+
+      await expect(pending).resolves.toEqual({ ok: true });
+      expect(apiCalls()).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("control: the API's own JSON 403 stays an OFW API error", async () => {
