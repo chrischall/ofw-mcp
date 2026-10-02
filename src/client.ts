@@ -1,4 +1,11 @@
-import { loadDotenvSafely, parseBoolEnv, redactSecrets, withAmbientCancellation } from '@chrischall/mcp-utils';
+import {
+  EdgeBlockedError,
+  detectEdgeBlock,
+  loadDotenvSafely,
+  parseBoolEnv,
+  redactSecrets,
+  withAmbientCancellation,
+} from '@chrischall/mcp-utils';
 import { TokenManager } from '@chrischall/mcp-utils/session';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
@@ -69,6 +76,27 @@ function getRequestTimeoutMs(): number {
 // refresh when its refresh token is `undefined`, so a non-empty placeholder
 // keeps the single-flight refresh path live; the refresh callback ignores it.
 const OFW_REFRESH_SENTINEL = 'ofw';
+
+/**
+ * Throw {@link EdgeBlockedError} when `response` is a CDN/WAF refusal that its
+ * HEADERS alone prove (Cloudflare's `cf-mitigated`). Body-only markers are
+ * judged where the error body is read anyway, in `fetchAuthed`, so a 2xx body
+ * is never consumed here.
+ */
+async function throwIfEdgeBlocked(response: Response, method: string, path: string): Promise<void> {
+  if (response.ok) return;
+  const edge = detectEdgeBlock({ headers: response.headers, status: response.status });
+  if (edge !== null) {
+    // Release the connection: the page is never read. A cancel that fails
+    // changes nothing about the answer, so it is not awaited into the throw.
+    try {
+      await response.body?.cancel();
+    } catch {
+      /* already settled */
+    }
+    throw new EdgeBlockedError(response.status, edge.vendor, { service: 'OurFamilyWizard', method, path });
+  }
+}
 
 export class OFWClient {
   // Bearer-token lifecycle is delegated to the shared, race-safe TokenManager
@@ -166,15 +194,27 @@ export class OFWClient {
     let response = await this.getTokenManager().withAuth((token) =>
       this.fetchOnce(method, path, body, accept, token, attempt++ > 0),
     );
+    // A CDN/WAF refusal page is not OFW answering: the token was never judged.
+    // `withAuth` already declines to spend a re-login on one; checked again
+    // here BEFORE the 429 replay (a challenge can arrive as 429, and waiting it
+    // out only repeats the block) and before the generic error below, so every
+    // tool sees an `EdgeBlockedError` it can branch on instead of an
+    // "OFW API error" with the page dumped into it (chrischall/mcp-host#1015).
+    await throwIfEdgeBlocked(response, method, path);
     if (response.status === 429) {
       await new Promise<void>((r) => setTimeout(r, 2000));
       response = await this.getTokenManager().withAuth((token) =>
         this.fetchOnce(method, path, body, accept, token, true),
       );
+      await throwIfEdgeBlocked(response, method, path);
       if (response.status === 429) throw new Error('Rate limited by OFW API');
     }
     if (!response.ok) {
       const errorBody = await response.text();
+      const edge = detectEdgeBlock({ body: errorBody, headers: response.headers, status: response.status });
+      if (edge !== null) {
+        throw new EdgeBlockedError(response.status, edge.vendor, { service: 'OurFamilyWizard', method, path });
+      }
       const safeBody = redactSecrets(errorBody).replace(/\s+/g, ' ').trim().slice(0, 4000);
       throw new Error(
         `OFW API error: ${response.status} ${response.statusText} for ${method} ${path}` +
