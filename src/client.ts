@@ -2,6 +2,7 @@ import {
   EdgeBlockedError,
   detectEdgeBlock,
   loadDotenvSafely,
+  parseContentDispositionFilename,
   parseBoolEnv,
   redactSecrets,
   withAmbientCancellation,
@@ -31,23 +32,6 @@ export interface BinaryResponse {
   contentType: string | null;
   /** Parsed from Content-Disposition header if present. */
   suggestedFileName: string | null;
-}
-
-// Parse a Content-Disposition header for a filename. Prefers RFC 6266
-// `filename*=UTF-8''…` (percent-decoded) and falls back to `filename="…"`.
-// Kept local rather than mcp-utils' parseContentDispositionFilename (as of
-// 2.12.0), which is narrower: it requires the `UTF-8''` charset prefix, matches
-// `filename` case-sensitively, and drops a `filename*=` token with broken
-// percent-encoding instead of keeping it raw — all cases pinned in
-// tests/client.test.ts.
-function parseContentDispositionFilename(cd: string): string | null {
-  const extMatch = /filename\*=(?:UTF-8'')?([^;]+)/i.exec(cd);
-  if (extMatch) {
-    const raw = extMatch[1].trim().replace(/^"|"$/g, '');
-    try { return decodeURIComponent(raw); } catch { return raw; }
-  }
-  const m = /filename="?([^";]+)"?/i.exec(cd);
-  return m ? m[1] : null;
 }
 
 // Set OFW_DEBUG_LOG=1 (or true/yes/on) to log every OFW request/response to
@@ -194,7 +178,7 @@ export class OFWClient {
     return {
       body: Buffer.from(await response.arrayBuffer()),
       contentType: response.headers.get('content-type'),
-      suggestedFileName: parseContentDispositionFilename(response.headers.get('content-disposition') ?? ''),
+      suggestedFileName: parseContentDispositionFilename(response.headers.get('content-disposition') ?? '') ?? null,
     };
   }
 

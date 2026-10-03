@@ -34,7 +34,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@chrischall/mcp-utils": "^2.12.0",
+    "@chrischall/mcp-utils": "^2.13.0",
     "@fetchproxy/bootstrap": "^3.4.1",
     "@modelcontextprotocol/server": "^2.2.0",
     "dotenv": "^18.0.0",

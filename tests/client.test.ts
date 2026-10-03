@@ -847,6 +847,21 @@ describe('OFWClient.requestBinary', () => {
       expect(await downloadWithCD("attachment; filename*=UTF-8''bad%ZZname.pdf")).toBe('bad%ZZname.pdf');
     });
 
+    it('matches parameter names case-insensitively', async () => {
+      expect(await downloadWithCD("attachment; FILENAME*=UTF-8''Up%20Case.pdf")).toBe('Up Case.pdf');
+      expect(await downloadWithCD('attachment; FileName="Mixed.pdf"')).toBe('Mixed.pdf');
+    });
+
+    it('prefers a valid filename= over a filename*= with broken percent-encoding', async () => {
+      expect(await downloadWithCD(
+        "attachment; filename=\"good.pdf\"; filename*=UTF-8''bad%ZZname.pdf",
+      )).toBe('good.pdf');
+    });
+
+    it('does not mistake a longer parameter name ending in filename for filename', async () => {
+      expect(await downloadWithCD('attachment; xfilename="evil.pdf"')).toBeNull();
+    });
+
     it('returns null when there is no Content-Disposition header', async () => {
       expect(await downloadWithCD(undefined)).toBeNull();
     });
