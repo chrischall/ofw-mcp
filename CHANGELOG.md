@@ -1,5 +1,22 @@
 # Changelog
 
+## [2.20.1](https://github.com/chrischall/ofw-mcp/compare/v2.20.0...v2.20.1) (2026-10-03)
+
+
+### Bug Fixes
+
+* **client:** report CDN/WAF blocks on tool requests as EdgeBlockedError ([#354](https://github.com/chrischall/ofw-mcp/issues/354)) ([cc3697e](https://github.com/chrischall/ofw-mcp/commit/cc3697efaa0281ffe6c72f94f1ec4e5438190d1b))
+* **deps:** adopt @chrischall/mcp-utils 2.12.0 confinement and no-follow writer ([#353](https://github.com/chrischall/ofw-mcp/issues/353)) ([9bdb74b](https://github.com/chrischall/ofw-mcp/commit/9bdb74b6cc37ed4b8046664f12c4f55518c15811))
+* **deps:** adopt @chrischall/mcp-utils 2.13.0 Content-Disposition parser ([#357](https://github.com/chrischall/ofw-mcp/issues/357)) ([1f7d68c](https://github.com/chrischall/ofw-mcp/commit/1f7d68cd8e1f0518734bc41d7e835b576ccaa048))
+* keep credentials and report edge_blocked on CDN/WAF blocks (mcp-utils 2.10.0) ([#351](https://github.com/chrischall/ofw-mcp/issues/351)) ([a589b6e](https://github.com/chrischall/ofw-mcp/commit/a589b6e0f3528d4ebbb92b22d994230def31b9a7))
+* keep write approvals valid across a hosted restart (mcp-utils 2.11.0) ([#352](https://github.com/chrischall/ofw-mcp/issues/352)) ([ecf2647](https://github.com/chrischall/ofw-mcp/commit/ecf264768c9e6db70255a8ff3a1bab81932ebdb1))
+* report CDN/WAF blocks as edge_blocked, not a rejected credential (mcp-utils 2.9.0) ([#349](https://github.com/chrischall/ofw-mcp/issues/349)) ([25064d0](https://github.com/chrischall/ofw-mcp/commit/25064d0626a96d5d3fdd1514d862e6ef39eaae00))
+
+
+### Documentation
+
+* stop telling agents to arm the release PR ([#355](https://github.com/chrischall/ofw-mcp/issues/355)) ([576a9cd](https://github.com/chrischall/ofw-mcp/commit/576a9cddde3739a1981c4cc1cf5a68d4ce12e82b))
+
 ## [2.20.0](https://github.com/chrischall/ofw-mcp/compare/v2.19.5...v2.20.0) (2026-09-29)
 
 
