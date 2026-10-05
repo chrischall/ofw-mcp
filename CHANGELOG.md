@@ -5,8 +5,8 @@
 
 ### Bug Fixes
 
-* **calendar:** report ambiguous update and delete outcomes ([#358](https://github.com/chrischall/ofw-mcp/issues/358)) ([02ecd7d](https://github.com/chrischall/ofw-mcp/commit/02ecd7d9c89b4c59b47bef8376d0b071deaf4fcd))
-* **client:** bound response bodies by the request timeout ([#359](https://github.com/chrischall/ofw-mcp/issues/359)) ([4d61487](https://github.com/chrischall/ofw-mcp/commit/4d61487577fd61f9a4456ae8748488ef26c94783))
+* **calendar:** report ambiguous update and delete outcomes (thanks @adraynor) ([#358](https://github.com/chrischall/ofw-mcp/issues/358)) ([02ecd7d](https://github.com/chrischall/ofw-mcp/commit/02ecd7d9c89b4c59b47bef8376d0b071deaf4fcd))
+* **client:** bound response bodies by the request timeout (thanks @adraynor) ([#359](https://github.com/chrischall/ofw-mcp/issues/359)) ([4d61487](https://github.com/chrischall/ofw-mcp/commit/4d61487577fd61f9a4456ae8748488ef26c94783))
 * **deps:** bump the production-dependencies group with 2 updates ([#362](https://github.com/chrischall/ofw-mcp/issues/362)) ([347183c](https://github.com/chrischall/ofw-mcp/commit/347183c2979b8c8470ef6499ae1c230b60cb0bf0))
 * **deps:** require @chrischall/mcp-utils 2.14.0 and MCP SDK 2.3.0 ([#364](https://github.com/chrischall/ofw-mcp/issues/364)) ([366a2b4](https://github.com/chrischall/ofw-mcp/commit/366a2b4f876119e19f16aea6f84605f67888428d))
 
