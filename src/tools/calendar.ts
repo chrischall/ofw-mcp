@@ -231,7 +231,7 @@ export function registerCalendarTools(server: McpServer, client: OFWClient): voi
   });
 
   if (allowWrites) server.registerTool('ofw_update_event', {
-    description: 'Update an existing OurFamilyWizard calendar event. Fetches the event, applies the given changes, and writes the merged result back (OFW has no partial update). A change to an event the co-parent can see (shared before or after the change) is confirmed first; the confirmation is bound to the event exactly as read, so if it changes on OFW in between (say the co-parent edited it) the update is refused instead of overwriting their edit. ' + CONFIRM_NOTE,
+    description: 'Update an existing OurFamilyWizard calendar event. Fetches the event, applies the given changes, and writes the merged result back (OFW has no partial update). A change to an event the co-parent can see (shared before or after the change) is confirmed first; the confirmation is bound to the event exactly as read, so if it changes on OFW in between (say the co-parent edited it) the update is refused instead of overwriting their edit. If the write fails without a definitive answer, or lands but cannot be re-read to confirm it, the result is EVENT_UNCONFIRMED: the change may already be on OFW, so do NOT retry until ofw_list_events shows whether it landed. ' + CONFIRM_NOTE,
     annotations: { destructiveHint: true },
     inputSchema: z.object({
       eventId: z.string().describe('Event id — the `id` from ofw_list_events / eventRecurrenceId from ofw_create_event'),
@@ -282,15 +282,34 @@ export function registerCalendarTools(server: McpServer, client: OFWClient): voi
       });
       if (gate) return gate;
     }
-    await client.request('PUT', `/pub/v3/events/${id}`, payload);
+    try {
+      await requestWrite(client, 'PUT', `/pub/v3/events/${id}`, payload);
+    } catch (e) {
+      if (!(e instanceof UnconfirmedWriteError)) throw e;
+      return unconfirmedWriteResponse(e, {
+        result: 'EVENT_UNCONFIRMED',
+        what: `update event ${eventId}`,
+        checkWith: 'ofw_list_events for this event and date range',
+      });
+    }
     // PUT responses aren't documented — re-fetch the detail as authoritative state.
-    const rawAfter = await client.request('GET', `/pub/v3/events/${id}`);
-    const event = parseLenient(eventDetailSchema, rawAfter, { label: 'ofw-mcp', context: `GET /pub/v3/events/${eventId} (post-update)`, mode: 'strict' });
-    return jsonResponse({ note: 'Event updated; returning re-fetched event state.', event });
+    // Once PUT succeeded, even a definitive rejection of this GET is not a
+    // rejection of the write. Do not present a failed verification as a safe retry.
+    try {
+      const rawAfter = await client.request('GET', `/pub/v3/events/${id}`);
+      const event = parseLenient(eventDetailSchema, rawAfter, { label: 'ofw-mcp', context: `GET /pub/v3/events/${eventId} (post-update)`, mode: 'strict' });
+      return jsonResponse({ note: 'Event updated; returning re-fetched event state.', event });
+    } catch (e) {
+      return unconfirmedWriteResponse(new UnconfirmedWriteError(null, e), {
+        result: 'EVENT_UNCONFIRMED',
+        what: `verify the update to event ${eventId}`,
+        checkWith: 'ofw_list_events for this event and date range',
+      });
+    }
   });
 
   if (allowWrites) server.registerTool('ofw_delete_event', {
-    description: 'Delete an OurFamilyWizard calendar event. Reads the event first; deleting one the co-parent can see is confirmed first, with a preview of exactly which event (title, date, time) is removed, and is refused if the event changed on OFW after that preview. ' + CONFIRM_NOTE,
+    description: 'Delete an OurFamilyWizard calendar event. Reads the event first; deleting one the co-parent can see is confirmed first, with a preview of exactly which event (title, date, time) is removed, and is refused if the event changed on OFW after that preview. If the request fails without a definitive answer the result is EVENT_UNCONFIRMED: the event may already be gone, so do NOT retry until ofw_list_events shows whether it is still there. ' + CONFIRM_NOTE,
     annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
     inputSchema: z.object({
       eventId: z.string().describe('Event id — the `id` from ofw_list_events / eventRecurrenceId from ofw_create_event'),
@@ -323,7 +342,16 @@ export function registerCalendarTools(server: McpServer, client: OFWClient): voi
       });
       if (gate) return gate;
     }
-    await client.request('DELETE', `/pub/v3/events/${id}?includeFuture=${includeFuture}`);
+    try {
+      await requestWrite(client, 'DELETE', `/pub/v3/events/${id}?includeFuture=${includeFuture}`);
+    } catch (e) {
+      if (!(e instanceof UnconfirmedWriteError)) throw e;
+      return unconfirmedWriteResponse(e, {
+        result: 'EVENT_UNCONFIRMED',
+        what: `delete event ${args.eventId}${includeFuture ? ' and its future occurrences' : ''}`,
+        checkWith: 'ofw_list_events for this event and date range (including future occurrences if requested)',
+      });
+    }
     return textResponse(`Event ${args.eventId} ("${current.title}") deleted`);
   });
 }

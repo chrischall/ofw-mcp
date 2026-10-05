@@ -174,6 +174,41 @@ describe('ofw_create_event', () => {
 });
 
 describe('ofw_update_event', () => {
+  it.each(['socket hang up', 'OFW API error: 500 Internal Server Error'])('reports an ambiguous PUT as EVENT_UNCONFIRMED: %s', async (message) => {
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request')
+      .mockResolvedValueOnce(EVENT_DETAIL)
+      .mockRejectedValueOnce(new Error(message));
+    setup(client);
+    const result = await handlers.get('ofw_update_event')!({ eventId: '128246904', title: 'Updated' });
+    expect(result.isError).toBe(true);
+    const body = JSON.parse(result.content[0].text);
+    expect(body.result).toBe('EVENT_UNCONFIRMED');
+    expect(body.mayHaveLanded).toBe(true);
+    expect(body.remedy).toContain('Do NOT retry blindly');
+    expect(spy).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(['socket hang up', 'OFW API error: 403 Forbidden'])('reports a failed verification after a successful PUT as EVENT_UNCONFIRMED: %s', async (message) => {
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request')
+      .mockResolvedValueOnce(EVENT_DETAIL)
+      .mockResolvedValueOnce(null)
+      .mockRejectedValueOnce(new Error(message));
+    setup(client);
+    const result = await handlers.get('ofw_update_event')!({ eventId: '128246904', title: 'Updated' });
+    expect(result.isError).toBe(true);
+    expect(JSON.parse(result.content[0].text).result).toBe('EVENT_UNCONFIRMED');
+    expect(spy).toHaveBeenCalledTimes(3);
+  });
+
+  it('propagates a definitive PUT rejection unchanged', async () => {
+    const client = new OFWClient();
+    const rejection = new Error('OFW API error: 403 Forbidden');
+    vi.spyOn(client, 'request').mockResolvedValueOnce(EVENT_DETAIL).mockRejectedValueOnce(rejection);
+    setup(client);
+    await expect(handlers.get('ofw_update_event')!({ eventId: '128246904', title: 'Updated' })).rejects.toBe(rejection);
+  });
   it('fetches the event, merges changes, PUTs the full payload, and re-fetches', async () => {
     const client = new OFWClient();
     const spy = vi.spyOn(client, 'request')
@@ -305,6 +340,28 @@ describe('ofw_update_event', () => {
 });
 
 describe('ofw_delete_event', () => {
+  it.each([false, true])('reports an ambiguous DELETE as EVENT_UNCONFIRMED without replaying it (includeFuture=%s)', async (includeFuture) => {
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request')
+      .mockResolvedValueOnce(EVENT_DETAIL)
+      .mockRejectedValueOnce(new Error('socket hang up'));
+    setup(client);
+    const result = await handlers.get('ofw_delete_event')!({ eventId: '128246904', includeFuture });
+    expect(result.isError).toBe(true);
+    const body = JSON.parse(result.content[0].text);
+    expect(body.result).toBe('EVENT_UNCONFIRMED');
+    expect(body.mayHaveLanded).toBe(true);
+    expect(body.remedy).toContain('Do NOT retry blindly');
+    expect(spy).toHaveBeenCalledTimes(2);
+  });
+
+  it('propagates a definitive DELETE rejection unchanged', async () => {
+    const client = new OFWClient();
+    const rejection = new Error('OFW API error: 403 Forbidden');
+    vi.spyOn(client, 'request').mockResolvedValueOnce(EVENT_DETAIL).mockRejectedValueOnce(rejection);
+    setup(client);
+    await expect(handlers.get('ofw_delete_event')!({ eventId: '128246904' })).rejects.toBe(rejection);
+  });
   it('deletes /pub/v3/events/{id} with includeFuture=false by default', async () => {
     const client = new OFWClient();
     vi.spyOn(client, 'request').mockResolvedValueOnce(EVENT_DETAIL).mockResolvedValueOnce(undefined);
@@ -312,7 +369,7 @@ describe('ofw_delete_event', () => {
     const handler = handlers.get('ofw_delete_event')!;
     const result = await handler({ eventId: '128246904' });
     expect(client.request).toHaveBeenNthCalledWith(1, 'GET', '/pub/v3/events/128246904');
-    expect(client.request).toHaveBeenNthCalledWith(2, 'DELETE', '/pub/v3/events/128246904?includeFuture=false');
+    expect(client.request).toHaveBeenNthCalledWith(2, 'DELETE', '/pub/v3/events/128246904?includeFuture=false', undefined);
     expect(result.content[0].text).toContain('128246904');
   });
 
@@ -322,7 +379,7 @@ describe('ofw_delete_event', () => {
     setup(client);
     const handler = handlers.get('ofw_delete_event')!;
     await handler({ eventId: '55', includeFuture: true });
-    expect(client.request).toHaveBeenCalledWith('DELETE', '/pub/v3/events/55?includeFuture=true');
+    expect(client.request).toHaveBeenCalledWith('DELETE', '/pub/v3/events/55?includeFuture=true', undefined);
   });
 });
 
@@ -463,6 +520,9 @@ describe('calendar writes — confirmation gate (SEC-2)', () => {
     for (const name of ['ofw_create_event', 'ofw_update_event', 'ofw_delete_event']) {
       expect(configs.get(name)!.inputSchema!.shape).toHaveProperty('confirmToken');
       expect(configs.get(name)!.description).toMatch(/MCP_CONFIRM_MODE/);
+      // Every write can come back EVENT_UNCONFIRMED; a caller that only reads
+      // the description must learn not to retry one blindly.
+      expect(configs.get(name)!.description).toMatch(/EVENT_UNCONFIRMED[^.]*do NOT retry/);
     }
     expect(configs.get('ofw_create_event')!.annotations).toMatchObject({ readOnlyHint: false, openWorldHint: true });
   });
