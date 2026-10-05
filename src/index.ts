@@ -58,7 +58,7 @@ const tools = selectToolRegistrars({
 
 await runMcp({
   name: 'ofw',
-  version: '2.20.1', // x-release-please-version
+  version: '2.20.2', // x-release-please-version
   deps: client,
   tools,
   banner:
