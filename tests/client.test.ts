@@ -345,6 +345,161 @@ describe('OFWClient', () => {
     expect(h['ofw-version']).toBe('1.0.0');
   });
 
+  describe('response body timeout', () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+      vi.stubEnv('OFW_REQUEST_TIMEOUT_MS', '100');
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+      vi.unstubAllEnvs();
+    });
+
+    function injectedClient() {
+      return new OFWClient({ resolveAuth: async () => ({ token: MOCK_TOKEN, source: 'env' }) });
+    }
+
+    // Headers resolve immediately; only body I/O waits for fetch's signal.
+    function stalledResponse(signal: AbortSignal, status: number, contentType: string) {
+      const wait = vi.fn(() => new Promise<never>((_resolve, reject) => {
+        if (signal.aborted) reject(signal.reason);
+        else signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+      }));
+      const response = {
+        ok: status === 200, status, statusText: String(status),
+        headers: new Headers({ 'content-type': contentType }),
+        text: wait, arrayBuffer: wait,
+        body: { cancel: vi.fn(async () => undefined) },
+        clone: () => response,
+      } as unknown as Response;
+      return { response, wait };
+    }
+
+    it.each([
+      ['JSON', 200, 'application/json', false],
+      ['binary', 200, 'application/octet-stream', true],
+      ['error', 500, 'application/json', false],
+      ['429 edge probe', 429, 'text/html', false],
+      ['401 edge probe', 401, 'text/html', false],
+    ] as const)('bounds a stalled %s body after prompt headers', async (_name, status, contentType, binary) => {
+      let signal!: AbortSignal;
+      let wait!: ReturnType<typeof vi.fn>;
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+        signal = init!.signal!;
+        const stalled = stalledResponse(signal, status, contentType);
+        wait = stalled.wait;
+        return stalled.response;
+      });
+      const client = injectedClient();
+      let failure: unknown;
+      const promise = (binary ? client.requestBinary('GET', '/pub/v1/stalled') : client.request('GET', '/pub/v1/stalled'))
+        .catch((err) => { failure = err; });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      expect(wait).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(100);
+      // Assert settlement without awaiting a forever-pending regression.
+      expect(failure).toBeInstanceOf(Error);
+      expect((failure as Error).message).toContain('timed out after 100ms: GET /pub/v1/stalled');
+      expect(signal.aborted).toBe(true);
+      await promise;
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it.each([401, 429])('bounds a stalled %s body release without retrying', async (status) => {
+      const cancel = vi.fn(() => new Promise<void>(() => {}));
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+        ok: false, status, statusText: String(status),
+        headers: new Headers({ 'content-type': 'application/json' }),
+        body: { cancel },
+      } as unknown as Response);
+      let failure: unknown;
+      const promise = injectedClient().request('GET', '/pub/v1/stalled').catch((err) => { failure = err; });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(cancel).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(100);
+      expect(failure).toBeInstanceOf(Error);
+      expect((failure as Error).message).toContain('timed out after 100ms');
+      await promise;
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it.each([401, 429])('gives the replay after %s a fresh body deadline', async (status) => {
+      const signals: AbortSignal[] = [];
+      let finishRelease!: () => void;
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+        signals.push(init!.signal!);
+        if (signals.length === 1) {
+          return {
+            ok: false, status, statusText: String(status),
+            headers: new Headers({ 'content-type': 'application/json' }),
+            body: { cancel: () => new Promise<void>((resolve) => { finishRelease = resolve; }) },
+          } as unknown as Response;
+        }
+        return stalledResponse(init!.signal!, 200, 'application/json').response;
+      });
+      let failure: unknown;
+      const promise = injectedClient().request('GET', '/pub/v1/stalled').catch((err) => { failure = err; });
+      await vi.advanceTimersByTimeAsync(80);
+      finishRelease();
+      await vi.advanceTimersByTimeAsync(status === 429 ? 2000 : 0);
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
+      expect(signals[0].aborted).toBe(false);
+      await vi.advanceTimersByTimeAsync(99);
+      expect(failure).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(failure).toBeInstanceOf(Error);
+      expect((failure as Error).message).toContain('timed out after 100ms');
+      await promise;
+      expect(signals[1].aborted).toBe(true);
+      expect(signals[0].aborted).toBe(false);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it.each(['success', 'parse error', 'HTTP error', 'edge block', 'body failure'])('clears the timer after %s', async (kind) => {
+      const status = kind === 'HTTP error' ? 500 : kind === 'edge block' ? 403 : 200;
+      const response = new Response(kind === 'parse error' ? '{' : '{}', {
+        status, headers: kind === 'edge block' ? { 'cf-mitigated': 'challenge' } : {},
+      });
+      if (kind === 'body failure') vi.spyOn(response, 'text').mockRejectedValue(new Error('broken body'));
+      let signal!: AbortSignal;
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+        signal = init!.signal!;
+        return response;
+      });
+      const promise = injectedClient().request('GET', '/pub/v1/test');
+      if (kind === 'success') await expect(promise).resolves.toEqual({});
+      else await expect(promise).rejects.toThrow();
+      expect(vi.getTimerCount()).toBe(0);
+      await vi.advanceTimersByTimeAsync(200);
+      expect(signal.aborted).toBe(false);
+    });
+
+    it('rejects an already-aborted caller without starting fetch', async () => {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch');
+      const caller = new AbortController();
+      const reason = new Error('caller already left');
+      caller.abort(reason);
+      await expect(withCallSignal(caller.signal, () => injectedClient().request('GET', '/pub/v1/stalled'))).rejects.toBe(reason);
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('preserves ambient cancellation during body reads without diagnosing a timeout', async () => {
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) =>
+        stalledResponse(init!.signal!, 200, 'application/json').response);
+      const caller = new AbortController();
+      const reason = new Error('caller went away');
+      const promise = withCallSignal(caller.signal, () => injectedClient().request('GET', '/pub/v1/stalled'));
+      const assertion = expect(promise).rejects.toBe(reason);
+      await vi.advanceTimersByTimeAsync(0);
+      caller.abort(reason);
+      await assertion;
+      expect(vi.getTimerCount()).toBe(0);
+    });
+  });
+
   describe('request timeout', () => {
     // Helper: handle the login fetches normally, then hang on subsequent
     // calls until the request's AbortSignal fires. This is the shape of a

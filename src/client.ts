@@ -65,21 +65,20 @@ const OFW_REFRESH_SENTINEL = 'ofw';
  * Throw {@link EdgeBlockedError} when `response` is a CDN/WAF refusal.
  *
  * Its HEADERS are always judged (Cloudflare's `cf-mitigated`). Its BODY is
- * judged only for a 429: that response is about to be waited out and replayed,
- * or turned into "Rate limited", so a challenge page served as 429 without the
- * header would otherwise never reach the body check below the retry and would
- * be reported as a rate limit (chrischall/mcp-host#1015). The body is read
- * from a clone, and never when it is JSON — no refusal page is. Other non-2xx
- * bodies are judged where the error body is read anyway, in `fetchAuthed`, and
- * a 2xx body is never consumed here.
+ * judged for a 401 or 429 before releasing it for a replay. A challenge page
+ * without the header must not spend a login or be reported as a rate limit.
+ * The 401 body is read from a clone (a final 401 still needs its error body);
+ * the 429 body can be consumed directly since it is always released. JSON is
+ * never probed — no refusal page is. Other non-2xx bodies are judged where
+ * the error body is read anyway; a 2xx body is never consumed here.
  */
 async function throwIfEdgeBlocked(response: Response, method: string, path: string): Promise<void> {
   if (response.ok) return;
   let edge = detectEdgeBlock({ headers: response.headers, status: response.status });
-  if (edge === null && response.status === 429 && !/json/i.test(response.headers.get('content-type') ?? '')) {
+  if (edge === null && (response.status === 401 || response.status === 429) && !/json/i.test(response.headers.get('content-type') ?? '')) {
     let body = '';
     try {
-      body = await response.clone().text();
+      body = await (response.status === 401 ? response.clone() : response).text();
     } catch {
       /* unreadable: not shown to be a block */
     }
@@ -164,87 +163,92 @@ export class OFWClient {
   }
 
   async request<T>(method: string, path: string, body?: unknown): Promise<T> {
-    const response = await this.fetchAuthed(method, path, body, 'application/json');
-    const text = await response.text();
-    if (debugLogEnabled()) {
-      console.error(`[ofw-debug] response body: ${text || '<empty>'}`);
-    }
-    return (text ? JSON.parse(text) : null) as T;
+    return this.fetchAuthed(method, path, body, 'application/json', async (response) => {
+      const text = await response.text();
+      if (debugLogEnabled()) {
+        console.error(`[ofw-debug] response body: ${text || '<empty>'}`);
+      }
+      return (text ? JSON.parse(text) : null) as T;
+    });
   }
 
   /** Like `request`, but returns the raw bytes plus Content-Type/-Disposition metadata. */
   async requestBinary(method: string, path: string): Promise<BinaryResponse> {
-    const response = await this.fetchAuthed(method, path, undefined, 'application/octet-stream');
-    return {
+    return this.fetchAuthed(method, path, undefined, 'application/octet-stream', async (response) => ({
       body: Buffer.from(await response.arrayBuffer()),
       contentType: response.headers.get('content-type'),
       suggestedFileName: parseContentDispositionFilename(response.headers.get('content-disposition') ?? '') ?? null,
-    };
+    }));
   }
 
   // Authenticated fetch for both JSON and binary callers. Auth (proactive
   // refresh inside the skew window + one 401-replay, guarded against a
   // double-refresh under concurrency) is delegated to the shared TokenManager's
   // `withAuth`. The 429 wait-and-replay and the non-2xx → throw remain here.
-  private async fetchAuthed(
+  private async fetchAuthed<T>(
     method: string,
     path: string,
     body: unknown,
     accept: string,
-  ): Promise<Response> {
-    // `withAuth` invokes `call` once, and again after a refresh on a 401. The
-    // second invocation is the replay — mark it `(retry)` in the debug log,
-    // preserving the prior bespoke-loop diagnostic.
+    consume: (response: Response) => Promise<T>,
+  ): Promise<T> {
     let attempt = 0;
-    let response = await this.getTokenManager().withAuth((token) =>
-      this.fetchOnce(method, path, body, accept, token, attempt++ > 0),
-    );
-    // A CDN/WAF refusal page is not OFW answering: the token was never judged.
-    // `withAuth` already declines to spend a re-login on one; checked again
-    // here BEFORE the 429 replay (a challenge can arrive as 429, and waiting it
-    // out only repeats the block) and before the generic error below, so every
-    // tool sees an `EdgeBlockedError` it can branch on instead of an
-    // "OFW API error" with the page dumped into it (chrischall/mcp-host#1015).
-    await throwIfEdgeBlocked(response, method, path);
+    let result!: T;
+    // Keep all response I/O inside fetchOnce's per-attempt deadline. Returning
+    // the Response still lets TokenManager own its one 401 refresh/replay.
+    const call = async (retry: boolean): Promise<Response> => {
+      let authAttempt = 0;
+      return this.getTokenManager().withAuth((token) => {
+        const firstAuthAttempt = authAttempt++ === 0;
+        return this.fetchOnce(method, path, body, accept, token, async (response) => {
+          await throwIfEdgeBlocked(response, method, path);
+          if (response.status === 401 && firstAuthAttempt) {
+            await releaseBody(response);
+            return;
+          }
+          if (response.status === 429) {
+            await releaseBody(response);
+            return;
+          }
+          if (!response.ok) {
+            const errorBody = await response.text();
+            const edge = detectEdgeBlock({ body: errorBody, headers: response.headers, status: response.status });
+            if (edge !== null) {
+              throw new EdgeBlockedError(response.status, edge.vendor, { service: 'OurFamilyWizard', method, path });
+            }
+            const safeBody = redactSecrets(errorBody).replace(/\s+/g, ' ').trim().slice(0, 4000);
+            throw new Error(
+              `OFW API error: ${response.status} ${response.statusText} for ${method} ${path}` +
+              (safeBody ? ` — ${safeBody}` : ''),
+            );
+          }
+          result = await consume(response);
+        }, retry || attempt++ > 0);
+      });
+    };
+    const response = await call(false);
     if (response.status === 429) {
-      // The first 429's body is never read: release it before the replay.
-      await releaseBody(response);
+      // The attempt is released and its timer cleared before the backoff.
       await new Promise<void>((r) => setTimeout(r, 2000));
-      response = await this.getTokenManager().withAuth((token) =>
-        this.fetchOnce(method, path, body, accept, token, true),
-      );
-      await throwIfEdgeBlocked(response, method, path);
-      if (response.status === 429) {
-        await releaseBody(response);
+      if ((await call(true)).status === 429) {
         throw new Error('Rate limited by OFW API');
       }
     }
-    if (!response.ok) {
-      const errorBody = await response.text();
-      const edge = detectEdgeBlock({ body: errorBody, headers: response.headers, status: response.status });
-      if (edge !== null) {
-        throw new EdgeBlockedError(response.status, edge.vendor, { service: 'OurFamilyWizard', method, path });
-      }
-      const safeBody = redactSecrets(errorBody).replace(/\s+/g, ' ').trim().slice(0, 4000);
-      throw new Error(
-        `OFW API error: ${response.status} ${response.statusText} for ${method} ${path}` +
-        (safeBody ? ` — ${safeBody}` : ''),
-      );
-    }
-    return response;
+    return result;
   }
 
   // A single OFW API fetch with the bearer token supplied by `withAuth`.
   // Carries the per-request timeout (AbortController + setTimeout so vitest
   // fake timers can drive it and we attach a clear error message) and the
-  // OFW_DEBUG_LOG instrumentation. Returns the raw Response — 401/429/non-2xx
-  // handling lives in the callers (`withAuth` and `fetchAuthed`).
+  // OFW_DEBUG_LOG instrumentation. The handler completes body consumption or
+  // release before this attempt returns its Response to `withAuth`.
   private async fetchOnce(
     method: string,
     path: string,
     body: unknown,
     accept: string,
     token: string,
+    handleResponse: (response: Response) => Promise<void>,
     isRetry = false,
   ): Promise<Response> {
     const isFormData = body instanceof FormData;
@@ -280,22 +284,34 @@ export class OFWClient {
     const timer = setTimeout(() => ac.abort(), timeoutMs);
     const startedAt = Date.now();
 
-    let response: Response;
+    // Passing our own signal guarantees a signal even without an ambient caller.
+    const signal = withAmbientCancellation(ac.signal)!;
+    let onAbort!: () => void;
+    // Race the complete attempt, not just fetch: body.cancel() may not settle
+    // on abort, and edge-probe/release helpers deliberately swallow I/O errors.
+    const aborted = new Promise<never>((_resolve, reject) => {
+      onAbort = () => reject(signal.reason);
+      if (signal.aborted) onAbort();
+      else signal.addEventListener('abort', onAbort, { once: true });
+    });
     try {
-      response = await fetch(url, {
-        method,
-        headers,
-        // THE CALLER'S CANCELLATION, folded in with our timeout (mcp-utils
-        // `cancel`). Until this the only thing that could stop an OFW
-        // request was the timeout below, so a cancelled tool call held it
-        // open for the full budget while the child burned the CPU
-        // mcp-host meters it on. The timeout diagnosis below is unaffected
-        // because it asks `ac.signal`, OUR controller — a caller's abort
-        // falls through to the generic path rather than being reported as
-        // OFW being slow.
-        signal: withAmbientCancellation(ac.signal),
-        ...(body !== undefined ? { body: isFormData ? body : JSON.stringify(body) } : {}),
-      });
+      return await Promise.race([aborted, (async () => {
+        signal.throwIfAborted();
+        const response = await fetch(url, {
+          method,
+          headers,
+          // The caller's cancellation and our timeout both cover headers,
+          // body reads and releases; only our controller diagnoses slowness.
+          signal,
+          ...(body !== undefined ? { body: isFormData ? body : JSON.stringify(body) } : {}),
+        });
+        if (debugLogEnabled()) {
+          console.error(`[ofw-debug] ← ${response.status} ${response.statusText} (${Date.now() - startedAt}ms)`);
+        }
+        await handleResponse(response);
+        signal.throwIfAborted();
+        return response;
+      })()]);
     } catch (err) {
       const elapsed = Date.now() - startedAt;
       if (ac.signal.aborted) {
@@ -312,13 +328,8 @@ export class OFWClient {
       throw err;
     } finally {
       clearTimeout(timer);
+      signal.removeEventListener('abort', onAbort);
     }
-
-    if (debugLogEnabled()) {
-      console.error(`[ofw-debug] ← ${response.status} ${response.statusText} (${Date.now() - startedAt}ms)`);
-    }
-
-    return response;
   }
 }
 
