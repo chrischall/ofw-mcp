@@ -227,13 +227,14 @@ Every list read also carries an explicit **`complete`** boolean describing the *
 
 ### Server-side confirmation (`MCP_CONFIRM_MODE`)
 
-The writes marked **Confirm (server)** above — sending a message, logging an expense, creating/updating/deleting a *shared* calendar event, and uploading a file as `SHARED` — are confirmed by this server, not left to the host. A client that can show a confirmation prompt (Claude Code) gets one, with a preview of exactly what would happen. A client that cannot (claude.ai, Claude Desktop) gets two steps: the first call writes **nothing** and returns that preview plus a `confirmToken`, and only a repeat call with the same arguments and that token proceeds.
+The writes marked **Confirm (server)** above — sending a message, logging an expense, creating/updating/deleting a *shared* calendar event, and uploading a file as `SHARED` — are confirmed by this server, not left to the host. A client that can show a confirmation prompt (Claude Code) gets one, with a preview of exactly what would happen, unless `MCP_CONFIRM_ELICITATION=off`. A client that cannot (claude.ai, Claude Desktop) gets two steps: the first call writes **nothing** and returns that preview plus a `confirmToken`, and only a repeat call with the same arguments and that token proceeds.
 
 Previews name what you are approving — recipients by name, subject and full body, the reply target, attachment file names; the expense amount and description; the event's title, date, time, visibility and (for an update) before and after. The token is bound to exactly that: a different body, amount or recipient is refused, and so is a draft or event that changed on OurFamilyWizard after the preview (say, the co-parent edited the event), even with `force: true`. A token works once and expires.
 
 | Variable | Default | |
 |---|---|---|
 | `MCP_CONFIRM_MODE` | `ask-user` | What a gated write does on a client that cannot show a prompt. `ask-user`: two steps, and the model must get your approval in chat before using the token. `auto`: two steps, but the model may use the token after reviewing the preview itself. `refuse`: such writes are refused (do them on ourfamilywizard.com). An unrecognised value is treated as `refuse`. |
+| `MCP_CONFIRM_ELICITATION` | `on` | `off` never shows a confirmation prompt, so every client gets the `MCP_CONFIRM_MODE` path. Set it for a client that claims to support prompts but never shows one (the gated write hangs — opencode 2.0.x). Any other value stays `on`, with a warning on stderr. |
 | `MCP_CONFIRM_TTL_SECONDS` | `600` | How long a token stays valid. |
 | `MCP_CONFIRM_SECRET` | random per process | Signing key; set it only if tokens must survive a server restart. On mcp-host the host supplies a stable per-child key (`MCP_HOST_CONFIRM_SECRET`) and spent tokens are recorded under `MCP_DATA_DIR`, so an approval survives an idle restart. |
 
