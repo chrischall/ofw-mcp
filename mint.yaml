@@ -39,6 +39,13 @@ env:
       chat before calling again with it. "auto": the model may use the token
       after reviewing the preview itself. "refuse": such writes are refused.
       Unrecognised values are treated as "refuse".
+  - name: MCP_CONFIRM_ELICITATION
+    required: false
+    help: >-
+      "off" never shows a confirmation prompt, so every client gets the
+      MCP_CONFIRM_MODE path. Set it for a client that claims to support
+      prompts but never shows one (the gated write hangs, e.g. opencode
+      2.0.x). Default "on"; any other value stays "on" with a stderr warning.
   - name: MCP_CONFIRM_TTL_SECONDS
     required: false
     help: >-
