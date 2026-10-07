@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.20.3](https://github.com/chrischall/ofw-mcp/compare/v2.20.2...v2.20.3) (2026-10-07)
+
+
+### Bug Fixes
+
+* **deps:** honour MCP_CONFIRM_ELICITATION=off and validate fetchproxy relay frames as sent ([#366](https://github.com/chrischall/ofw-mcp/issues/366)) ([c0b3cba](https://github.com/chrischall/ofw-mcp/commit/c0b3cbadf1372b442ad3cfd9b63a17ab8851d600))
+
+
+### Documentation
+
+* document MCP_CONFIRM_ELICITATION ([#368](https://github.com/chrischall/ofw-mcp/issues/368)) ([c30e3c0](https://github.com/chrischall/ofw-mcp/commit/c30e3c0f0b6a6c73a7afe069043f6785ee26faf2))
+
 ## [2.20.2](https://github.com/chrischall/ofw-mcp/compare/v2.20.1...v2.20.2) (2026-10-05)
 
 
