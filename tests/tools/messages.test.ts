@@ -6684,3 +6684,20 @@ describe('ofw_send_message — confirmation gate (SEC-1)', () => {
     expect(spy).not.toHaveBeenCalled();
   });
 });
+
+describe('ofw_save_draft annotations (QUAL-1)', () => {
+  it('declares destructiveHint:true, because passing messageId deletes the existing draft', () => {
+    const server = new McpServer({ name: 'test', version: '0.0.0' });
+    const configs = new Map<string, { annotations?: Record<string, unknown> }>();
+    vi.spyOn(server, 'registerTool').mockImplementation((name: string, config: unknown) => {
+      configs.set(name, config as { annotations?: Record<string, unknown> });
+      return undefined as never;
+    });
+    registerMessageTools(server, new OFWClient(), cacheProvider, attachmentIO);
+    expect(configs.get('ofw_save_draft')!.annotations).toMatchObject({
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+    });
+  });
+});
