@@ -81,7 +81,7 @@
           "path": ".claude-plugin/marketplace.json",
           "jsonpath": "$.metadata.version"
         },
-        "src/index.ts"
+        "src/version.ts"
       ],
       "include-v-in-tag": true,
       "include-component-in-tag": false

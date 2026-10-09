@@ -76,6 +76,96 @@
           "description": "Set true for strict reimbursement upload mode: only healthcheck, ofw_upload_expense_pdf, ofw_create_expense, and ofw_update_expense register. Implies OFW_EXPENSE_ONLY.",
           "isRequired": false,
           "format": "string"
+        },
+        {
+          "name": "OFW_INLINE_ATTACHMENTS",
+          "description": "Set \"true\" to return attachments as MCP content blocks by default (images render directly; other files come back as embedded resources) instead of writing to disk. Callers can still override per call via the tool's `inline` argument.",
+          "isRequired": false,
+          "format": "string"
+        },
+        {
+          "name": "OFW_ATTACHMENTS_DIR",
+          "description": "Where ofw_download_attachment writes (default ~/Downloads/ofw-mcp). Every disk write is confined to it: a saveTo outside it (after resolving symlinks) is refused, and an existing file is replaced only with force:true.",
+          "isRequired": false,
+          "format": "string"
+        },
+        {
+          "name": "OFW_UPLOAD_DIR",
+          "description": "The only directory ofw_upload_attachment may read from (default: OFW_ATTACHMENTS_DIR). Paths outside it after resolving symlinks, hidden files/dirs, and files over 25 MiB are refused.",
+          "isRequired": false,
+          "format": "string"
+        },
+        {
+          "name": "OFW_CACHE_IDENTITY",
+          "description": "Explicit cache-key label; overrides OFW_USERNAME for fetchproxy-only multi-account setups. If you have multiple OFW accounts and want them to use separate caches, set it to a label per profile.",
+          "isRequired": false,
+          "format": "string"
+        },
+        {
+          "name": "OFW_CACHE_DIR",
+          "description": "Overrides the message cache directory (default ~/.cache/ofw-mcp).",
+          "isRequired": false,
+          "format": "string"
+        },
+        {
+          "name": "OFW_DISABLE_FETCHPROXY",
+          "description": "Skip the fetchproxy fallback, so missing credentials become a hard error (useful in headless CI).",
+          "isRequired": false,
+          "format": "string"
+        },
+        {
+          "name": "OFW_AUTO_REFRESH",
+          "description": "When a cached read comes back EMPTY from a non-fresh cache, the read tools sync the backing folders and answer from the refreshed cache instead of refusing with UNVERIFIED_EMPTY (default off, i.e. refuse). Per-call autoRefresh overrides it. A refresh that does not make the read verifiable still refuses.",
+          "isRequired": false,
+          "format": "string"
+        },
+        {
+          "name": "OFW_FRESHNESS_TTL_SECONDS",
+          "description": "How long a verified-against-OFW folder stays labelled `fresh` in read tools' `freshness` block (default 300). Unusable values fall back to the default — a typo must never widen the window in which stale data reads as current.",
+          "isRequired": false,
+          "format": "string"
+        },
+        {
+          "name": "OFW_SYNC_MAX_REQUESTS",
+          "description": "Per-call OFW-request budget for ofw_sync_messages: a positive integer caps how many OFW requests one sync call may make before pausing; the next call resumes where it left off. Unset means unbounded (local installs walk fully in one call).",
+          "isRequired": false,
+          "format": "string"
+        },
+        {
+          "name": "OFW_REQUEST_TIMEOUT_MS",
+          "description": "Per-request timeout for OFW API calls, in milliseconds (default 30000). Each retry gets its own fresh window.",
+          "isRequired": false,
+          "format": "string"
+        },
+        {
+          "name": "OFW_DEBUG_LOG",
+          "description": "Log every OFW request/response to stderr (Authorization redacted). Diagnostic only.",
+          "isRequired": false,
+          "format": "string"
+        },
+        {
+          "name": "DISPLAY_TZ",
+          "description": "IANA zone (e.g. America/New_York, the default) for every `<field>Display` value, and the zone a NAIVE source timestamp is assumed to be wall-clock in. OFW's API reports naive local times in the account's own zone, so this must match it. Unrecognized values fall back to the default.",
+          "isRequired": false,
+          "format": "string"
+        },
+        {
+          "name": "FETCHPROXY_WS_PORT",
+          "description": "Localhost port of the fetchproxy concentrator the ContextMint Bridge extension connects to (default 37149). Every MCP on one machine shares it, so move it for all of them or not at all.",
+          "isRequired": false,
+          "format": "string"
+        },
+        {
+          "name": "FETCHPROXY_WS_HOST",
+          "description": "Bind interface for the fetchproxy concentrator, a literal IP only (default 127.0.0.1). Keep on loopback; it exists for hosted deployments that run each MCP in its own network namespace.",
+          "isRequired": false,
+          "format": "string"
+        },
+        {
+          "name": "FETCHPROXY_IDENTITY_DIR",
+          "description": "Absolute path where the fetchproxy long-term identity keypair is stored (default ~/.fetchproxy/identity/).",
+          "isRequired": false,
+          "format": "string"
         }
       ]
     }

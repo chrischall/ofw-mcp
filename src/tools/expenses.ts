@@ -251,7 +251,7 @@ export function registerExpenseTools(
 
   if (!uploadOnly) server.registerTool('ofw_get_expense_totals', {
     description: 'Get OurFamilyWizard expense summary totals (owed/paid)',
-    annotations: { readOnlyHint: true },
+    annotations: { readOnlyHint: true, openWorldHint: true },
   }, async () => {
     const data = await client.request('GET', '/pub/v2/expense/expenses/totals');
     return jsonResponse(data);
@@ -259,7 +259,7 @@ export function registerExpenseTools(
 
   if (!uploadOnly) server.registerTool('ofw_list_expense_categories', {
     description: 'List OurFamilyWizard expense categories, including preset and custom categories with their responsibility split metadata. Read-only.',
-    annotations: { readOnlyHint: true },
+    annotations: { readOnlyHint: true, openWorldHint: true },
   }, async () => {
     const data = await client.request('GET', '/pub/v2/expense/categories');
     return jsonResponse(data);
@@ -267,7 +267,7 @@ export function registerExpenseTools(
 
   if (!uploadOnly) server.registerTool('ofw_list_expenses', {
     description: 'List OurFamilyWizard expenses. OFW pages this endpoint with 1-based page/size parameters; its older start/max parameters are ignored and repeatedly return page 1. The response leads with hasMore and nextPage (null when exhausted) before the records. Continue by passing nextPage.',
-    annotations: { readOnlyHint: true },
+    annotations: { readOnlyHint: true, openWorldHint: true },
     inputSchema: z.object({
       page: z.number().int().min(1).describe('1-based page number (default 1). To continue, pass the nextPage returned by the previous response.').optional(),
       size: z.number().int().min(1).max(100).describe('Requested page size (default 20). OFW may cap or normalize this value.').optional(),
@@ -317,8 +317,10 @@ export function registerExpenseTools(
   });
 
   if (allowReceiptUploads) server.registerTool('ofw_upload_expense_pdf', {
+    // Destructive by the inverse test: always uploaded SHARED, so the
+    // co-parent sees it in My Files at once, and no tool here deletes it.
     description: 'Upload a PDF to OurFamilyWizard My Files for later attachment to an expense. Accepts either a local path or a signed ChatGPT/oaiusercontent HTTPS URL plus fileName. Exactly one of path or url must be supplied. This tool accepts PDF files only and uploads them using the same SHARED file metadata as the OFW expense form so the returned fileId can be attached to an expense. A SHARED file is visible to the co-parent in My Files immediately, whatever the visibility of the expense it is later attached to (that is set separately by ofw_create_expense privateExpense). ' + CONFIRM_NOTE,
-    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+    annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
     inputSchema: z.object({
       path: z.string().describe('Path to a local PDF file inside the upload directory (OFW_UPLOAD_DIR). Tilde (~) is expanded by the configured attachment I/O implementation. Mutually exclusive with url.').optional(),
       url: z.string().describe('Signed HTTPS oaiusercontent.com URL for a PDF supplied by the ChatGPT host. Mutually exclusive with path.').optional(),

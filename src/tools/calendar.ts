@@ -168,7 +168,7 @@ export function registerCalendarTools(server: McpServer, client: OFWClient): voi
 
   server.registerTool('ofw_list_events', {
     description: 'List OurFamilyWizard calendar events in a date range',
-    annotations: { readOnlyHint: true },
+    annotations: { readOnlyHint: true, openWorldHint: true },
     inputSchema: z.object({
       startDate: z.string().describe('Start date YYYY-MM-DD'),
       endDate: z.string().describe('End date YYYY-MM-DD'),
@@ -185,9 +185,10 @@ export function registerCalendarTools(server: McpServer, client: OFWClient): voi
 
   if (allowWrites) server.registerTool('ofw_create_event', {
     description: 'Create a calendar event in OurFamilyWizard. Unless privateEvent is true, the event is immediately visible to the co-parent — there is no draft stage — so a shared event is confirmed first (a private one is not). If the request fails without a definitive answer the result is EVENT_UNCONFIRMED: the event may already exist, so do NOT retry until ofw_list_events shows it did not land. ' + CONFIRM_NOTE,
-    // Additive, so not destructive — but it lands on a shared calendar
-    // outside this machine, which openWorldHint says to the host.
-    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+    // Destructive by the inverse test: a shared event is on the co-parent's
+    // calendar the moment it lands, and ofw_delete_event removes it but cannot
+    // un-show it. (A private one would be additive; the hint is per tool.)
+    annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
     inputSchema: z.object({
       title: z.string(),
       ...eventWriteFields,
@@ -233,7 +234,7 @@ export function registerCalendarTools(server: McpServer, client: OFWClient): voi
 
   if (allowWrites) server.registerTool('ofw_update_event', {
     description: 'Update an existing OurFamilyWizard calendar event. Fetches the event, applies the given changes, and writes the merged result back (OFW has no partial update). A change to an event the co-parent can see (shared before or after the change) is confirmed first; the confirmation is bound to the event exactly as read, so if it changes on OFW in between (say the co-parent edited it) the update is refused instead of overwriting their edit. If the write fails without a definitive answer, or lands but cannot be re-read to confirm it, the result is EVENT_UNCONFIRMED: the change may already be on OFW, so do NOT retry until ofw_list_events shows whether it landed. ' + CONFIRM_NOTE,
-    annotations: { destructiveHint: true },
+    annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
     inputSchema: z.object({
       eventId: z.string().describe('Event id — the `id` from ofw_list_events / eventRecurrenceId from ofw_create_event'),
       title: z.string().optional(),

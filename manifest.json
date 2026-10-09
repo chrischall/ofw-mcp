@@ -45,7 +45,21 @@
         "OFW_ALLOW_MARK_READ": "${user_config.ofw_allow_mark_read}",
         "OFW_FETCH_UNREAD_BODIES": "${user_config.ofw_fetch_unread_bodies}",
         "OFW_EXPENSE_ONLY": "${user_config.ofw_expense_only}",
-        "OFW_EXPENSE_UPLOAD_ONLY": "${user_config.ofw_expense_upload_only}"
+        "OFW_EXPENSE_UPLOAD_ONLY": "${user_config.ofw_expense_upload_only}",
+        "OFW_CACHE_IDENTITY": "${user_config.ofw_cache_identity}",
+        "OFW_CACHE_DIR": "${user_config.ofw_cache_dir}",
+        "OFW_DISABLE_FETCHPROXY": "${user_config.ofw_disable_fetchproxy}",
+        "OFW_SESSION_CACHE": "${user_config.ofw_session_cache}",
+        "OFW_SESSION_FILE": "${user_config.ofw_session_file}",
+        "OFW_AUTO_REFRESH": "${user_config.ofw_auto_refresh}",
+        "OFW_FRESHNESS_TTL_SECONDS": "${user_config.ofw_freshness_ttl_seconds}",
+        "OFW_SYNC_MAX_REQUESTS": "${user_config.ofw_sync_max_requests}",
+        "OFW_REQUEST_TIMEOUT_MS": "${user_config.ofw_request_timeout_ms}",
+        "OFW_DEBUG_LOG": "${user_config.ofw_debug_log}",
+        "DISPLAY_TZ": "${user_config.display_tz}",
+        "FETCHPROXY_WS_PORT": "${user_config.fetchproxy_ws_port}",
+        "FETCHPROXY_WS_HOST": "${user_config.fetchproxy_ws_host}",
+        "FETCHPROXY_IDENTITY_DIR": "${user_config.fetchproxy_identity_dir}"
       }
     }
   },
@@ -123,6 +137,94 @@
       "description": "Strict structural restriction: register only healthcheck, ofw_upload_expense_pdf, ofw_create_expense, and ofw_update_expense. Implies Expense-only mode and removes expense reads too.",
       "required": false,
       "default": false
+    },
+    "ofw_cache_identity": {
+      "type": "string",
+      "title": "Cache identity label (advanced)",
+      "description": "Explicit cache-key label; overrides OFW_USERNAME for fetchproxy-only multi-account setups. If you have multiple OFW accounts and want them to use separate caches, set it to a label per profile.",
+      "required": false
+    },
+    "ofw_cache_dir": {
+      "type": "directory",
+      "title": "Message cache directory (advanced)",
+      "description": "Overrides the message cache directory (default ~/.cache/ofw-mcp).",
+      "required": false
+    },
+    "ofw_disable_fetchproxy": {
+      "type": "boolean",
+      "title": "Disable browser bridge (advanced)",
+      "description": "Skip the fetchproxy fallback, so missing credentials become a hard error (useful in headless CI).",
+      "required": false,
+      "default": false
+    },
+    "ofw_session_cache": {
+      "type": "boolean",
+      "title": "Cache the session between runs",
+      "description": "Cache the OFW session between runs (default on). Turn off and a restart re-authenticates every time.",
+      "required": false,
+      "default": true
+    },
+    "ofw_session_file": {
+      "type": "string",
+      "title": "Session cache file (advanced)",
+      "description": "Absolute path for the session cache file. Defaults to $MCP_DATA_DIR/.ofw-mcp/session.json.",
+      "required": false
+    },
+    "ofw_auto_refresh": {
+      "type": "boolean",
+      "title": "Auto-refresh empty stale reads",
+      "description": "When a cached read comes back EMPTY from a non-fresh cache, the read tools sync the backing folders and answer from the refreshed cache instead of refusing with UNVERIFIED_EMPTY (default off, i.e. refuse). Per-call autoRefresh overrides it. A refresh that does not make the read verifiable still refuses.",
+      "required": false,
+      "default": false
+    },
+    "ofw_freshness_ttl_seconds": {
+      "type": "string",
+      "title": "Freshness window in seconds (advanced)",
+      "description": "How long a verified-against-OFW folder stays labelled `fresh` in read tools' `freshness` block (default 300). Unusable values fall back to the default — a typo must never widen the window in which stale data reads as current.",
+      "required": false
+    },
+    "ofw_sync_max_requests": {
+      "type": "string",
+      "title": "Sync request budget (advanced)",
+      "description": "Per-call OFW-request budget for ofw_sync_messages: a positive integer caps how many OFW requests one sync call may make before pausing; the next call resumes where it left off. Unset means unbounded (local installs walk fully in one call).",
+      "required": false
+    },
+    "ofw_request_timeout_ms": {
+      "type": "string",
+      "title": "Request timeout in ms (advanced)",
+      "description": "Per-request timeout for OFW API calls, in milliseconds (default 30000). Each retry gets its own fresh window.",
+      "required": false
+    },
+    "ofw_debug_log": {
+      "type": "boolean",
+      "title": "Debug logging (diagnostic)",
+      "description": "Log every OFW request/response to stderr (Authorization redacted). Diagnostic only.",
+      "required": false,
+      "default": false
+    },
+    "display_tz": {
+      "type": "string",
+      "title": "Display time zone",
+      "description": "IANA zone (e.g. America/New_York, the default) for every `<field>Display` value, and the zone a NAIVE source timestamp is assumed to be wall-clock in. OFW's API reports naive local times in the account's own zone, so this must match it. Unrecognized values fall back to the default.",
+      "required": false
+    },
+    "fetchproxy_ws_port": {
+      "type": "string",
+      "title": "fetchproxy port (advanced)",
+      "description": "Localhost port of the fetchproxy concentrator the ContextMint Bridge extension connects to (default 37149). Every MCP on one machine shares it, so move it for all of them or not at all.",
+      "required": false
+    },
+    "fetchproxy_ws_host": {
+      "type": "string",
+      "title": "fetchproxy bind address (advanced)",
+      "description": "Bind interface for the fetchproxy concentrator, a literal IP only (default 127.0.0.1). Keep on loopback; it exists for hosted deployments that run each MCP in its own network namespace.",
+      "required": false
+    },
+    "fetchproxy_identity_dir": {
+      "type": "string",
+      "title": "fetchproxy identity directory (advanced)",
+      "description": "Absolute path where the fetchproxy long-term identity keypair is stored (default ~/.fetchproxy/identity/).",
+      "required": false
     }
   },
   "tools": [

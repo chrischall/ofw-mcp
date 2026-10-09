@@ -162,6 +162,10 @@ describe('getCacheDir', () => {
     try {
       process.env.OFW_CACHE_DIR = '/tmp/custom-cache';
       expect(getCacheDir()).toBe('/tmp/custom-cache');
+      // An mcpb install passes an unset optional user_config through as its
+      // literal placeholder; that must fall back, not become a directory name.
+      process.env.OFW_CACHE_DIR = '${user_config.ofw_cache_dir}';
+      expect(getCacheDir()).toBe(join(homedir(), '.cache', 'ofw-mcp'));
       delete process.env.OFW_CACHE_DIR;
       expect(getCacheDir()).toBe(join(homedir(), '.cache', 'ofw-mcp'));
     } finally {
