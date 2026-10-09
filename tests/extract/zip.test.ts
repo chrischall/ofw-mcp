@@ -107,4 +107,33 @@ describe('readZip', () => {
     const second = await zip.read('a.txt');
     expect(second).toBe(first); // identical Buffer instance, not just equal
   });
+
+  // BUG-4: the per-member cap alone let a workbook of 100 near-cap deflate
+  // bombs keep ~3 GB alive. The archive as a whole has a budget too.
+  it('refuses DEFLATE members that together expand past the archive budget', async () => {
+    const zip = makeZip([
+      { name: 'a.txt', data: 'A'.repeat(3000) },
+      { name: 'b.txt', data: 'B'.repeat(3000) },
+    ]);
+    const archive = await readZip(zip, { maxUncompressedBytes: 4096, maxTotalUncompressedBytes: 5000 });
+    expect((await archive.read('a.txt'))!.length).toBe(3000);
+    await expect(archive.read('b.txt')).rejects.toThrow(/total decompression cap/);
+  });
+
+  it('counts STORED members against the archive budget too (entries may alias one payload)', async () => {
+    const zip = makeZip([
+      { name: 'a.txt', data: 'A'.repeat(3000), method: 0 },
+      { name: 'b.txt', data: 'B'.repeat(3000), method: 0 },
+    ]);
+    const archive = await readZip(zip, { maxTotalUncompressedBytes: 5000 });
+    await archive.read('a.txt');
+    await expect(archive.read('b.txt')).rejects.toThrow(/total decompression cap/);
+  });
+
+  it('does not charge the budget again for a memoized member', async () => {
+    const zip = makeZip([{ name: 'a.txt', data: 'A'.repeat(3000) }]);
+    const archive = await readZip(zip, { maxTotalUncompressedBytes: 5000 });
+    await archive.read('a.txt');
+    await expect(archive.read('a.txt')).resolves.toHaveLength(3000);
+  });
 });

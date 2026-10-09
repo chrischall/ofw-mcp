@@ -67,6 +67,16 @@ describe('extractPdf', () => {
     await expect(extractPdf(pdf)).rejects.toThrow(/expands past the .* decompression cap/);
   });
 
+  it('refuses pages whose streams together expand past the document budget (BUG-4)', async () => {
+    // Every page may reference the same stream; each decode is charged.
+    const pages = Array.from({ length: 4 }, () => showText('x'.repeat(1000)));
+    await expect(extractPdf(makePdf({ pages, compress: true }), { maxTotalDecompressedBytes: 2500 }))
+      .rejects.toThrow(/total decompression cap/);
+    await expect(extractPdf(makePdf({ pages }), { maxTotalDecompressedBytes: 2500 }))
+      .rejects.toThrow(/total decompression cap/);
+    await expect(extractPdf(makePdf({ pages, compress: true }))).resolves.toMatchObject({ textLayer: true });
+  });
+
   it('skips a /Contents reference that points at a missing object', async () => {
     const out = await extractPdf(makePdf({ pages: [showText('gone')], danglingContents: true }));
     expect(out.pages[0].text).toBe('');
