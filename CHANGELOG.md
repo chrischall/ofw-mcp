@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.20.4](https://github.com/chrischall/ofw-mcp/compare/v2.20.3...v2.20.4) (2026-10-09)
+
+
+### Bug Fixes
+
+* annotate tools truthfully and sync manifests with the served tools ([#374](https://github.com/chrischall/ofw-mcp/issues/374)) ([42838d4](https://github.com/chrischall/ofw-mcp/commit/42838d4bdfde708afa2ac216c5f1a22d643778b3))
+* declare the plugin MCP config under the mcpServers key Claude Code reads ([#375](https://github.com/chrischall/ofw-mcp/issues/375)) ([8f55d94](https://github.com/chrischall/ofw-mcp/commit/8f55d947dc23da048754e132cb538b8e88c1a781))
+* **deps:** bump source-map-js from 1.2.1 to 1.2.2 in the security group across 1 directory ([#373](https://github.com/chrischall/ofw-mcp/issues/373)) ([b4cb591](https://github.com/chrischall/ofw-mcp/commit/b4cb5913b350ae15912a5765fac26193828c4f9b))
+* **deps:** update @chrischall/mcp-utils to 3.0.0 ([#372](https://github.com/chrischall/ofw-mcp/issues/372)) ([6d42fa1](https://github.com/chrischall/ofw-mcp/commit/6d42fa1c4baccd23049fffcf239f1a4151df616e))
+* **healthcheck:** reuse the held OFW token instead of logging in on every check ([#371](https://github.com/chrischall/ofw-mcp/issues/371)) ([f6df051](https://github.com/chrischall/ofw-mcp/commit/f6df051e58ff64656ab61445ae0f9333a9e1eeb2))
+* resolve low-severity audit findings ([#369](https://github.com/chrischall/ofw-mcp/issues/369)) ([16c250b](https://github.com/chrischall/ofw-mcp/commit/16c250b91631e4e63de0e2379ddd0e917bf03746))
+
 ## [2.20.3](https://github.com/chrischall/ofw-mcp/compare/v2.20.2...v2.20.3) (2026-10-07)
 
 

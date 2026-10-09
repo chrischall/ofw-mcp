@@ -4,4 +4,4 @@
 // package.json drift. Importing these instead of package.json keeps the whole
 // manifest — npm scripts included — out of dist/bundle.js.
 export const SERVER_NAME = 'ofw-mcp';
-export const VERSION = '2.20.3'; // x-release-please-version
+export const VERSION = '2.20.4'; // x-release-please-version
