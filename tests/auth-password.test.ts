@@ -152,6 +152,53 @@ describe('loginWithPassword', () => {
   });
 });
 
+// BUG-5: a 200 JSON answer without a usable `auth` (a lockout, MFA or captcha
+// challenge) must not become the token "undefined" — every request would then
+// carry `Bearer undefined`, 401, and re-mint through another password POST.
+describe('loginWithPassword — JSON response without a token', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it.each([
+    ['no auth field', { error: 'ACCOUNT_LOCKED', message: 'Your account is locked' }],
+    ['an empty auth', { auth: '', redirectUrl: '/x' }],
+    ['a non-string auth', { auth: 42 }],
+    ['a non-object body', null],
+  ])('throws an actionable error for %s', async (_label, body) => {
+    mockFetch([
+      { status: 303, headers: {} },
+      { status: 200, body, headers: { 'content-type': 'application/json' } },
+    ]);
+    await expect(loginWithPassword('u', 'p')).rejects.toThrow(/OFW login returned no token/);
+  });
+
+  it('names the response keys and OFW\'s message, but never echoes other values', async () => {
+    mockFetch([
+      { status: 303, headers: {} },
+      {
+        status: 200,
+        body: { message: 'Verification code required', challengeId: 'secret-challenge-123' },
+        headers: { 'content-type': 'application/json' },
+      },
+    ]);
+    const err = await loginWithPassword('u', 'p').catch((e: unknown) => e as Error);
+    expect(err).toBeInstanceOf(Error);
+    expect(err.message).toContain('challengeId');
+    expect(err.message).toContain('Verification code required');
+    expect(err.message).not.toContain('secret-challenge-123');
+  });
+
+  it('does not latch the pair: the next call tries OFW again', async () => {
+    mockFetch([
+      { status: 303, headers: {} },
+      { status: 200, body: {}, headers: { 'content-type': 'application/json' } },
+      { status: 303, headers: {} },
+      { status: 200, body: { auth: 'tok' }, headers: { 'content-type': 'application/json' } },
+    ]);
+    await expect(loginWithPassword('u', 'p')).rejects.toThrow(/no token/);
+    await expect(loginWithPassword('u', 'p')).resolves.toMatchObject({ token: 'tok' });
+  });
+});
+
 // BUG-1: OFW counts failed sign-ins against the account. A password it has
 // definitively rejected must not be re-sent on every later tool call (a model
 // retrying a few tools after the user changed their password on the web would

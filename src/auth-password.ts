@@ -14,11 +14,6 @@ import { createHash } from 'node:crypto';
 import { EdgeBlockedError, currentCallSignal, detectEdgeBlock } from '@chrischall/mcp-utils';
 import { BASE_URL, OFW_PROTOCOL_HEADERS, OFW_TOKEN_TTL_MS, assertOfwUrl } from './protocol.js';
 
-interface LoginResponse {
-  auth: string;
-  redirectUrl: string;
-}
-
 export interface PasswordLoginResult {
   token: string;
   expiresAt: Date;
@@ -146,9 +141,35 @@ export async function loginWithPassword(
     throw new Error(`OFW login returned unexpected response (${contentType || 'no content-type'}): ${body.substring(0, 200)}`);
   }
 
-  const data = (await response.json()) as LoginResponse;
+  // A 200 JSON answer is not proof of a token: a lockout, MFA or captcha
+  // challenge can arrive the same way. Without this check the token would be
+  // the string "undefined", every request would 401, and the TokenManager
+  // would re-mint through another password POST — one OFW counts against the
+  // account. Not latched: this is not OFW judging the password.
+  const data: unknown = await response.json();
+  const record = typeof data === 'object' && data !== null ? (data as Record<string, unknown>) : null;
+  const token = record?.auth;
+  if (typeof token !== 'string' || token === '') {
+    throw new Error(describeTokenlessLogin(record));
+  }
   return {
-    token: data.auth,
+    token,
     expiresAt: new Date(Date.now() + OFW_TOKEN_TTL_MS),
   };
+}
+
+/**
+ * An actionable message for a login answer that carried no token. It names
+ * the response's KEYS and OFW's own `message` text, never any other value —
+ * a challenge payload can carry ids or tokens that do not belong in an error.
+ */
+function describeTokenlessLogin(record: Record<string, unknown> | null): string {
+  const base = 'OFW login returned no token, so it did not sign in';
+  if (record === null) {
+    return `${base} (the response was not a JSON object). Sign in to OurFamilyWizard in a browser to check the account, then try again.`;
+  }
+  const keys = Object.keys(record);
+  const said = typeof record.message === 'string' ? ` OFW said: "${record.message.substring(0, 200)}".` : '';
+  return `${base} (response fields: ${keys.length > 0 ? keys.join(', ') : 'none'}).${said} `
+    + 'The account may be locked or need a verification step: sign in to OurFamilyWizard in a browser to clear it, then try again.';
 }
