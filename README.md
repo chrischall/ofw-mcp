@@ -131,7 +131,7 @@ Read-only tools run automatically. Writes that reach your co-parent or the court
 | Tool | What it does | Permission | Write mode |
 |------|-------------|------------|------------|
 | `ofw_get_profile` | Your profile and co-parent info | Auto | any |
-| `ofw_get_notifications` | Dashboard counts (unread messages, upcoming events, outstanding expenses) | Auto | any |
+| `ofw_get_notifications` | Dashboard counts (unread messages, upcoming events, outstanding expenses). Updates your co-parent-visible last-seen status, so it is not marked read-only | Confirm | any |
 | `ofw_list_message_folders` | Folders with unread counts — **get folder IDs here before listing messages** | Auto | any |
 | `ofw_list_messages` | Messages in a folder | Auto | any |
 | `ofw_get_message` | Full content of a single message | Auto | any |

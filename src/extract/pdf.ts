@@ -11,12 +11,18 @@
 // it needs OCR — not an empty string that reads like an empty document.
 
 import {
-  inflateBounded, DecompressionLimitError, MAX_DECOMPRESSED_BYTES,
+  inflateBounded, DecompressionBudget, DecompressionLimitError, MAX_DECOMPRESSED_BYTES,
 } from './inflate.js';
 import type { PdfExtract, PageExtract, PartSelector } from './types.js';
 
 export interface PdfOptions {
   select?: PartSelector;
+  /**
+   * Cap on everything the document's content streams decode to, in total.
+   * Every page may reference the same stream, and each decode is charged.
+   * Defaults to MAX_TOTAL_DECOMPRESSED_BYTES.
+   */
+  maxTotalDecompressedBytes?: number;
 }
 
 interface PdfObject {
@@ -93,16 +99,19 @@ function streamBytes(bytes: Buffer, obj: PdfObject): Buffer | null {
 }
 
 /** Decode a stream's bytes, honouring FlateDecode. Null for filters we can't read. */
-async function decodeStream(bytes: Buffer, obj: PdfObject): Promise<Buffer | null> {
+async function decodeStream(bytes: Buffer, obj: PdfObject, budget: DecompressionBudget): Promise<Buffer | null> {
   const raw = streamBytes(bytes, obj);
   if (!raw) return null;
   const filter = /\/Filter\s*(\/\w+|\[[^\]]*\])/.exec(obj.body)?.[1] ?? '';
-  if (filter === '') return raw;
+  if (filter === '') {
+    budget.charge(raw.length, 'PDF stream');
+    return raw;
+  }
   if (!filter.includes('FlateDecode')) return null; // LZW/DCT/JPX: not text anyway
   try {
     // PDF stream dictionaries say nothing about inflated length, so the cap is
     // the only thing standing between a crafted stream and the memory budget.
-    return await inflateBounded(raw, 'deflate', MAX_DECOMPRESSED_BYTES, 'PDF stream');
+    return await inflateBounded(raw, 'deflate', MAX_DECOMPRESSED_BYTES, 'PDF stream', budget);
   } catch (err) {
     // A truncated or mis-bounded stream must not take the whole document down;
     // the page simply contributes no text. A cap breach is different in kind —
@@ -224,6 +233,7 @@ export async function extractPdf(bytes: Buffer, opts: PdfOptions = {}): Promise<
   const pageObjects = orderedPages(objects);
   if (pageObjects.length === 0) throw new Error('no pages found in the PDF');
 
+  const budget = new DecompressionBudget(opts.maxTotalDecompressedBytes);
   const pages: PageExtract[] = [];
   const omitted: string[] = [];
   for (let i = 0; i < pageObjects.length; i++) {
@@ -237,7 +247,7 @@ export async function extractPdf(bytes: Buffer, opts: PdfOptions = {}): Promise<
     for (const ref of refsIn(contentsFragment)) {
       const streamObj = objects.get(ref);
       if (!streamObj) continue;
-      const decoded = await decodeStream(bytes, streamObj);
+      const decoded = await decodeStream(bytes, streamObj, budget);
       if (decoded) raw += `${decoded.toString('latin1')}\n`;
     }
     pages.push({ number, text: tidy(textFromContentStream(raw)) });

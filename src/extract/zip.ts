@@ -10,7 +10,7 @@
 // `node:zlib` here would tie this to Node; adding a userland inflate
 // dependency would bloat it. Neither is necessary.
 
-import { inflateBounded, MAX_DECOMPRESSED_BYTES } from './inflate.js';
+import { DecompressionBudget, inflateBounded, MAX_DECOMPRESSED_BYTES } from './inflate.js';
 
 const EOCD_SIG = 0x06054b50;
 const CENTRAL_SIG = 0x02014b50;
@@ -63,6 +63,11 @@ function findEocd(bytes: Buffer): number {
 export interface ZipOptions {
   /** Per-member decompression cap. Defaults to {@link ZIP_MAX_UNCOMPRESSED_BYTES}. */
   maxUncompressedBytes?: number;
+  /**
+   * Cap on everything this archive decompresses, across all members (memoized
+   * re-reads are free). Defaults to MAX_TOTAL_DECOMPRESSED_BYTES.
+   */
+  maxTotalUncompressedBytes?: number;
 }
 
 export async function readZip(bytes: Buffer, opts: ZipOptions = {}): Promise<ZipArchive> {
@@ -94,7 +99,10 @@ export async function readZip(bytes: Buffer, opts: ZipOptions = {}): Promise<Zip
     p += 46 + nameLen + extraLen + commentLen;
   }
 
+  // Memoized members are bounded by the archive budget: every member read
+  // (STORED ones too, since central entries may alias one payload) is charged.
   const cache = new Map<string, Buffer>();
+  const budget = new DecompressionBudget(opts.maxTotalUncompressedBytes);
 
   async function read(name: string): Promise<Buffer | null> {
     const cached = cache.get(name);
@@ -118,8 +126,10 @@ export async function readZip(bytes: Buffer, opts: ZipOptions = {}): Promise<Zip
     const start = lo + 30 + bytes.readUInt16LE(lo + 26) + bytes.readUInt16LE(lo + 28);
     const raw = bytes.subarray(start, start + entry.compressedSize);
     let out: Buffer;
-    if (entry.method === 0) out = Buffer.from(raw);
-    else if (entry.method === 8) out = await inflateBounded(raw, 'deflate-raw', limit, `ZIP member ${name}`);
+    if (entry.method === 0) {
+      budget.charge(raw.length, `ZIP member ${name}`);
+      out = Buffer.from(raw);
+    } else if (entry.method === 8) out = await inflateBounded(raw, 'deflate-raw', limit, `ZIP member ${name}`, budget);
     else throw new Error(`unsupported ZIP compression method ${entry.method} for ${name}`);
     cache.set(name, out);
     return out;

@@ -22,7 +22,7 @@ import {
   getFetchUnreadBodies, getSyncMaxRequests, getWriteMode,
 } from '../config.js';
 import { basename, join, resolve } from 'node:path';
-import { ApiRecipientSchema, deriveRead, expandPath, hasRealView, jsonErrorResponse, jsonResponse, mapRecipients, postMessageAndRefetch, reportsThreaded, UnconfirmedWriteError, reportsUnthreaded, textResponse, threadedReplyTo, verifyWriteLanded, withReadState } from './_shared.js';
+import { ApiRecipientSchema, deriveRead, expandPath, hasRealView, jsonErrorResponse, jsonResponse, jsonText, mapRecipients, notedJsonResponse, postMessageAndRefetch, reportsThreaded, UnconfirmedWriteError, reportsUnthreaded, threadedReplyTo, verifyWriteLanded, withReadState } from './_shared.js';
 import { parseLenient } from '@chrischall/mcp-utils';
 import { pageState } from './pagination.js';
 import { MESSAGE_VIEWS, viewDrafts, viewMessages, viewOne } from './project.js';
@@ -1022,10 +1022,11 @@ export function registerMessageTools(
           : {}),
         ...persisted,
       };
-    const text = responseObj ? JSON.stringify(responseObj, null, 2) : 'Message sent successfully.';
-    const notes = [guardNote, rewriteNote, verifyNote, threadNote, unconfirmedNote, retainNote]
-      .filter((n): n is string => n !== null).join('\n\n');
-    return textResponse(notes ? `${notes}\n\n${text}` : text);
+    return notedJsonResponse(
+      [guardNote, rewriteNote, verifyNote, threadNote, unconfirmedNote, retainNote],
+      responseObj,
+      'Message sent successfully.',
+    );
   });
 
   // ── Destructive-draft-op guard ──────────────────────────────────────────
@@ -1112,10 +1113,8 @@ export function registerMessageTools(
         : `The server version that was overwritten is preserved below under "overwrittenServerDraft".`;
       return {
         ok: true,
-        note: `WARNING: force:true overrode a ${verdict.verdict} freshness verdict on draft ${draftId}. ${verdict.reason} ${echoed}\n\n${JSON.stringify(
+        note: `WARNING: force:true overrode a ${verdict.verdict} freshness verdict on draft ${draftId}. ${verdict.reason} ${echoed}\n\n${jsonText(
           { overwrittenServerDraft: server === null ? null : { ...server, revision: draftRevision(server) } },
-          null,
-          2,
         )}`,
         server,
       };
@@ -1260,7 +1259,10 @@ export function registerMessageTools(
 
   if (allowDrafts) server.registerTool('ofw_save_draft', {
     description: 'Save a message as a draft in OurFamilyWizard. RECIPIENTS: OurFamilyWizard does NOT persist recipients on drafts — recipientIds are accepted but the saved draft comes back with none (documented OFW behavior, noted once in the response, not warned about; supply recipientIds at send time instead). IDENTITY: the response leads with `draftKey`, the stable identity that survives editing — key off it, because the `id` changes on EVERY edit (replacing a draft creates a NEW draft and deletes the old one; OFW\'s update-in-place endpoint silently no-ops, so we never use it). Pass messageId to replace an existing draft; the response.id will be the NEW id, and a transparency NOTE documents the swap and which fields were carried over. THREADING: if replyToId is provided, the cache may rewrite it to the latest reply in the thread (note included). The threading verdict is read from OFW\'s full echo (replyToId/inReplyTo/showContext) — a warning appears ONLY when the reply linkage was genuinely dropped or re-targeted, and the response\'s top-level replyToId/inReplyTo always agree with its listData. Attach files via myFileIDs (from ofw_upload_attachment). After saving, the tool re-fetches the draft from OFW, and the returned `revision` reflects that authoritative state (so it will match on your next edit). SAFETY: because replacing DESTROYS the old draft rather than merging, passing messageId first re-reads that draft from OFW and REFUSES the write if its subject/body/recipients changed since you read it (drafts edited in the OFW web app do not bump any timestamp, so the local cache can be silently behind). A pure replyToId normalization by OFW is NOT treated as a conflict. The refusal returns the current server body under serverBody — merge your edit into it and retry with expectedRevision.',
-    annotations: { readOnlyHint: false, destructiveHint: false },
+    // Destructive: with messageId, saving REPLACES the draft by creating a new
+    // one and deleting the old (OFW has no draft update), so the old draft's
+    // server content is gone. Not idempotent: every call mints a new draft id.
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
     inputSchema: z.object({
       subject: z.string().describe('Message subject'),
       body: z.string().describe('Message body text'),
@@ -1474,13 +1476,14 @@ export function registerMessageTools(
         ...(recipientsNote !== null ? { recipientsNote } : {}),
       }
       : raw;
-    const text = responseObj ? JSON.stringify(responseObj, null, 2) : 'Draft saved.';
     const warnNote = warnings.length > 0
       ? `WARNING: ${warnings.join('\n\n')}`
       : null;
-    const notes = [forceNote, rewriteNote, verifyNote, warnNote, recipientsNote, replaceNote]
-      .filter((n): n is string => n !== null).join('\n\n');
-    return textResponse(notes ? `${notes}\n\n${text}` : text);
+    return notedJsonResponse(
+      [forceNote, rewriteNote, verifyNote, warnNote, recipientsNote, replaceNote],
+      responseObj,
+      'Draft saved.',
+    );
   });
 
   if (allowDrafts) server.registerTool('ofw_delete_draft', {
@@ -1504,8 +1507,7 @@ export function registerMessageTools(
 
     const data = await deleteOFWMessages(client, [args.messageId]);
     await cache.deleteDraft(args.messageId);
-    const text = data ? JSON.stringify(data, null, 2) : 'Draft deleted.';
-    return textResponse(guard.note ? `${guard.note}\n\n${text}` : text);
+    return notedJsonResponse([guard.note], data, 'Draft deleted.');
   });
 
   server.registerTool('ofw_get_unread_sent', {

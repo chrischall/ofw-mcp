@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { deflateRawSync, deflateSync } from 'node:zlib';
-import { inflateBounded, DecompressionLimitError, MAX_DECOMPRESSED_BYTES } from '../../src/extract/inflate.js';
+import {
+  inflateBounded, DecompressionBudget, DecompressionLimitError, MAX_DECOMPRESSED_BYTES, MAX_TOTAL_DECOMPRESSED_BYTES,
+} from '../../src/extract/inflate.js';
 
 describe('inflateBounded', () => {
   it('inflates a raw DEFLATE payload', async () => {
@@ -37,5 +39,18 @@ describe('inflateBounded', () => {
 
   it('exposes a 32 MiB default cap', () => {
     expect(MAX_DECOMPRESSED_BYTES).toBe(32 * 1024 * 1024);
+  });
+
+  it('charges a shared budget, so many members under the per-member cap cannot add up without limit', async () => {
+    const budget = new DecompressionBudget(1500);
+    const member = deflateRawSync(Buffer.alloc(1000));
+    await inflateBounded(member, 'deflate-raw', 4096, 'first', budget);
+    await expect(inflateBounded(member, 'deflate-raw', 4096, 'second', budget))
+      .rejects.toThrow(/second pushes the document past its 1500-byte total decompression cap/);
+  });
+
+  it('exposes a 64 MiB default total budget', () => {
+    expect(MAX_TOTAL_DECOMPRESSED_BYTES).toBe(64 * 1024 * 1024);
+    expect(new DecompressionBudget().limit).toBe(MAX_TOTAL_DECOMPRESSED_BYTES);
   });
 });

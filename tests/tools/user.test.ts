@@ -55,3 +55,21 @@ describe('ofw_get_notifications', () => {
   });
 });
 
+
+describe('ofw_get_notifications annotations', () => {
+  it('is not advertised as read-only, because the call updates the co-parent-visible last-seen status', () => {
+    const server = new McpServer({ name: 'test', version: '0.0.0' });
+    const configs = new Map<string, { annotations?: Record<string, unknown> }>();
+    vi.spyOn(server, 'registerTool').mockImplementation((name: string, config: unknown) => {
+      configs.set(name, config as { annotations?: Record<string, unknown> });
+      return undefined as never;
+    });
+    registerUserTools(server, new OFWClient());
+
+    expect(configs.get('ofw_get_notifications')?.annotations).toMatchObject({
+      readOnlyHint: false,
+      destructiveHint: false,
+    });
+    expect(configs.get('ofw_get_profile')?.annotations).toMatchObject({ readOnlyHint: true });
+  });
+});

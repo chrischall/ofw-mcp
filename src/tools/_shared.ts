@@ -31,6 +31,26 @@ export function jsonResponse(data: unknown): ReturnType<typeof textResult> {
 // Raw-string tool result. Wrapper over @chrischall/mcp-utils' `rawTextResult`.
 export const textResponse = rawTextResult;
 
+// The JSON half of a mixed text response, through the same seam as
+// jsonResponse: timestamps normalized, no formatting whitespace.
+export function jsonText(data: unknown): string {
+  return JSON.stringify(normalizeTimestampsInValue(data));
+}
+
+// A write tool's result: its transparency NOTEs/WARNINGs (null entries are
+// skipped) ahead of the structured payload, or `fallback` when OFW returned
+// nothing to show. The payload goes through jsonText, so a write tool cannot
+// hand back the naive-local `sentAt`/`modifiedAt` the read tools never do.
+export function notedJsonResponse(
+  notes: ReadonlyArray<string | null>,
+  data: unknown,
+  fallback: string,
+): ReturnType<typeof textResult> {
+  const text = data ? jsonText(data) : fallback;
+  const prefix = notes.filter((n): n is string => n !== null).join('\n\n');
+  return textResponse(prefix ? `${prefix}\n\n${text}` : text);
+}
+
 // A STRUCTURED failure: the machine-readable payload of `jsonResponse` plus
 // `isError`, so a refusal can carry recovery data (e.g. the server draft body
 // we declined to overwrite) without being mistaken for a successful write.
