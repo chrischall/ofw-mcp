@@ -356,6 +356,7 @@ export function registerExpenseTools(
     const label = args.label ?? fileName;
     const description = args.description ?? fileName;
     const gate = await confirmWrite(ctx, {
+      args,
       tool: 'ofw_upload_expense_pdf',
       action: 'ofw.file.share',
       message: `Review and confirm uploading the receipt "${fileName}" to OurFamilyWizard. It is uploaded SHARED, so the co-parent can see it in My Files immediately — even if the expense it is attached to is private.`,
@@ -501,6 +502,7 @@ export function registerExpenseTools(
       });
     }
     const gate = await confirmWrite(ctx, {
+      args,
       tool: 'ofw_update_expense',
       action: 'ofw.expense.update',
       message: next.isPrivate
@@ -604,6 +606,7 @@ export function registerExpenseTools(
 
     const isPrivate = args.privateExpense === true;
     const gate = await confirmWrite(ctx, {
+      args,
       tool: 'ofw_create_expense',
       action: 'ofw.expense.create',
       message: isPrivate

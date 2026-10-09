@@ -198,6 +198,7 @@ export function registerCalendarTools(server: McpServer, client: OFWClient): voi
     const payload = buildEventPayload(fields as EventWriteArgs);
     if (!fields.privateEvent) {
       const gate = await confirmWrite(ctx, {
+        args,
         tool: 'ofw_create_event',
         action: 'ofw.event.create',
         message: 'Review and confirm this OurFamilyWizard calendar event. It is shared with the co-parent and appears on their calendar immediately.',
@@ -265,6 +266,7 @@ export function registerCalendarTools(server: McpServer, client: OFWClient): voi
     if (current.publicFlag || !merged.privateEvent) {
       const names = namesIn(current);
       const gate = await confirmWrite(ctx, {
+        args,
         tool: 'ofw_update_event',
         action: 'ofw.event.update',
         message: `Review and confirm this change to the OurFamilyWizard event "${current.title}". The co-parent sees the updated event on their calendar.`,
@@ -324,6 +326,7 @@ export function registerCalendarTools(server: McpServer, client: OFWClient): voi
     if (current.publicFlag) {
       const base = detailToWriteArgs(current);
       const gate = await confirmWrite(ctx, {
+        args,
         tool: 'ofw_delete_event',
         action: 'ofw.event.delete',
         message: `Review and confirm deleting the OurFamilyWizard event "${current.title}". It disappears from the co-parent's calendar.`,
