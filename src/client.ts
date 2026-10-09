@@ -102,6 +102,17 @@ async function releaseBody(response: Response): Promise<void> {
   }
 }
 
+/**
+ * What `ofw_healthcheck` reports about the credential. Never the token itself.
+ *
+ * `source` is the path that minted the token this process holds, or `'cache'`
+ * when it was restored from the session cache and no path ran at all.
+ */
+export interface CredentialStatus {
+  source: ResolvedAuth['source'] | 'cache';
+  expiresAt: Date;
+}
+
 export class OFWClient {
   // Bearer-token lifecycle is delegated to the shared, race-safe TokenManager
   // (proactive refresh inside the skew window, single-flight refresh so a burst
@@ -119,6 +130,10 @@ export class OFWClient {
   // global resolver, keeping that behaviour byte-for-byte identical.
   private readonly authResolver: (() => Promise<ResolvedAuth>) | undefined;
 
+  // Which path minted the token currently held. Unset while the token is one
+  // the TokenManager restored from the session cache — nothing was minted.
+  private mintedBy: ResolvedAuth['source'] | undefined;
+
   constructor(opts?: { resolveAuth?: () => Promise<ResolvedAuth> }) {
     this.authResolver = opts?.resolveAuth;
   }
@@ -135,7 +150,8 @@ export class OFWClient {
         refreshToken: string;
         expiresAt: number;
       }> => {
-        const { token, expiresAt } = await (this.authResolver ?? resolveAuth)();
+        const { token, expiresAt, source } = await (this.authResolver ?? resolveAuth)();
+        this.mintedBy = source;
         return {
           accessToken: token,
           refreshToken: OFW_REFRESH_SENTINEL,
@@ -160,6 +176,23 @@ export class OFWClient {
       });
     }
     return this.tokenManager;
+  }
+
+  /**
+   * The credential's source and expiry, answered from the TokenManager — the
+   * same token, cache and single-flight mint every tool uses.
+   *
+   * `ofw_healthcheck` used to call `resolveAuth()` directly, which is a full
+   * login (or a fresh browser-bridge spin-up) on every healthcheck, ignoring
+   * the six-hour token already held. Going through the manager means a held or
+   * cached token costs nothing, and a mint, when one is needed, is the one the
+   * next real tool call would have made anyway. A mint failure propagates
+   * unchanged so the healthcheck can classify it.
+   */
+  async credentialStatus(): Promise<CredentialStatus> {
+    const tokens = this.getTokenManager();
+    await tokens.getAccessToken();
+    return { source: this.mintedBy ?? 'cache', expiresAt: new Date(tokens.getExpiresAt()) };
   }
 
   async request<T>(method: string, path: string, body?: unknown): Promise<T> {
