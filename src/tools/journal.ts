@@ -11,7 +11,7 @@ export function registerJournalTools(server: McpServer, client: OFWClient): void
 
   server.registerTool('ofw_list_journal_entries', {
     description: 'List OurFamilyWizard journal entries. Offset-paged via start/max (1-based). The response leads with its paging state — `hasMore` and `nextStart` (null when the list is exhausted) — BEFORE the records, so a truncated or partially-read response still says whether more remain. Never state an entry count or an absence from one page.',
-    annotations: { readOnlyHint: true },
+    annotations: { readOnlyHint: true, openWorldHint: true },
     inputSchema: z.object({
       start: z.number().int().min(1).describe('Start offset, 1-based (default 1). To continue a listing, pass the `nextStart` from the previous response.').optional(),
       max: z.number().int().min(1).describe('Max results (default 10)').optional(),
@@ -42,8 +42,10 @@ export function registerJournalTools(server: McpServer, client: OFWClient): void
   });
 
   if (allowWrites) server.registerTool('ofw_create_journal_entry', {
+    // Destructive by the inverse test: the entry lands on the court-visible
+    // record and no tool here edits or deletes a journal entry.
     description: 'Create a new journal entry in OurFamilyWizard',
-    annotations: { destructiveHint: false },
+    annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
     inputSchema: z.object({
       title: z.string().describe('Entry title'),
       body: z.string().describe('Entry text content'),

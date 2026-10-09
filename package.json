@@ -26,7 +26,7 @@
   ],
   "scripts": {
     "build": "tsc && npm run bundle",
-    "bundle": "esbuild src/index.ts --bundle --platform=node --format=esm --external:dotenv --banner:js='import { createRequire as __createRequire } from \"module\"; const require = __createRequire(import.meta.url);' --outfile=dist/bundle.js",
+    "bundle": "esbuild src/index.ts --bundle --platform=node --format=esm --external:dotenv --define:process.env.WS_NO_BUFFER_UTIL=true --define:process.env.WS_NO_UTF_8_VALIDATE=true --banner:js='import { createRequire as __createRequire } from \"module\"; const require = __createRequire(import.meta.url);' --outfile=dist/bundle.js",
     "dev": "node --env-file=.env dist/index.js",
     "test": "npm run typecheck && vitest run",
     "test:coverage": "npm run typecheck && vitest run --coverage",

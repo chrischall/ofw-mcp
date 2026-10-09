@@ -2651,7 +2651,9 @@ describe('ofw_upload_attachment — only files the user put in the upload dir ca
 
   it('is annotated open-world and describes the upload as disclosure', () => {
     const tool = configsFor(undefined).get('ofw_upload_attachment')!;
-    expect(tool.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: false, openWorldHint: true });
+    // Destructive by the inverse test: a SHARED upload is co-parent-visible at
+    // once, and no tool here deletes a My Files upload.
+    expect(tool.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: true, openWorldHint: true });
     expect(tool.description).toMatch(/leaves this machine/);
   });
 });
@@ -5044,6 +5046,35 @@ describe('UNVERIFIED_EMPTY: absence is never reported from a stale cache (Gap 2)
     expect(parsed.messages[0].subject).toBe('Found after refresh');
     expect(parsed.autoRefreshed).toBe(true);
     expect(parsed.complete).toBe(true);
+  });
+
+  it('autoRefresh never fetches unread inbox bodies, even with OFW_FETCH_UNREAD_BODIES=true', async () => {
+    // ofw_list_messages is annotated readOnlyHint:true. A refresh triggered by
+    // a read must not mark unread inbox messages READ (stamping a co-parent-
+    // visible "First Viewed" time), whatever the deployment's sync default.
+    const prevFetch = process.env.OFW_FETCH_UNREAD_BODIES;
+    const prevAllow = process.env.OFW_ALLOW_MARK_READ;
+    process.env.OFW_FETCH_UNREAD_BODIES = 'true';
+    process.env.OFW_ALLOW_MARK_READ = 'true';
+    try {
+      const syncSpy = vi.spyOn(syncModule, 'syncAll').mockResolvedValue({
+        synced: {}, refreshed: [], notRefreshed: [], syncComplete: true, unreadWithoutBodies: [],
+      } as never);
+      setup(makeClient({}));
+
+      await handlers.get('ofw_list_messages')!({ folderId: 'inbox', autoRefresh: true });
+      await handlers.get('ofw_list_messages')!({ folderId: 'both', autoRefresh: true });
+
+      expect(syncSpy).toHaveBeenCalledTimes(2);
+      for (const call of syncSpy.mock.calls) {
+        expect(call[1]).toMatchObject({ fetchUnreadBodies: false });
+      }
+    } finally {
+      if (prevFetch === undefined) delete process.env.OFW_FETCH_UNREAD_BODIES;
+      else process.env.OFW_FETCH_UNREAD_BODIES = prevFetch;
+      if (prevAllow === undefined) delete process.env.OFW_ALLOW_MARK_READ;
+      else process.env.OFW_ALLOW_MARK_READ = prevAllow;
+    }
   });
 
   it('autoRefresh that does NOT make the read verifiable still refuses', async () => {

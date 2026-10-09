@@ -57,7 +57,7 @@ import { parseBoolEnv, readEnvVar, resolveAuthPattern, type AuthPattern } from '
 import { bootstrap } from '@fetchproxy/bootstrap';
 import { classifyBridgeError, FetchproxyBridgeDownError } from '@chrischall/mcp-utils/fetchproxy';
 import { loginWithPassword } from './auth-password.js';
-import pkg from '../package.json' with { type: 'json' };
+import { SERVER_NAME, VERSION } from './version.js';
 
 /** Result of resolving auth, regardless of which path was taken. */
 export interface ResolvedAuth {
@@ -144,8 +144,8 @@ export async function resolveAuth(): Promise<ResolvedAuth> {
     pattern.fetchproxy = async () => {
       try {
         const session = await bootstrap({
-          serverName: pkg.name,
-          version: pkg.version,
+          serverName: SERVER_NAME,
+          version: VERSION,
           // OFW serves both ofw.ourfamilywizard.com and www.ourfamilywizard.com;
           // the API + auth token live on the apex. The extension matches on
           // suffix, so listing the apex covers both.

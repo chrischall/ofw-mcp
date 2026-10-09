@@ -16,9 +16,9 @@ function readCacheIdentity(): string {
 }
 
 export function getCacheDir(): string {
-  const override = process.env.OFW_CACHE_DIR;
-  if (override && override.trim().length > 0) return override.trim();
-  return join(homedir(), '.cache', 'ofw-mcp');
+  // readEnvVar, not process.env: it also treats an unexpanded mcpb
+  // `${user_config.*}` placeholder as unset.
+  return readEnvVar('OFW_CACHE_DIR') ?? join(homedir(), '.cache', 'ofw-mcp');
 }
 
 export function getCacheDbPath(): string {

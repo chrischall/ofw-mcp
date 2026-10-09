@@ -66,9 +66,12 @@ describe('ofw_get_notifications annotations', () => {
     });
     registerUserTools(server, new OFWClient());
 
+    // Destructive by the inverse test: nothing in this tool set restores a
+    // last-seen status the co-parent has already been shown.
     expect(configs.get('ofw_get_notifications')?.annotations).toMatchObject({
       readOnlyHint: false,
-      destructiveHint: false,
+      destructiveHint: true,
+      openWorldHint: true,
     });
     expect(configs.get('ofw_get_profile')?.annotations).toMatchObject({ readOnlyHint: true });
   });
