@@ -22,7 +22,7 @@ import {
   getFetchUnreadBodies, getSyncMaxRequests, getWriteMode,
 } from '../config.js';
 import { basename, join, resolve } from 'node:path';
-import { ApiRecipientSchema, deriveRead, expandPath, hasRealView, jsonErrorResponse, jsonResponse, mapRecipients, postMessageAndRefetch, reportsThreaded, UnconfirmedWriteError, reportsUnthreaded, textResponse, threadedReplyTo, verifyWriteLanded, withReadState } from './_shared.js';
+import { ApiRecipientSchema, deriveRead, expandPath, hasRealView, jsonErrorResponse, jsonResponse, jsonText, mapRecipients, notedJsonResponse, postMessageAndRefetch, reportsThreaded, UnconfirmedWriteError, reportsUnthreaded, threadedReplyTo, verifyWriteLanded, withReadState } from './_shared.js';
 import { parseLenient } from '@chrischall/mcp-utils';
 import { pageState } from './pagination.js';
 import { MESSAGE_VIEWS, viewDrafts, viewMessages, viewOne } from './project.js';
@@ -1022,10 +1022,11 @@ export function registerMessageTools(
           : {}),
         ...persisted,
       };
-    const text = responseObj ? JSON.stringify(responseObj, null, 2) : 'Message sent successfully.';
-    const notes = [guardNote, rewriteNote, verifyNote, threadNote, unconfirmedNote, retainNote]
-      .filter((n): n is string => n !== null).join('\n\n');
-    return textResponse(notes ? `${notes}\n\n${text}` : text);
+    return notedJsonResponse(
+      [guardNote, rewriteNote, verifyNote, threadNote, unconfirmedNote, retainNote],
+      responseObj,
+      'Message sent successfully.',
+    );
   });
 
   // ── Destructive-draft-op guard ──────────────────────────────────────────
@@ -1112,10 +1113,8 @@ export function registerMessageTools(
         : `The server version that was overwritten is preserved below under "overwrittenServerDraft".`;
       return {
         ok: true,
-        note: `WARNING: force:true overrode a ${verdict.verdict} freshness verdict on draft ${draftId}. ${verdict.reason} ${echoed}\n\n${JSON.stringify(
+        note: `WARNING: force:true overrode a ${verdict.verdict} freshness verdict on draft ${draftId}. ${verdict.reason} ${echoed}\n\n${jsonText(
           { overwrittenServerDraft: server === null ? null : { ...server, revision: draftRevision(server) } },
-          null,
-          2,
         )}`,
         server,
       };
@@ -1477,13 +1476,14 @@ export function registerMessageTools(
         ...(recipientsNote !== null ? { recipientsNote } : {}),
       }
       : raw;
-    const text = responseObj ? JSON.stringify(responseObj, null, 2) : 'Draft saved.';
     const warnNote = warnings.length > 0
       ? `WARNING: ${warnings.join('\n\n')}`
       : null;
-    const notes = [forceNote, rewriteNote, verifyNote, warnNote, recipientsNote, replaceNote]
-      .filter((n): n is string => n !== null).join('\n\n');
-    return textResponse(notes ? `${notes}\n\n${text}` : text);
+    return notedJsonResponse(
+      [forceNote, rewriteNote, verifyNote, warnNote, recipientsNote, replaceNote],
+      responseObj,
+      'Draft saved.',
+    );
   });
 
   if (allowDrafts) server.registerTool('ofw_delete_draft', {
@@ -1507,8 +1507,7 @@ export function registerMessageTools(
 
     const data = await deleteOFWMessages(client, [args.messageId]);
     await cache.deleteDraft(args.messageId);
-    const text = data ? JSON.stringify(data, null, 2) : 'Draft deleted.';
-    return textResponse(guard.note ? `${guard.note}\n\n${text}` : text);
+    return notedJsonResponse([guard.note], data, 'Draft deleted.');
   });
 
   server.registerTool('ofw_get_unread_sent', {

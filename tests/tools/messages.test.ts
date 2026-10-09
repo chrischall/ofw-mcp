@@ -11,6 +11,7 @@ import { NodeAttachmentIO } from '../../src/tools/attachments.js';
 import { MAX_INLINE_BYTES } from '../../src/tools/delivery.js';
 import type { AttachmentIO, ResolvedUpload } from '../../src/tools/attachments.js';
 import { draftRevision } from '../../src/tools/draft-freshness.js';
+import { isNaiveTimestamp } from '../../src/timestamps.js';
 import { OFWCache } from '../../src/cache/node.js';
 import { sampleMessageRow } from '../_fixtures.js';
 import { CAN_ASK_CTX, NO_ELICIT_CTX, callConfirmed, callPreview } from './_confirm-helpers.js';
@@ -908,9 +909,9 @@ describe('ofw_send_message', () => {
     expect(spy).toHaveBeenNthCalledWith(4, 'DELETE', '/pub/v1/messages', expect.any(FormData));
     const deleteForm = spy.mock.calls[3][2] as FormData;
     expect(deleteForm.get('messageIds')).toBe('42');
-    expect(result.content[0].text).toContain('"id": 200');
-    expect(result.content[0].text).toContain('"draftDeleted": true');
-    expect(result.content[0].text).toContain('"sentMessageId": 200');
+    expect(result.content[0].text).toContain('"id":200');
+    expect(result.content[0].text).toContain('"draftDeleted":true');
+    expect(result.content[0].text).toContain('"sentMessageId":200');
   });
 });
 
@@ -1114,11 +1115,11 @@ describe('ofw_send_message with messageId (send-existing-draft)', () => {
 
     expect(getDraft(519117394)).toBeNull();
     expect(getMessage(519117514)?.folder).toBe('sent');
-    expect(result.content[0].text).toContain('"id": 519117514');
+    expect(result.content[0].text).toContain('"id":519117514');
     // The structured verdict the caller keys off.
-    expect(result.content[0].text).toContain('"sentMessageId": 519117514');
-    expect(result.content[0].text).toContain('"draftDeleted": true');
-    expect(result.content[0].text).toContain('"previousId": 519117394');
+    expect(result.content[0].text).toContain('"sentMessageId":519117514');
+    expect(result.content[0].text).toContain('"draftDeleted":true');
+    expect(result.content[0].text).toContain('"previousId":519117394');
   });
 
   it('sends the SERVER version, not the stale cached one, when only metadata drifted', async () => {
@@ -1754,7 +1755,7 @@ describe('ofw_save_draft — stale-overwrite guard', () => {
     });
 
     expect(result.content[0].text).toMatch(/no longer existed on OurFamilyWizard/);
-    expect(result.content[0].text).toMatch(/"overwrittenServerDraft": null/);
+    expect(result.content[0].text).toMatch(/"overwrittenServerDraft":null/);
     warn.mockRestore();
   });
 
@@ -5845,8 +5846,8 @@ describe('ofw_send_message — send-by-draft guard & verdicts (consolidated fixe
     expect(result.isError).toBeUndefined();
     const postCall = spy.mock.calls.find((c) => c[0] === 'POST');
     expect((postCall![2] as { body: string }).body).toBe('server body');
-    expect(result.content[0].text).toContain('"sentMessageId": 900');
-    expect(result.content[0].text).toContain('"draftDeleted": true');
+    expect(result.content[0].text).toContain('"sentMessageId":900');
+    expect(result.content[0].text).toContain('"draftDeleted":true');
   });
 
   it('deleteDraftOnSuccess:false keeps the draft and says so', async () => {
@@ -6605,7 +6606,7 @@ describe('ofw_send_message — confirmation gate (SEC-1)', () => {
     const result = await handlers.get('ofw_send_message')!({ ...args, confirmToken }, NO_ELICIT_CTX);
 
     expect(spy.mock.calls.filter((c) => c[0] === 'POST')).toHaveLength(1);
-    expect(result.content[0].text).toContain('"sentMessageId": 200');
+    expect(result.content[0].text).toContain('"sentMessageId":200');
 
     // One approval acts once: replaying the spent token sends nothing.
     const replay = await handlers.get('ofw_send_message')!({ ...args, confirmToken }, NO_ELICIT_CTX);
@@ -6699,5 +6700,67 @@ describe('ofw_save_draft annotations (QUAL-1)', () => {
       destructiveHint: true,
       idempotentHint: false,
     });
+  });
+});
+
+describe('write-tool responses go through the timestamp seam (QUAL-2)', () => {
+  // The JSON payload that follows any transparency NOTEs.
+  const payloadOf = (text: string): string => text.slice(text.indexOf('{'));
+  const naiveValues = (node: unknown, out: string[] = []): string[] => {
+    if (Array.isArray(node)) node.forEach((n) => naiveValues(n, out));
+    else if (node !== null && typeof node === 'object') Object.values(node).forEach((n) => naiveValues(n, out));
+    else if (isNaiveTimestamp(node)) out.push(node as string);
+    return out;
+  };
+
+  it('ofw_save_draft, ofw_send_message and ofw_delete_draft return minified JSON with offset-bearing timestamps', async () => {
+    seedFolderIds();
+    const { client } = fakeOFW();
+    setup(client);
+
+    const savedText = (await handlers.get('ofw_save_draft')!({ subject: 'S', body: 'B' })).content[0].text;
+    const saved = JSON.parse(payloadOf(savedText));
+    expect(payloadOf(savedText)).not.toMatch(/\n/);
+    expect(naiveValues(saved)).toEqual([]);
+    expect(saved.modifiedAtDisplay).toEqual(expect.any(String));
+
+    const sentText = (await callConfirmed(handlers.get('ofw_send_message')!, {
+      subject: 'S', body: 'B', recipientIds: [7],
+    })).content[0].text;
+    const sent = JSON.parse(payloadOf(sentText));
+    expect(payloadOf(sentText)).not.toMatch(/\n/);
+    expect(naiveValues(sent)).toEqual([]);
+    expect(sent.sentAtDisplay).toEqual(expect.any(String));
+
+    const deletedText = (await handlers.get('ofw_delete_draft')!({ messageId: saved.id, force: true })).content[0].text;
+    expect(payloadOf(deletedText)).not.toMatch(/\n/);
+  });
+
+  it('the force-overwrite note carries the overwritten draft minified and normalized', async () => {
+    upsertDraft({
+      id: 600, subject: 'Pickup', body: 'cached body', recipients: [], replyToId: null,
+      modifiedAt: '2026-07-19T13:00:00Z', listData: {},
+    });
+    const warn = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce({
+        id: 600, subject: 'Pickup', body: 'edited on the web', recipients: [], replyToId: null,
+        date: { dateTime: '2026-07-19T14:00:00' }, folder: { id: 3, name: 'Drafts' },
+      })
+      .mockResolvedValueOnce({ entityId: 601 })
+      .mockResolvedValueOnce({ id: 601, subject: 'Pickup', body: 'mine', date: { dateTime: '2026-07-19T14:30:00Z' } })
+      .mockResolvedValueOnce({});
+    setup(client);
+
+    const text = (await handlers.get('ofw_save_draft')!({
+      subject: 'Pickup', body: 'mine', messageId: 600, force: true,
+    })).content[0].text;
+    const line = text.split('\n').find((l) => l.startsWith('{"overwrittenServerDraft"'));
+    expect(line).toBeDefined();
+    const overwritten = JSON.parse(line!).overwrittenServerDraft;
+    expect(overwritten.body).toBe('edited on the web');
+    expect(naiveValues(overwritten)).toEqual([]);
+    warn.mockRestore();
   });
 });
