@@ -1,13 +1,8 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { createTestHarness, parseToolResult } from '@chrischall/mcp-utils/test';
 import { registerHealthcheckTools } from '../../src/tools/healthcheck.js';
-import type { OFWClient } from '../../src/client.js';
-import {
-  BRIDGE_DOWN_PREFIX,
-  NO_AUTH_CONFIGURED,
-  resolveAuth,
-  type ResolvedAuth,
-} from '../../src/auth.js';
+import { OFWClient } from '../../src/client.js';
+import { BRIDGE_DOWN_PREFIX, NO_AUTH_CONFIGURED, type ResolvedAuth } from '../../src/auth.js';
 
 interface Result {
   ok: boolean;
@@ -21,18 +16,37 @@ interface Result {
 // recognising the case.
 const UNCONFIGURED = NO_AUTH_CONFIGURED;
 
-async function call(
+// A REAL OFWClient with the auth resolver injected — so the healthcheck goes
+// through the same TokenManager the tools use — and only the probe's network
+// call stubbed.
+function clientFor(
   resolve: () => Promise<ResolvedAuth>,
   probe: () => Promise<unknown> = async () => ({ profiles: [] }),
-): Promise<Result> {
-  const client = { request: probe } as unknown as OFWClient;
-  const h = await createTestHarness((server) => registerHealthcheckTools(server, client, resolve));
+): OFWClient {
+  const client = new OFWClient({ resolveAuth: resolve });
+  vi.spyOn(client, 'request').mockImplementation(probe as never);
+  return client;
+}
+
+async function run(client: OFWClient): Promise<Result> {
+  const h = await createTestHarness((server) => registerHealthcheckTools(server, client));
   const res = await h.client.callTool({ name: 'ofw_healthcheck', arguments: {} });
   await h.close?.();
   return parseToolResult<Result>(res as never);
 }
 
+async function call(
+  resolve: () => Promise<ResolvedAuth>,
+  probe?: () => Promise<unknown>,
+): Promise<Result> {
+  return run(clientFor(resolve, probe));
+}
+
 describe('ofw_healthcheck', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it('reports ok and WHICH path supplied the token', async () => {
     const r = await call(async () => ({ token: 'secret-token', source: 'env' }));
     expect(r.ok).toBe(true);
@@ -96,6 +110,24 @@ describe('ofw_healthcheck', () => {
     expect(r.hint).not.toMatch(/error\.message/);
   });
 
+  // fleet-audit#881: the healthcheck used to call resolveAuth() itself — a full
+  // login (or a fresh bridge) on every call, ignoring the token already held,
+  // and a bad password re-POSTed each time against OFW's failed-attempt count.
+  it('reuses the token the client holds instead of logging in on every call', async () => {
+    const resolve = vi.fn(async () => ({ token: 't', source: 'env' as const }));
+    const client = clientFor(resolve);
+    expect((await run(client)).ok).toBe(true);
+    expect((await run(client)).ok).toBe(true);
+    expect(resolve).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports the expiry the client will actually act on', async () => {
+    const r = await call(async () => ({ token: 't', source: 'env' }));
+    // No expiry from the resolver: the client's own six-hour estimate.
+    expect(typeof r.credential.detail?.expires_at).toBe('string');
+    expect(Number.isNaN(Date.parse(r.credential.detail!.expires_at as string))).toBe(false);
+  });
+
   it('reports a probe failure without blaming the credential', async () => {
     const r = await call(
       async () => ({ token: 't', source: 'env' }),
@@ -129,8 +161,9 @@ describe('the unconfigured case is what resolveAuth really raises', () => {
   });
 
   it('raises exactly NO_AUTH_CONFIGURED, which the healthcheck then recognises', async () => {
+    const { resolveAuth } = await import('../../src/auth.js');
     await expect(resolveAuth()).rejects.toThrow(NO_AUTH_CONFIGURED);
-    const r = await call(() => resolveAuth());
+    const r = await run(new OFWClient());
     expect(r.credential.source).toBeNull();
     expect(r.error?.kind).toBe('no_credential');
   });

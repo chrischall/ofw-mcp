@@ -1182,3 +1182,67 @@ describe('cancellation', () => {
     }
   });
 });
+
+// What `ofw_healthcheck` reports. It used to call `resolveAuth()` itself — a
+// full login (or a fresh browser bridge) on EVERY healthcheck, ignoring the
+// six-hour token the client already held (chrischall/fleet-audit#881). It now
+// asks the client, which answers from its TokenManager.
+describe('OFWClient.credentialStatus', () => {
+  beforeEach(() => {
+    process.env.OFW_USERNAME = 'test@example.com';
+    process.env.OFW_PASSWORD = 'testpass';
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('reports which path minted the token and when it expires, never the token', async () => {
+    const expiresAt = new Date('2030-01-01T00:00:00.000Z');
+    const client = new OFWClient({
+      resolveAuth: async () => ({ token: MOCK_TOKEN, source: 'fetchproxy', expiresAt }),
+    });
+    const status = await client.credentialStatus();
+    expect(status).toEqual({ source: 'fetchproxy', expiresAt });
+    expect(JSON.stringify(status)).not.toContain(MOCK_TOKEN);
+  });
+
+  it('reuses the token the client already holds instead of logging in again', async () => {
+    const resolve = vi.fn(async () => ({ token: MOCK_TOKEN, source: 'env' as const }));
+    const client = new OFWClient({ resolveAuth: resolve });
+    await client.credentialStatus();
+    await client.credentialStatus();
+    expect(resolve).toHaveBeenCalledTimes(1);
+  });
+
+  it('shares the token with real tool calls: a request after it does not log in again', async () => {
+    const spy = mockFetch([LOGIN_INIT, LOGIN_SUCCESS, { status: 200, body: { profiles: [] } }]);
+    const client = new OFWClient();
+    const status = await client.credentialStatus();
+    expect(status.source).toBe('env');
+    await client.request('GET', '/pub/v2/profiles');
+    // One login (GET form + POST) and one API call — not two logins.
+    expect(spy).toHaveBeenCalledTimes(3);
+  });
+
+  it('says "cache" when the token came from the session cache, with no login at all', async () => {
+    process.env.OFW_SESSION_CACHE = 'true';
+    mockFetch([LOGIN_INIT, LOGIN_SUCCESS]);
+    const first = await new OFWClient().credentialStatus();
+    vi.restoreAllMocks();
+
+    // A cold start: a new client, the same credentials, a cached token.
+    const spy = mockFetch([]);
+    const status = await new OFWClient().credentialStatus();
+    expect(spy).not.toHaveBeenCalled();
+    expect(status).toEqual({ source: 'cache', expiresAt: first.expiresAt });
+  });
+
+  it('propagates a failed mint unchanged, so the healthcheck can classify it', async () => {
+    const client = new OFWClient({
+      resolveAuth: async () => {
+        throw new Error('OFW auth: ContextMint Bridge is down (x)');
+      },
+    });
+    await expect(client.credentialStatus()).rejects.toThrow('OFW auth: ContextMint Bridge is down (x)');
+  });
+});

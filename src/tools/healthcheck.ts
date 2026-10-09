@@ -1,7 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/server';
 import { registerCredentialHealthcheckTool } from '@chrischall/mcp-utils/healthcheck';
 import type { OFWClient } from '../client.js';
-import { resolveAuth, isNoAuthConfigured, isBridgeDown, type ResolvedAuth } from '../auth.js';
+import { isNoAuthConfigured, isBridgeDown } from '../auth.js';
 
 /**
  * `ofw_healthcheck` — the one call that answers "is this connector working?".
@@ -16,12 +16,19 @@ import { resolveAuth, isNoAuthConfigured, isBridgeDown, type ResolvedAuth } from
  * fetchproxy, and "which of those actually supplied it" is the first thing
  * anyone needs when the connector misbehaves. That is why `source` is
  * reported.
+ *
+ * The credential comes from the CLIENT (`credentialStatus`), not from a direct
+ * `resolveAuth()` call. That used to be a full login — or a fresh browser-bridge
+ * spin-up — on every healthcheck, ignoring the six-hour token the client
+ * already held; with a bad password each check re-POSTed it against OFW's
+ * failed-attempt counter (chrischall/fleet-audit#881). Through the client's
+ * TokenManager a held or cached token costs nothing, a needed mint is the one
+ * the next tool call would make anyway, and the probe then exercises that very
+ * token — so a passing healthcheck means the tools' own token works.
  */
 export function registerHealthcheckTools(
   server: McpServer,
   client: OFWClient,
-  /** Seam: the auth resolver, injectable so tests need no network. */
-  resolve: () => Promise<ResolvedAuth> = resolveAuth,
 ): void {
   registerCredentialHealthcheckTool({
     server,
@@ -33,12 +40,13 @@ export function registerHealthcheckTools(
     probePath: '/pub/v2/profiles',
     resolveCredential: async () => {
       try {
-        const auth = await resolve();
+        const { source, expiresAt } = await client.credentialStatus();
         return {
-          source: auth.source,
+          source,
           // Never the token. Expiry is the fact that explains a connector
-          // that worked an hour ago and does not now.
-          detail: auth.expiresAt ? { expires_at: auth.expiresAt.toISOString() } : undefined,
+          // that worked an hour ago and does not now — and this is the one
+          // the client itself will re-authenticate at.
+          detail: { expires_at: expiresAt.toISOString() },
         };
       } catch (e) {
         // "Nothing is configured" is a CREDENTIAL state, not a failure to
@@ -81,7 +89,7 @@ export function registerHealthcheckTools(
         'ContextMint Bridge and sign in to ourfamilywizard.com in a tab (unsetting ' +
         'OFW_DISABLE_FETCHPROXY if you set it).',
       credential_rejected:
-        'OurFamilyWizard rejected the credential. If it came from `env`, the password changed or ' +
+        'OurFamilyWizard rejected the credential. If it came from `env` or `cache`, the password changed or ' +
         'the account is locked; if from `fetchproxy`, the browser session expired — sign in again ' +
         'in the tab. Retrying will not fix either.',
     },
