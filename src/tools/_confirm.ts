@@ -34,6 +34,13 @@ export interface ConfirmWriteOptions {
    * never only numeric ids. Included in the elicitation prompt too.
    */
   preview: Record<string, unknown>;
+  /**
+   * The tool's validated arguments exactly as the handler received them
+   * (`confirmToken` is dropped before hashing). Bound into both the token and
+   * the elicitation acceptance, so an approval for one set of arguments cannot
+   * authorise another.
+   */
+  args: object;
   /** The phase-2 token from the tool's input, or undefined on phase 1. */
   confirmToken: string | undefined;
 }
@@ -68,6 +75,10 @@ export function confirmWrite(
       details: opts.preview,
       unsupportedNote: 'Complete this action on ourfamilywizard.com instead.',
       tool: opts.tool,
+      // One OFW account per process (OFW_USERNAME / the captured session), so
+      // there is no principal to distinguish; mcp-utils 3 makes saying so explicit.
+      account: undefined,
+      args: opts.args,
       confirmToken: opts.confirmToken,
       subject: () => ({
         target: opts.target,

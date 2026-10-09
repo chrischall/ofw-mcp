@@ -827,6 +827,7 @@ export function registerMessageTools(
         : 'composed from the call arguments',
     };
     const gate = await confirmWrite(ctx, {
+      args,
       tool: 'ofw_send_message',
       action: 'ofw.message.send',
       message: 'Review and confirm this OurFamilyWizard message. Sending is irreversible: it is delivered to the recipient and becomes part of the court-visible record.',
@@ -1632,6 +1633,7 @@ export function registerMessageTools(
       const label = args.label ?? fileName;
       const description = args.description ?? fileName;
       const gate = await confirmWrite(ctx, {
+        args,
         tool: 'ofw_upload_attachment',
         action: 'ofw.file.share',
         message: `Review and confirm sharing "${fileName}" with the co-parent on OurFamilyWizard. It is visible to them immediately in My Files.`,
