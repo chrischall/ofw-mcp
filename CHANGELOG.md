@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.20.5](https://github.com/chrischall/ofw-mcp/compare/v2.20.4...v2.20.5) (2026-10-10)
+
+
+### Documentation
+
+* make AGENTS.md a symlink to CLAUDE.md ([#376](https://github.com/chrischall/ofw-mcp/issues/376)) ([99db0f5](https://github.com/chrischall/ofw-mcp/commit/99db0f53cccc1d746a395559ccc25834e1ea15d1))
+
 ## [2.20.4](https://github.com/chrischall/ofw-mcp/compare/v2.20.3...v2.20.4) (2026-10-09)
 
 
