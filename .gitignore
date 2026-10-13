@@ -5,3 +5,6 @@ coverage/
 *.skill
 *.mcpb
 .claude/worktrees/
+# local Codex config + skill mirrors (generated, not shared)
+.agents/
+.codex/
