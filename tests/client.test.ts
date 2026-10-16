@@ -668,6 +668,44 @@ describe('OFWClient', () => {
       }
     });
 
+    describe('OFW_DEBUG_LOG body redaction on a hosted server', () => {
+      const SENTINEL = 'co-parent-private-message-body';
+      let saved: { debug?: string; dataDir?: string };
+      beforeEach(() => {
+        saved = { debug: process.env.OFW_DEBUG_LOG, dataDir: process.env.MCP_DATA_DIR };
+        process.env.OFW_DEBUG_LOG = '1';
+      });
+      afterEach(() => {
+        if (saved.debug === undefined) delete process.env.OFW_DEBUG_LOG;
+        else process.env.OFW_DEBUG_LOG = saved.debug;
+        if (saved.dataDir === undefined) delete process.env.MCP_DATA_DIR;
+        else process.env.MCP_DATA_DIR = saved.dataDir;
+      });
+
+      async function debugLines(): Promise<string[]> {
+        const errSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+        mockFetch([LOGIN_INIT, LOGIN_SUCCESS, { status: 200, body: { text: SENTINEL } }]);
+        const client = new OFWClient();
+        await client.request('POST', '/pub/v3/messages', { body: SENTINEL });
+        return errSpy.mock.calls.map((c) => String(c[0]));
+      }
+
+      it('logs request and response bodies in full locally', async () => {
+        delete process.env.MCP_DATA_DIR;
+        const lines = await debugLines();
+        expect(lines.some((l) => l.includes('response body:') && l.includes(SENTINEL))).toBe(true);
+        expect(lines.some((l) => l.includes('body:') && !l.includes('response') && l.includes(SENTINEL))).toBe(true);
+      });
+
+      it('elides request and response bodies when hosted (MCP_DATA_DIR set)', async () => {
+        process.env.MCP_DATA_DIR = '/data';
+        const lines = await debugLines();
+        expect(lines.some((l) => l.includes(SENTINEL))).toBe(false);
+        expect(lines.some((l) => l.includes('response body:') && l.includes('elided'))).toBe(true);
+        expect(lines.some((l) => l.includes('→ POST'))).toBe(true);
+      });
+    });
+
     it('logs non-abort fetch errors via OFW_DEBUG_LOG when enabled', async () => {
       const originalDebug = process.env.OFW_DEBUG_LOG;
       process.env.OFW_DEBUG_LOG = '1';

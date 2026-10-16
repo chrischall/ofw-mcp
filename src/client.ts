@@ -35,10 +35,19 @@ export interface BinaryResponse {
 }
 
 // Set OFW_DEBUG_LOG=1 (or true/yes/on) to log every OFW request/response to
-// stderr. Authorization is redacted. Bodies are logged in full — set this
-// only when debugging, never in normal use.
+// stderr. Authorization is redacted. Locally, bodies are logged in full — set
+// this only when debugging, never in normal use.
 function debugLogEnabled(): boolean {
   return parseBoolEnv('OFW_DEBUG_LOG');
+}
+
+// On a hosted server (mcp-host injects MCP_DATA_DIR) stderr is captured by the
+// host's log pipeline, which the operator can read — so request and response
+// bodies (message text, drafts, expense ledgers) are replaced by their size.
+// Locally stderr is the user's own terminal and bodies stay visible.
+function debugBody(text: string): string {
+  if (process.env.MCP_DATA_DIR) return `<${text.length} chars, elided on a hosted server>`;
+  return text;
 }
 
 // Per-request timeout. Overridable via OFW_REQUEST_TIMEOUT_MS. The default
@@ -199,7 +208,7 @@ export class OFWClient {
     return this.fetchAuthed(method, path, body, 'application/json', async (response) => {
       const text = await response.text();
       if (debugLogEnabled()) {
-        console.error(`[ofw-debug] response body: ${text || '<empty>'}`);
+        console.error(`[ofw-debug] response body: ${text ? debugBody(text) : '<empty>'}`);
       }
       return (text ? JSON.parse(text) : null) as T;
     });
@@ -301,7 +310,7 @@ export class OFWClient {
         ? '<none>'
         : isFormData
           ? `<FormData entries=${Array.from((body as FormData).keys()).join(',')}>`
-          : JSON.stringify(body);
+          : debugBody(JSON.stringify(body));
       console.error(`[ofw-debug] → ${method} ${url}${isRetry ? ' (retry)' : ''}`);
       // redactSecrets scrubs the Bearer token (and any other secret shapes)
       // from the serialized header map — shared fleet redaction, never bespoke.

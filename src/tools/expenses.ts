@@ -7,6 +7,7 @@ import { CONFIRM_NOTE, confirmTokenParam, confirmWrite, stateRevision } from './
 import { readUpstreamPaging } from './pagination.js';
 import { getExpenseUploadOnly, getWriteMode } from '../config.js';
 import { parseLenient } from '@chrischall/mcp-utils';
+import { RECEIPT_HOST_SUFFIX } from '../protocol.js';
 
 const UploadedExpenseFileSchema = z.looseObject({
   fileId: z.number(),
@@ -38,7 +39,7 @@ function assertReceiptUrl(url: URL): void {
   if (url.protocol !== 'https:') {
     throw new Error('Remote expense receipt URLs must use HTTPS.');
   }
-  if (!url.hostname.toLowerCase().endsWith('.oaiusercontent.com')) {
+  if (!url.hostname.toLowerCase().endsWith(RECEIPT_HOST_SUFFIX)) {
     throw new Error('Remote expense receipt URLs must be signed oaiusercontent.com file URLs.');
   }
 }

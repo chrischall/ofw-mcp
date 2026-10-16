@@ -293,7 +293,9 @@ Calendar events sit between the two message tiers: they have no draft stage (a c
 
 ### Egress allowlist
 
-Every outbound request passes its constructed URL through a host check before `fetch` — the server refuses to contact any host other than `ofw.ourfamilywizard.com`. Today it always passes, and that is the point: it makes "this server only ever talks to OFW" a structural invariant rather than a code-review promise, so a later refactor or a compromised dependency that pointed a request elsewhere throws instead of carrying your bearer token or messages off-host. It is a pre-flight check on the URL we build, not a redirect-following egress filter.
+Every request that carries your OFW token or login passes its constructed URL through a host check before `fetch` — the server refuses to send them to any host other than `ofw.ourfamilywizard.com`. Today it always passes, and that is the point: it makes "the credential only ever goes to OFW" a structural invariant rather than a code-review promise, so a later refactor or a compromised dependency that pointed a request elsewhere throws instead of carrying your bearer token or messages off-host. It is a pre-flight check on the URL we build, not a redirect-following egress filter.
+
+The one other host the server contacts is `*.oaiusercontent.com`, and only for `ofw_upload_expense_pdf`'s `url` mode: it downloads the receipt PDF from that signed file URL with no OFW credential attached, re-checking every redirect hop against the same suffix, capping the size and requiring a real PDF. The hosted registration's egress allowlist (`mint.yaml`) names exactly these two hosts.
 
 ## Troubleshooting
 
@@ -317,7 +319,7 @@ Every outbound request passes its constructed URL through a host check before `f
 - They are passed to the server as environment variables and never logged
 - The server authenticates with OFW using the same login flow as the web app
 - Use a strong, unique OFW password
-- Outbound requests are host-allowlisted to `ofw.ourfamilywizard.com` (see [Egress allowlist](#egress-allowlist))
+- Requests carrying your OFW credential are host-allowlisted to `ofw.ourfamilywizard.com`; the only other host contacted is the receipt-download host for `ofw_upload_expense_pdf`'s `url` mode (see [Egress allowlist](#egress-allowlist))
 
 ### Local data, and how to remove it
 
@@ -338,6 +340,8 @@ rm -f  ~/.ofw-mcp/session.json # or your OFW_SESSION_FILE
 ```
 
 The next start rebuilds the cache from OurFamilyWizard with `ofw_sync_messages`. A directory you pointed `OFW_ATTACHMENTS_DIR` at yourself keeps its own permissions (it may be shared on purpose); only what the server creates, and the default `~/Downloads/ofw-mcp`, are locked down.
+
+**On a hosted connector (mcp-host)** the same data lives in the registration's persistent data directory instead of on your machine: the message cache under `$HOME/.cache/ofw-mcp/`, the session token at `$MCP_DATA_DIR/.ofw-mcp/session.json`, the browser-bridge identity under `$HOME/.fetchproxy/identity/`, and spent confirm-token nonces under `$MCP_DATA_DIR/.mcp-confirm/`. Downloads are returned inline and never written to disk. The commands above do not reach it — how long that directory is kept, and whether disconnecting or deleting the registration removes it, is the host's retention policy, not this server's.
 
 ## Development
 

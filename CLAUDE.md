@@ -51,7 +51,7 @@ whole suite, so no test can reach the developer's real `~/.ofw-mcp`.
 ```
 src/
   index.ts          MCP server entry — SQLite-warning shim, then runMcp() from @chrischall/mcp-utils (builds McpServer, applies registrars with client as deps, prints banner, wires shutdown + stdio transport)
-  protocol.ts       Wire-level constants (BASE_URL, OFW_PROTOCOL_HEADERS, token TTL) + assertOfwUrl() egress allowlist. Leaf module to break the client→auth→auth-password import cycle
+  protocol.ts       Wire-level constants (BASE_URL, OFW_PROTOCOL_HEADERS, token TTL) + assertOfwUrl() egress allowlist + RECEIPT_HOST_SUFFIX (the receipt-download host, also in mint.yaml egress). Leaf module to break the client→auth→auth-password import cycle
   client.ts         OFWClient (Bearer token, 401/429 retry, JSON + binary; a CDN/WAF refusal page throws EdgeBlockedError, never a re-login or 429 replay). Delegates auth to ./auth.ts
   auth.ts           resolveAuth(): three-path priority (env vars → fetchproxy fallback → error). Template for sibling MCPs
   auth-password.ts  loginWithPassword(): legacy OFW Spring Security form login (kept as own module so auth.ts can mock it cleanly)
@@ -98,7 +98,7 @@ OFW_SESSION_FILE          Optional. Where that session cache lives (0600 file, d
 OFW_ATTACHMENTS_DIR       Optional. Where ofw_download_attachment writes (default ~/Downloads/ofw-mcp). Every disk write is confined to it: a saveTo outside it (after resolving symlinks) is refused, and an existing file is replaced only with force:true
 OFW_UPLOAD_DIR            Optional. The only directory ofw_upload_attachment may read from (default: OFW_ATTACHMENTS_DIR). Paths outside it after resolving symlinks, hidden files/dirs, and files over 25 MiB are refused — an upload discloses the file to OFW, so an injected "upload ~/.ssh/…" must be impossible
 OFW_INLINE_ATTACHMENTS    Optional. "1|true|yes|on" → return attachments as MCP content blocks by default
-OFW_DEBUG_LOG             Optional. "1|true|yes|on" → log every OFW request/response to stderr (Authorization redacted). Diagnostic only.
+OFW_DEBUG_LOG             Optional. "1|true|yes|on" → log every OFW request/response to stderr (Authorization redacted; bodies elided to their size when MCP_DATA_DIR is set, i.e. hosted). Diagnostic only.
 OFW_FRESHNESS_TTL_SECONDS Optional. How long a verified-against-OFW folder stays labelled `fresh` in read tools' `freshness` block (default 300). Unusable values fall back to the default — a typo must never widen the window in which stale data reads as current.
 OFW_WRITE_MODE            Optional. "none" = no write tools registered; "drafts" = draft-level writes only (ofw_save_draft, ofw_delete_draft, ofw_upload_attachment with shareClass PRIVATE only, since SHARED is co-parent-visible at once — never send or calendar/expense/journal writes); "all" = everything (default). Unrecognized values fail closed to "none". Structural gate: gated tools are not registered at all, so no host setting or injected instruction can invoke them.
 OFW_EXPENSE_ONLY          Optional. true = register only healthcheck + expense tools; profile/dashboard, message, calendar, and journal registrars are omitted entirely. Invalid non-empty values fail closed to true.

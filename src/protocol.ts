@@ -20,14 +20,25 @@ export const OFW_TOKEN_TTL_MS = 6 * 60 * 60 * 1000;
 // long-running request doesn't get a stale token mid-flight.
 export const OFW_TOKEN_EXPIRY_SKEW_MS = 5 * 60 * 1000;
 
-// The only host this server is ever allowed to contact. Derived from BASE_URL
-// so the two cannot drift.
+// The only host the authenticated API path is ever allowed to contact.
+// Derived from BASE_URL so the two cannot drift.
 const ALLOWED_HOST = new URL(BASE_URL).host;
 
 /**
- * Enforced egress allowlist: every outbound request passes its
- * fully-constructed URL through here before `fetch` (API calls in client.ts,
- * the form login in auth-password.ts).
+ * The one OTHER host family this server fetches: signed `*.oaiusercontent.com`
+ * file URLs that `ofw_upload_expense_pdf` downloads a receipt from (its `url`
+ * mode). That fetch carries no OFW credential and is checked per redirect hop
+ * by `assertReceiptUrl` in tools/expenses.ts, not by `assertOfwUrl`. mint.yaml's
+ * hosted egress allowlist names exactly these two hosts — tests pin it.
+ */
+export const RECEIPT_HOST_SUFFIX = '.oaiusercontent.com';
+
+/**
+ * Enforced egress allowlist for every request that carries the OFW bearer
+ * token or a login: its fully-constructed URL passes through here before
+ * `fetch` (API calls in client.ts, the form login in auth-password.ts). The
+ * credential-free remote-receipt download is the one exception, held to
+ * `RECEIPT_HOST_SUFFIX` instead.
  *
  * Today this always passes, and that is the point. Every URL is
  * `${BASE_URL}${path}` with a path that begins with '/', so no id or query
@@ -35,9 +46,9 @@ const ALLOWED_HOST = new URL(BASE_URL).host;
  * the authority component when a '/' already precedes it. The check exists so
  * that stays true after a future refactor: a code change (or a compromised
  * dependency) that pointed `fetch` somewhere else would throw here instead of
- * carrying the bearer token or a message body off-host. It makes "this server
- * only ever talks to OFW" a structural invariant rather than a code-review
- * promise.
+ * carrying the bearer token or a message body off-host. It makes "the
+ * credential only ever goes to OFW" a structural invariant rather than a
+ * code-review promise.
  *
  * Scope, stated honestly: this is a PRE-FLIGHT check on the URL we construct.
  * It does not follow redirects, so it is not a complete egress control — an

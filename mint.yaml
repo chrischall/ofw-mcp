@@ -107,7 +107,8 @@ env:
     help: >-
       Set to 1 to write verbose request/response diagnostics to stderr. Off by
       default; useful when a read is failing and you need to see the upstream
-      exchange.
+      exchange. On a hosted server only method, path, status and timing are
+      logged — request and response bodies are replaced by their size.
   - name: OFW_AUTO_REFRESH
     required: false
     help: >-
@@ -174,3 +175,7 @@ egress:
     # Only hosts the SERVER process actually fetches. Hosts that appear
     # solely in a URL this server BUILDS and returns are excluded.
     - ofw.ourfamilywizard.com
+    # ofw_upload_expense_pdf `url` mode downloads a receipt from a signed
+    # file URL (no OFW credential is sent there; every redirect hop is
+    # re-checked against this suffix in src/tools/expenses.ts).
+    - "*.oaiusercontent.com"
