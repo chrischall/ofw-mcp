@@ -32,9 +32,11 @@ changelog:
     # `enhancement` and `bug` only: `feature`/`fix` were aliases for them and
     # existed in 2 of 81 repos, so the categories they fed matched almost
     # nothing. Two names for one meaning is a choice point with no benefit,
-    # and a first-party dependency bump belongs here under `enhancement`/`bug`
-    # rather than under Dependencies, which is for third-party bumps that ship
-    # nothing.
+    # and a first-party RUNTIME dependency bump belongs here under
+    # `enhancement`/`bug` rather than under Dependencies, which is for
+    # third-party bumps; a first-party devDependency bump ships nothing and is
+    # `chore(deps-dev)` (docs/fleet-conventions.md, "First-party dependency
+    # bumps").
     - title: Features
       labels:
         - enhancement
