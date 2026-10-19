@@ -4,6 +4,15 @@ slug: ofw
 summary: >-
   OurFamilyWizard co-parenting tools for Claude — messages, calendar,
   expenses, and journal
+examples:
+  - prompt: >-
+      Summarize the OurFamilyWizard messages from my co-parent this week and
+      list anything that needs a reply.
+    note: Reads your inbox; first-time reads mark a message viewed in OFW.
+  - prompt: >-
+      What's on our shared OFW calendar for the next two weeks?
+  - prompt: >-
+      How much do I owe and how much have I paid in OFW expenses?
 #
 # Hosting note (a comment, not user-facing summary text): this is a
 # BROWSER-BRIDGE MCP — it reaches its site through the user's signed-in
