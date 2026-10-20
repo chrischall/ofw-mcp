@@ -1,5 +1,18 @@
 # Changelog
 
+## [2.20.6](https://github.com/chrischall/ofw-mcp/compare/v2.20.5...v2.20.6) (2026-10-20)
+
+
+### Bug Fixes
+
+* **auth:** validate the cached session with mcp-utils isBearerTokens (mcp-utils ^3.1.0) ([#389](https://github.com/chrischall/ofw-mcp/issues/389)) ([9a90cbe](https://github.com/chrischall/ofw-mcp/commit/9a90cbe5a66ad2e0e312e848e7e8fa7e9b6eedfa))
+* **deps:** bump dotenv from 18.0.6 to 18.0.8 in the production-dependencies group ([#385](https://github.com/chrischall/ofw-mcp/issues/385)) ([e5b4684](https://github.com/chrischall/ofw-mcp/commit/e5b4684318fcb3df7b2b6c05a6adbdd0f9976c10))
+
+
+### Documentation
+
+* **mint:** add sample prompts for the public catalog ([#388](https://github.com/chrischall/ofw-mcp/issues/388)) ([b271f51](https://github.com/chrischall/ofw-mcp/commit/b271f51d927b85000f3cb0f45510c8b0b1882f8b))
+
 ## [2.20.5](https://github.com/chrischall/ofw-mcp/compare/v2.20.4...v2.20.5) (2026-10-16)
 
 
