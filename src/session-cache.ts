@@ -1,5 +1,6 @@
 import {
   createFileStatePersistence,
+  isBearerTokens,
   resolveStateFile,
   type BearerTokens,
   type SyncStatePersistence,
@@ -24,18 +25,6 @@ export function sessionCachePath(env: NodeJS.ProcessEnv = process.env): string {
     subdir: '.ofw-mcp',
     fileName: 'session.json',
   });
-}
-
-/** Only a token pair is ever stored — never the username or password. */
-function isTokens(raw: unknown): raw is BearerTokens {
-  if (raw === null || typeof raw !== 'object') return false;
-  const t = raw as Partial<BearerTokens>;
-  return (
-    typeof t.accessToken === 'string' &&
-    t.accessToken !== '' &&
-    typeof t.expiresAt === 'number' &&
-    (t.refreshToken === undefined || typeof t.refreshToken === 'string')
-  );
 }
 
 /** Options for {@link createSessionCache}. */
@@ -78,7 +67,7 @@ export function createSessionCache(
     // password may contain spaces, so a space-joined pair could collide with
     // a different pair by shifting the boundary between the two halves.
     boundTo: [username.trim().toLowerCase(), password].join('\u0000'),
-    validate: (raw) => (isTokens(raw) ? raw : null),
+    validate: (raw) => (isBearerTokens(raw) ? raw : null),
   });
 }
 
