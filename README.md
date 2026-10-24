@@ -154,6 +154,7 @@ Read-only tools run automatically. Writes that reach your co-parent or the court
 | `ofw_list_expense_categories` | Expense category ids and split metadata | Auto | any |
 | `ofw_upload_expense_pdf` | Upload a receipt PDF to My Files for an expense (SHARED — the co-parent sees it in My Files at once, even on a private expense) | Confirm (server) | `all` |
 | `ofw_create_expense` | Log a new expense; supports private entries and one receipt PDF | Confirm (server) | `all` |
+| `ofw_mark_expense_reimbursed` | Irreversibly record full remaining external reimbursement; no transfer or partial payment; unavailable in upload-only mode | Confirm (server) | `all` |
 | `ofw_update_expense` | Change an expense, e.g. publish a private one. Pass only the fields to change; it reads the expense first so the rest are kept | Confirm (server) | `all` |
 | `ofw_list_journal_entries` | Journal entries | Auto | any |
 | `ofw_create_journal_entry` | Create a journal entry | Confirm | `all` |
@@ -224,6 +225,53 @@ A cached read that comes back **empty** is shaped identically to a verified "not
 A false negative ("no, that was never sent") is more dangerous than a refusal, because it reads as a definitive answer. Non-empty results are never withheld — a stale cache that *did* find something is still evidence of presence, labelled with its age as before. Pass `autoRefresh: true` (or set `OFW_AUTO_REFRESH=true`) to have the tool sync and answer instead of refusing; a refresh that still cannot make the read verifiable refuses anyway.
 
 Every list read also carries an explicit **`complete`** boolean describing the *result set* — "this is every matching item on OurFamilyWizard as of `asOf`" — with a `completeNote` naming what is missing when it is false. Check it before stating a count.
+
+### Recording an external expense reimbursement
+
+`ofw_mark_expense_reimbursed` records money **already reimbursed outside OFW**. It
+never transfers money, calls `/payments`, or initiates a bank action. OFW warns
+that marking reimbursed **cannot be undone**. The tool is registered only in
+`OFW_WRITE_MODE=all`, including expense-only mode, but **never** in
+`OFW_EXPENSE_UPLOAD_ONLY=true`; that restricted roster is unchanged.
+
+Pass an expense id and `expectedRemainingAmount` in currency units, positive and
+exact to cents. For example, a synthetic expense totaling `96.99` with
+`totalOwed=48.50` and `leftToPay=48.50` needs
+`{ "expenseId": 81001, "expectedRemainingAmount": 48.50 }` — **not** `96.99` and
+not a partial amount. The first call previews the title, author/payer user ids,
+split/category, children, privacy, total, owed amount, remaining balance and
+current status. Verify the parties and that the external reimbursement actually
+happened, then explicitly approve the preview before returning its `confirmToken`
+with the same arguments (or approve the supported client's confirmation prompt).
+
+Only `OPEN`, `APPROVED`, or `PARTIAL` with `subStatus=NONE` and a positive balance
+are supported. Missing/malformed detail, unknown or pending status, inconsistent
+balances, id mismatch, or amount mismatch refuses without writing. A record
+already `PAID` with zero remaining balance returns `ALREADY_PAID` without a write,
+regardless of its payment method; this does not relabel an electronic payment.
+
+Confirmation binds the **entire detail record**. A fresh detail GET immediately
+before the write rejects any drift, including receipt or metadata edits. The
+only mutation is `PUT /pub/v2/expense/expenses/{id}/status` with
+`{ "status": "MARKED_REIMBURSED" }`. A subsequent detail GET must show `PAID`,
+`subStatus=NONE`, zero remaining balance, `paymentType="Marked reimbursed"`, and
+unchanged fields outside the expected status/balance transition before success
+is reported. Known derived balance-display fields may change normally; numeric
+purchase/owed totals and other protected fields must remain unchanged. The public
+web application's status request contract and the resulting status transition
+were manually accepted against the real provider with one user-authorized record.
+Automated tests remain mock-only and contain synthetic records. Unexpected
+backend changes outside the supported transition still fail conservatively
+rather than claim verification.
+
+These are best-effort preconditions, **not an atomic conditional update**: OFW
+exposes no conditional status-write contract here, so a concurrent edit after the
+last GET cannot be prevented. An ambiguous mutation failure (timeout/network/5xx)
+or failed/mismatched readback returns `EXPENSE_REIMBURSEMENT_UNCONFIRMED` with
+`mayHaveLanded=true`. **Do not automatically replay or roll back.** Inspect the
+expense in the Expenses log on ourfamilywizard.com and reconcile its status
+before any new attempt. Definitive OFW rejections remain errors. No live account
+or private family/financial data is used in the automated tests.
 
 ### Server-side confirmation (`MCP_CONFIRM_MODE`)
 

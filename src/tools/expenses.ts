@@ -8,6 +8,7 @@ import { readUpstreamPaging } from './pagination.js';
 import { getExpenseUploadOnly, getWriteMode } from '../config.js';
 import { parseLenient } from '@chrischall/mcp-utils';
 import { RECEIPT_HOST_SUFFIX } from '../protocol.js';
+import { registerExpenseReimbursementTool } from './expense-reimbursement.js';
 
 const UploadedExpenseFileSchema = z.looseObject({
   fileId: z.number(),
@@ -245,6 +246,7 @@ export function registerExpenseTools(
     ? 'the Expenses log on ourfamilywizard.com (ofw_list_expenses is not available in this deployment)'
     : 'ofw_list_expenses';
   const allowWrites = writeMode === 'all';
+  if (allowWrites && !uploadOnly) registerExpenseReimbursementTool(server, client);
   // The receipt is uploaded SHARED (the only share class OFW accepts in an
   // expense's fileIds), and a SHARED My Files entry is co-parent-visible at
   // once — so, like ofw_upload_attachment's SHARED path, it needs mode 'all'.

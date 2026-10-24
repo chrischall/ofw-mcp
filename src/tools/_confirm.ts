@@ -52,8 +52,10 @@ export interface ConfirmWriteOptions {
  * docs/CLIENT-BEHAVIOUR.md) gets the two-phase token flow governed by
  * `MCP_CONFIRM_MODE`: phase 1 performs no write and returns the preview plus a
  * `confirmToken`; only a repeat call with that token proceeds. The token is
- * bound to this tool, the target, its revision and the exact payload, is
- * single-use and expires (`MCP_CONFIRM_TTL_SECONDS`).
+ * bound to this tool/action, the target, its revision, exact payload, preview
+ * and caller arguments on BOTH rails. The fallback token is single-use and
+ * expires (`MCP_CONFIRM_TTL_SECONDS`); elicitation state uses the same TTL.
+ * Outstanding approvals minted before this binding change must be renewed.
  *
  * Call it on EVERY invocation with the freshly-built payload and a freshly
  * read revision — the caller's own re-read is what makes a stale token fail.
@@ -67,6 +69,17 @@ export function confirmWrite(
   ctx: ServerContext,
   opts: ConfirmWriteOptions,
 ): Promise<InputRequiredResult | CallToolResult | undefined> {
+  // mcp-utils binds elicitation acceptance to args, NOT subject(). Carry the
+  // effective approval state into both rails; caller args alone omit fields
+  // inherited from fresh reads. Strip the phase-2 token before nesting args
+  // (the helper only strips a top-level confirmToken).
+  const { confirmToken: _confirmToken, ...args } = opts.args as { confirmToken?: unknown };
+  const subject = {
+    target: opts.target,
+    ...(opts.revision !== undefined ? { revision: opts.revision } : {}),
+    payload: opts.payload,
+    preview: opts.preview,
+  };
   return requireConfirmationWithFallback(
     ctx,
     confirmationFromEnv({
@@ -78,14 +91,9 @@ export function confirmWrite(
       // One OFW account per process (OFW_USERNAME / the captured session), so
       // there is no principal to distinguish; mcp-utils 3 makes saying so explicit.
       account: undefined,
-      args: opts.args,
+      args: { tool: opts.tool, action: opts.action, args, ...subject },
       confirmToken: opts.confirmToken,
-      subject: () => ({
-        target: opts.target,
-        ...(opts.revision !== undefined ? { revision: opts.revision } : {}),
-        payload: opts.payload,
-        preview: opts.preview,
-      }),
+      subject: () => subject,
     }),
   );
 }

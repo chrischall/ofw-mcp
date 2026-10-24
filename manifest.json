@@ -134,7 +134,7 @@
     "ofw_expense_upload_only": {
       "type": "boolean",
       "title": "Expense upload-only mode",
-      "description": "Strict structural restriction: register only healthcheck, ofw_upload_expense_pdf, ofw_create_expense, and ofw_update_expense. Implies Expense-only mode and removes expense reads too.",
+      "description": "Strict structural restriction: register only healthcheck, ofw_upload_expense_pdf, ofw_create_expense, and ofw_update_expense. Implies Expense-only mode and removes expense reads and ofw_mark_expense_reimbursed too.",
       "required": false,
       "default": false
     },
@@ -315,6 +315,10 @@
     {
       "name": "ofw_update_expense",
       "description": "Change an existing expense, e.g. publish a private one; pass only the fields to change and the rest are kept (confirmed first)"
+    },
+    {
+      "name": "ofw_mark_expense_reimbursed",
+      "description": "Irreversibly record full remaining external reimbursement (confirmed first); no money transfer or partial payment"
     },
     {
       "name": "ofw_create_expense",

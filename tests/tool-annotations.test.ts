@@ -90,6 +90,7 @@ const EXPECTED: Record<string, Kind> = {
   // Always uploaded SHARED (co-parent-visible); no tool deletes it.
   ofw_upload_expense_pdf: 'destructive',
   ofw_update_expense: 'destructive',
+  ofw_mark_expense_reimbursed: 'destructive',
   ofw_create_expense: 'destructive',
   ofw_list_journal_entries: 'read',
   // Lands on the court-visible record; no tool edits or deletes a journal entry.

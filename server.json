@@ -73,7 +73,7 @@
         },
         {
           "name": "OFW_EXPENSE_UPLOAD_ONLY",
-          "description": "Set true for strict reimbursement upload mode: only healthcheck, ofw_upload_expense_pdf, ofw_create_expense, and ofw_update_expense register. Implies OFW_EXPENSE_ONLY.",
+          "description": "Set true for strict reimbursement upload mode: only healthcheck, ofw_upload_expense_pdf, ofw_create_expense, and ofw_update_expense register. Excludes ofw_mark_expense_reimbursed. Implies OFW_EXPENSE_ONLY.",
           "isRequired": false,
           "format": "string"
         },
