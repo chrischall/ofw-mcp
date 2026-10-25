@@ -44,6 +44,8 @@
         "OFW_CALENDAR_WRITES": "${user_config.ofw_calendar_writes}",
         "OFW_ALLOW_MARK_READ": "${user_config.ofw_allow_mark_read}",
         "OFW_FETCH_UNREAD_BODIES": "${user_config.ofw_fetch_unread_bodies}",
+        "OFW_READ_DAYS": "${user_config.ofw_read_days}",
+        "OFW_NO_READ_DAYS": "${user_config.ofw_no_read_days}",
         "OFW_EXPENSE_ONLY": "${user_config.ofw_expense_only}",
         "OFW_EXPENSE_UPLOAD_ONLY": "${user_config.ofw_expense_upload_only}",
         "OFW_CACHE_IDENTITY": "${user_config.ofw_cache_identity}",
@@ -123,6 +125,18 @@
       "description": "Whether a sync also downloads unread inbox bodies by default. Each one stamps a \"First Viewed\" time. Off by default; ignored when \"Allow marking messages read\" is off.",
       "required": false,
       "default": false
+    },
+    "ofw_read_days": {
+      "type": "string",
+      "title": "Message-reading days (allow list)",
+      "description": "Only read message content on these days, e.g. \"mon, thu\". Weekday names, YYYY-MM-DD dates, or YYYY-MM-DD..YYYY-MM-DD ranges, in your display time zone. On other days you still see that messages arrived (sender, date, subject), but bodies and attachments are withheld and nothing is marked read. Leave blank to read on any day.",
+      "required": false
+    },
+    "ofw_no_read_days": {
+      "type": "string",
+      "title": "No-reading days (deny list)",
+      "description": "Never read message content on these days (same format as the allow list). Wins over the allow list. Leave blank for none.",
+      "required": false
     },
     "ofw_expense_only": {
       "type": "boolean",

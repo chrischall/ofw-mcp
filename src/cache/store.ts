@@ -117,6 +117,9 @@ export interface ListMessagesOptions {
   since?: string;              // ISO date or datetime, inclusive
   until?: string;              // ISO date or datetime, exclusive
   q?: string;                  // substring match on subject and body (case-insensitive)
+  // Restrict `q` to the subject. Set on a no-read day (see read-days.ts): a
+  // body match would disclose what a message says without returning it.
+  qSubjectOnly?: boolean;
 }
 
 export type MessageFilter = Omit<ListMessagesOptions, 'page' | 'size' | 'sort'>;
@@ -383,8 +386,13 @@ function buildMessageFilter(opts: MessageFilter): { where: string; params: SqlPa
   }
   if (opts.q !== undefined && opts.q.length > 0) {
     const pattern = `%${opts.q}%`;
-    wheres.push('(subject LIKE ? OR body LIKE ?)');
-    params.push(pattern, pattern);
+    if (opts.qSubjectOnly) {
+      wheres.push('subject LIKE ?');
+      params.push(pattern);
+    } else {
+      wheres.push('(subject LIKE ? OR body LIKE ?)');
+      params.push(pattern, pattern);
+    }
   }
   return {
     where: wheres.length > 0 ? `WHERE ${wheres.join(' AND ')}` : '',

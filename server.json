@@ -54,6 +54,18 @@
           "format": "string"
         },
         {
+          "name": "OFW_READ_DAYS",
+          "description": "Allow list of days message content may be read, e.g. \"mon,thu\" (weekdays, YYYY-MM-DD, or YYYY-MM-DD..YYYY-MM-DD, in DISPLAY_TZ). Other days: subjects only, nothing marked read. Unset = every day.",
+          "isRequired": false,
+          "format": "string"
+        },
+        {
+          "name": "OFW_NO_READ_DAYS",
+          "description": "Deny list of days message content may NOT be read (same format as OFW_READ_DAYS; wins over it). Unset = none.",
+          "isRequired": false,
+          "format": "string"
+        },
+        {
           "name": "OFW_SESSION_CACHE",
           "description": "Set to false to disable the on-disk session cache and re-authenticate on every process start. Defaults to enabled.",
           "isRequired": false,

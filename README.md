@@ -287,6 +287,17 @@ By default nothing changes: reads behave exactly as they always have. Two contro
 
 `OFW_FETCH_UNREAD_BODIES=true` flips `ofw_sync_messages` to fetch unread bodies by default (off unless set) — useful where read receipts are routine. It is capped by `OFW_ALLOW_MARK_READ`.
 
+#### Message-reading days (`OFW_READ_DAYS` / `OFW_NO_READ_DAYS`)
+
+If you may only read OFW messages on certain days, list them. On every other day you can still see **that** a message arrived — sender, date, subject — but bodies and attachments are withheld and nothing is marked read on OurFamilyWizard.
+
+```env
+OFW_READ_DAYS=mon,thu                       # allow list: read only on these days
+OFW_NO_READ_DAYS=2026-12-24..2026-12-26     # deny list: never on these (wins over the allow list)
+```
+
+Tokens are weekday names (`mon`, `Monday`, …), dates (`2026-12-25`) or inclusive ranges (`2026-12-24..2026-12-31`), separated by commas or spaces, and "today" is decided in `DISPLAY_TZ`. Unset means every day is a reading day. A token that cannot be parsed fails closed (content withheld every day, warning on stderr). Like `OFW_ALLOW_MARK_READ`, no per-call argument can override it. Refusals come back as `READING_BLOCKED` with `nextReadableDay`. Drafts stay readable, and sending is not affected.
+
 #### Calendar opt-in (`OFW_CALENDAR_WRITES`)
 
 Calendar events sit between the two message tiers: they have no draft stage (a created event is immediately visible on the shared record), but unlike a sent message they are reversible — an event can be edited or deleted afterward. If you run in `drafts` mode but are comfortable with direct calendar writes, set `OFW_CALENDAR_WRITES=true` to additionally register `ofw_create_event`, `ofw_update_event`, and `ofw_delete_event`. The flag is redundant in `all` mode and never overrides `none`.

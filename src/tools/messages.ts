@@ -28,6 +28,7 @@ import { pageState } from './pagination.js';
 import { MESSAGE_VIEWS, viewDrafts, viewMessages, viewOne } from './project.js';
 import { resolveView, viewParam } from '@chrischall/mcp-utils';
 import { nowNaiveWallClock, toNaiveWallClock } from '../timestamps.js';
+import { readingBlockedToday } from '../read-days.js';
 
 // Schemas for the load-bearing fields of each /pub/v3 response this file
 // reads (issue #83). Loose: unknown keys pass through into cached listData.
@@ -250,6 +251,30 @@ function unverifiedEmptyResponse(input: {
 }
 
 /**
+ * Whether ANY tool may mark a message read right now: the OFW_ALLOW_MARK_READ
+ * ceiling, AND today being a reading day (OFW_READ_DAYS / OFW_NO_READ_DAYS).
+ * Both are deployment settings a per-call argument cannot raise.
+ */
+function markReadPermitted(): boolean {
+  return getAllowMarkRead() && readingBlockedToday() === null;
+}
+
+/**
+ * A message row with its content removed, for a no-read day. The body goes,
+ * and so do the copies of it OFW's list payload carries (`preview`, `body`) —
+ * otherwise `view:"full"` would hand back the first lines anyway. Everything
+ * that says a message ARRIVED (subject, sender, dates, read state) stays.
+ */
+function withholdBody<T extends MessageRow>(row: T): T & { bodyWithheld: true } {
+  let listData = row.listData;
+  if (listData !== null && typeof listData === 'object' && !Array.isArray(listData)) {
+    const { preview: _preview, body: _body, ...rest } = listData as Record<string, unknown>;
+    listData = rest;
+  }
+  return { ...row, body: null, listData, bodyWithheld: true };
+}
+
+/**
  * Decide whether fetching this message's body from OFW would stamp the record,
  * and refuse when the caller (or the deployment) has opted out of that.
  *
@@ -410,7 +435,10 @@ export function registerMessageTools(
 
     const cache = cacheProvider();
     const folders: FolderName[] = folder === undefined ? ['inbox', 'sent'] : [folder];
-    const filter = { folder, since: bounds.since, until: bounds.until, q: args.q };
+    // On a no-read day `q` matches subjects only: a body match would tell the
+    // caller what a message says without ever returning it.
+    const blocked = readingBlockedToday();
+    const filter = { folder, since: bounds.since, until: bounds.until, q: args.q, qSubjectOnly: blocked !== null };
 
     const { value, refreshed, unverifiedEmpty } = await guardedCacheRead({
       client,
@@ -492,19 +520,24 @@ export function registerMessageTools(
     if (refreshed) {
       payload.autoRefreshed = true;
     }
+    if (blocked !== null) {
+      // Ahead of `messages`, for the same reason the paging state is: a reader
+      // that stops early must still learn that every body below is withheld.
+      payload.readingBlocked = blocked;
+    }
     payload.freshness = freshness;
 
     // Projected HERE, at the last possible moment, so `returned`, `complete`
     // and every note above are computed from the rows themselves — a
     // projection must never be able to change what the response claims about
     // its own contents.
-    payload.messages = viewMessages(view, messages);
+    payload.messages = viewMessages(view, blocked === null ? messages : messages.map(withholdBody));
 
     return jsonResponse(payload);
   });
 
   server.registerTool('ofw_get_message', {
-    description: 'Get a single OurFamilyWizard message OR draft by ID. Reads from local cache when available; otherwise fetches from OFW — and for an UNREAD INBOX message that fetch marks it read and stamps a "First Viewed" time the co-parent can see, which is part of the record and cannot be undone. Pass allowMarkRead:false to refuse such a fetch instead (cached bodies, sent messages and already-read messages are unaffected, because none of them stamp anything). For ids that match a draft (in the drafts cache), the response carries folder="drafts" and the body/subject/recipients reflect the drafts cache (which ofw_sync_messages keeps fresh) — drafts have no `fromUser`, and `sentAt`/`fetchedBodyAt` mirror the draft\'s `modifiedAt`. For inbox/sent messages, folder is "inbox" or "sent" as before.',
+    description: 'Get a single OurFamilyWizard message OR draft by ID. Reads from local cache when available; otherwise fetches from OFW — and for an UNREAD INBOX message that fetch marks it read and stamps a "First Viewed" time the co-parent can see, which is part of the record and cannot be undone. Pass allowMarkRead:false to refuse such a fetch instead (cached bodies, sent messages and already-read messages are unaffected, because none of them stamp anything). For ids that match a draft (in the drafts cache), the response carries folder="drafts" and the body/subject/recipients reflect the drafts cache (which ofw_sync_messages keeps fresh) — drafts have no `fromUser`, and `sentAt`/`fetchedBodyAt` mirror the draft\'s `modifiedAt`. For inbox/sent messages, folder is "inbox" or "sent" as before. On a server-configured no-read day (OFW_READ_DAYS / OFW_NO_READ_DAYS) inbox/sent bodies are withheld (body:null, bodyWithheld:true, readingBlocked says when reading resumes) and OFW is never contacted.',
     annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
     inputSchema: z.object({
       messageId: z.string().describe('Message ID (also accepts draft IDs — drafts are routed via the drafts cache)'),
@@ -571,6 +604,28 @@ export function registerMessageTools(
     }
 
     const cached = await cache.getMessage(id);
+
+    // No-read day: answer from the cache with the body withheld, and never
+    // touch OFW — any detail GET here could mark an unread message read.
+    const blocked = readingBlockedToday();
+    if (blocked !== null) {
+      if (cached === null) {
+        return jsonErrorResponse({
+          ...blocked,
+          messageId: id,
+          hint: 'This id is not in the cache. Run ofw_sync_messages (it walks list pages, not bodies, and marks nothing read) to see its subject, sender and date.',
+        });
+      }
+      const attachments = await cache.listAttachmentsForMessage(id);
+      const freshness = await buildFreshness(cache, { source: 'cache', folders: [cached.folder] });
+      return jsonResponse({
+        readingBlocked: blocked,
+        ...viewOne(view, withholdBody(withReadState(cached))),
+        attachments,
+        freshness,
+      });
+    }
+
     if (cached && cached.body !== null) {
       let row = cached;
       // Refresh view status for a sent message we still believe is unviewed:
@@ -1721,6 +1776,28 @@ export function registerMessageTools(
     const forcedInline = inline && !requestedInline;
     const deliveryOptions = { extract: args.extract, maxChars: args.maxChars, parts: args.parts };
     let cached = await cache.getAttachment(fileId);
+
+    // No-read day: an attachment is message content. Only a file the cache
+    // knows belongs to the account holder's own DRAFTS is released; anything
+    // linked to an inbox/sent message — or that the cache cannot place at all
+    // — is refused before any request is made.
+    const blocked = readingBlockedToday();
+    if (blocked !== null) {
+      const linked = (cached?.messageIds ?? []).filter((mid) => mid !== 0);
+      let draftOnly = linked.length > 0;
+      for (const mid of linked) {
+        if ((await cache.getDraft(mid)) === null) draftOnly = false;
+      }
+      if (!draftOnly) {
+        return jsonErrorResponse({
+          ...blocked,
+          fileId,
+          ...(cached ? { fileName: cached.fileName } : {}),
+          hint: 'Attachments on received or sent messages (or files this cache cannot place) are withheld on a no-read day. Download it on the next reading day.',
+        });
+      }
+    }
+
     if (!cached) {
       // Not in cache. Fetch metadata and store under the messageId=0
       // sentinel — gets re-linked if a message later references this file.
@@ -1838,7 +1915,7 @@ export function registerMessageTools(
       // Default from OFW_FETCH_UNREAD_BODIES (false unless set), and capped by
       // the OFW_ALLOW_MARK_READ ceiling — fetching those bodies is exactly what
       // stamps a First Viewed time on every unread message it touches.
-      fetchUnreadBodies: getAllowMarkRead() && (args.fetchUnreadBodies ?? getFetchUnreadBodies()),
+      fetchUnreadBodies: markReadPermitted() && (args.fetchUnreadBodies ?? getFetchUnreadBodies()),
       deep: args.deep,
       maxRequests: args.maxRequests ?? getSyncMaxRequests(),
     }, cache);
@@ -1866,7 +1943,7 @@ export function registerMessageTools(
     // The server-wide ceiling wins: a per-call allowMarkRead:true (or an
     // instruction injected into one) must not be able to stamp the record on a
     // deployment configured to never do so.
-    const allowMarkRead = getAllowMarkRead() && (args.allowMarkRead ?? false);
+    const allowMarkRead = markReadPermitted() && (args.allowMarkRead ?? false);
     const requestedIds = args.messageIds ?? [];
     const ids = requestedIds.slice(0, MAX_FRESHNESS_IDS);
     // Folders default to "all three" only when the caller asked about nothing
@@ -1962,7 +2039,7 @@ export function registerMessageTools(
     }),
   }, async (args) => {
     const cache = cacheProvider();
-    const allowMarkRead = getAllowMarkRead() && (args.allowMarkRead ?? false);
+    const allowMarkRead = markReadPermitted() && (args.allowMarkRead ?? false);
     const requestedIds = args.ids ?? [];
     const requestedKeys = args.draftKeys ?? [];
     // A bare ofw_status() is meant to be the "here is where everything stands"

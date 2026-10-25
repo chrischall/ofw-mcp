@@ -84,6 +84,18 @@ env:
       Default "false". Whether ofw_sync_messages fetches unread inbox bodies by
       default (each fetch stamps a First Viewed time). Capped by
       OFW_ALLOW_MARK_READ.
+  - name: OFW_READ_DAYS
+    required: false
+    help: >-
+      Allow list of days message content may be read, e.g. "mon,thu" (weekday
+      names, YYYY-MM-DD, or YYYY-MM-DD..YYYY-MM-DD, in DISPLAY_TZ). On other
+      days senders, dates and subjects stay visible, but bodies and attachments
+      are withheld and nothing is marked read. Unset = every day.
+  - name: OFW_NO_READ_DAYS
+    required: false
+    help: >-
+      Deny list of days message content may NOT be read (same format as
+      OFW_READ_DAYS; wins over it). Unset = none.
   - name: OFW_INLINE_ATTACHMENTS
     required: false
     help: >-

@@ -6795,3 +6795,149 @@ describe('write-tool responses go through the timestamp seam (QUAL-2)', () => {
     warn.mockRestore();
   });
 });
+
+describe('no-read days (OFW_READ_DAYS / OFW_NO_READ_DAYS)', () => {
+  const KEYS = ['OFW_READ_DAYS', 'OFW_NO_READ_DAYS'] as const;
+  const prev: Record<string, string | undefined> = {};
+  beforeEach(() => {
+    for (const k of KEYS) { prev[k] = process.env[k]; delete process.env[k]; }
+    // Every day is a no-read day, so these tests do not depend on the clock.
+    process.env.OFW_NO_READ_DAYS = 'sun mon tue wed thu fri sat';
+  });
+  afterEach(() => {
+    for (const k of KEYS) {
+      if (prev[k] === undefined) delete process.env[k];
+      else process.env[k] = prev[k];
+    }
+  });
+
+  const inbox = (id: number, overrides: Partial<MessageRow> = {}) => sampleMessageRow({
+    id, folder: 'inbox', subject: `Subject ${id}`, body: 'secret body',
+    listData: { id, preview: 'secret preview', body: 'secret', author: { name: 'Alice' } },
+    ...overrides,
+  });
+
+  it('ofw_list_messages keeps subjects and senders but withholds bodies and previews', async () => {
+    upsertMessage(inbox(900));
+    upsertMessage(inbox(901, { listData: null }));
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request');
+    setup(client);
+
+    for (const view of ['compact', 'full']) {
+      const text = (await handlers.get('ofw_list_messages')!({ view })).content[0].text;
+      expect(text).not.toContain('secret');
+      const parsed = JSON.parse(text);
+      expect(parsed.readingBlocked.error).toBe('READING_BLOCKED');
+      // Announced before the data, like the paging state.
+      expect(text.indexOf('"readingBlocked"')).toBeLessThan(text.indexOf('"messages"'));
+      expect(parsed.messages.map((m: { subject: string }) => m.subject).sort()).toEqual(['Subject 900', 'Subject 901']);
+      for (const m of parsed.messages) expect(m).toMatchObject({ body: null, bodyWithheld: true });
+    }
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('ofw_list_messages q matches subjects only, so a body match cannot leak content', async () => {
+    upsertMessage(inbox(902, { subject: 'Pickup time', body: 'the plan changed' }));
+    setup(new OFWClient());
+
+    const bySubject = JSON.parse((await handlers.get('ofw_list_messages')!({ q: 'pickup' })).content[0].text);
+    expect(bySubject.messages.map((m: { id: number }) => m.id)).toEqual([902]);
+
+    const byBody = await handlers.get('ofw_list_messages')!({ q: 'plan changed' });
+    // Not a hit — and from an unverified cache, not reported as an absence either.
+    expect(JSON.parse(byBody.content[0].text).messages).toBeUndefined();
+  });
+
+  it('ofw_list_messages is untouched on a reading day', async () => {
+    process.env.OFW_NO_READ_DAYS = '2000-01-01';
+    upsertMessage(inbox(903));
+    setup(new OFWClient());
+    const parsed = JSON.parse((await handlers.get('ofw_list_messages')!({})).content[0].text);
+    expect(parsed.readingBlocked).toBeUndefined();
+    expect(parsed.messages[0].body).toBe('secret body');
+  });
+
+  it('ofw_get_message returns a cached message without its body and never contacts OFW', async () => {
+    upsertMessage(inbox(904, { body: null, fetchedBodyAt: null, recipients: [{ userId: 1, name: 'Me', viewedAt: null }] }));
+    upsertAttachmentForMessage({ fileId: 77, fileName: 'a.pdf', label: 'a', mimeType: 'application/pdf', sizeBytes: 1, metadata: {}, messageId: 904 });
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request');
+    setup(client);
+
+    const text = (await handlers.get('ofw_get_message')!({ messageId: '904', allowMarkRead: true })).content[0].text;
+    expect(text).not.toContain('secret');
+    const parsed = JSON.parse(text);
+    expect(parsed).toMatchObject({ id: 904, subject: 'Subject 904', body: null, bodyWithheld: true, read: false });
+    expect(parsed.readingBlocked.error).toBe('READING_BLOCKED');
+    expect(parsed.attachments.map((a: { fileId: number }) => a.fileId)).toEqual([77]);
+    // The whole point: an unread message stays unread.
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('ofw_get_message refuses an uncached id rather than fetching it', async () => {
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request');
+    setup(client);
+    const result = await handlers.get('ofw_get_message')!({ messageId: '905' });
+    expect(result.isError).toBe(true);
+    expect(JSON.parse(result.content[0].text)).toMatchObject({ error: 'READING_BLOCKED', messageId: 905 });
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('ofw_get_message still returns drafts — they are the account holder\'s own words', async () => {
+    upsertDraft({ id: 906, subject: 'D', body: 'my draft', recipients: [], replyToId: null, modifiedAt: '2026-05-04T12:00:00Z', listData: {} });
+    setup(new OFWClient());
+    const parsed = JSON.parse((await handlers.get('ofw_get_message')!({ messageId: '906' })).content[0].text);
+    expect(parsed.body).toBe('my draft');
+  });
+
+  it('ofw_download_attachment refuses message attachments and unplaceable files without a request', async () => {
+    upsertMessage(inbox(907));
+    upsertAttachmentForMessage({ fileId: 78, fileName: 'schedule.xlsx', label: 's', mimeType: 'text/plain', sizeBytes: 1, metadata: {}, messageId: 907 });
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request');
+    const bin = vi.spyOn(client, 'requestBinary');
+    setup(client);
+
+    const linked = await handlers.get('ofw_download_attachment')!({ fileId: 78, inline: true });
+    expect(linked.isError).toBe(true);
+    expect(JSON.parse(linked.content[0].text)).toMatchObject({ error: 'READING_BLOCKED', fileId: 78, fileName: 'schedule.xlsx' });
+
+    const unknown = await handlers.get('ofw_download_attachment')!({ fileId: 79, inline: true });
+    expect(unknown.isError).toBe(true);
+    expect(JSON.parse(unknown.content[0].text).fileName).toBeUndefined();
+
+    expect(spy).not.toHaveBeenCalled();
+    expect(bin).not.toHaveBeenCalled();
+  });
+
+  it('ofw_download_attachment still serves a file attached only to a draft', async () => {
+    upsertDraft({ id: 908, subject: 'D', body: 'b', recipients: [], replyToId: null, modifiedAt: '2026-05-04T12:00:00Z', listData: {} });
+    upsertAttachmentForMessage({ fileId: 80, fileName: 'mine.txt', label: 'm', mimeType: 'text/plain', sizeBytes: 2, metadata: {}, messageId: 908 });
+    const client = new OFWClient();
+    vi.spyOn(client, 'requestBinary').mockResolvedValue({ body: Buffer.from('hi'), contentType: 'text/plain', suggestedFileName: 'mine.txt' } as never);
+    setup(client);
+    const result = await handlers.get('ofw_download_attachment')!({ fileId: 80, inline: true });
+    expect(result.isError).toBeFalsy();
+  });
+
+  it('caps sync, ofw_check_freshness and ofw_status: nothing may be marked read', async () => {
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request').mockResolvedValue({ systemFolders: [] });
+    const syncSpy = vi.spyOn(syncModule, 'syncAll').mockResolvedValue({
+      synced: {}, refreshed: [], notRefreshed: [], syncComplete: true, unreadWithoutBodies: [],
+    } as never);
+    setup(client);
+
+    await handlers.get('ofw_sync_messages')!({ fetchUnreadBodies: true });
+    expect(syncSpy.mock.calls[0][1]).toMatchObject({ fetchUnreadBodies: false });
+
+    const fresh = JSON.parse((await handlers.get('ofw_check_freshness')!({ messageIds: [909], allowMarkRead: true })).content[0].text);
+    expect(fresh.items[0]).toMatchObject({ id: 909, skipped: true, reason: 'WOULD_MARK_READ' });
+
+    const status = JSON.parse((await handlers.get('ofw_status')!({ ids: [909], allowMarkRead: true })).content[0].text);
+    expect(JSON.stringify(status)).toContain('WOULD_MARK_READ');
+    expect(spy).not.toHaveBeenCalled();
+  });
+});
