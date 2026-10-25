@@ -1476,3 +1476,91 @@ describe('syncAll — bounded (shared budget across folders)', () => {
     expect(result.note).toBeUndefined();
   });
 });
+
+describe('sync on a no-read day (OFW_READ_DAYS / OFW_NO_READ_DAYS)', () => {
+  let prev: string | undefined;
+  beforeEach(() => {
+    prev = process.env.OFW_NO_READ_DAYS;
+    process.env.OFW_NO_READ_DAYS = 'sun mon tue wed thu fri sat';
+  });
+  afterEach(() => {
+    if (prev === undefined) delete process.env.OFW_NO_READ_DAYS;
+    else process.env.OFW_NO_READ_DAYS = prev;
+  });
+
+  const nullBodyRow = (id: number, folder: 'inbox' | 'sent'): MessageRow => ({
+    id, folder, subject: `Subject ${id}`, fromUser: 'Alice', sentAt: '2026-05-04T12:00:00Z',
+    recipients: [{ userId: 1, name: 'Bob', viewedAt: null }],
+    body: null, fetchedBodyAt: null, replyToId: null, chainRootId: null, listData: {},
+  });
+
+  it('caches inbox and sent from the list only — no message detail is ever requested', async () => {
+    // A sent row that flipped to read would normally trigger a detail GET.
+    upsertMessage({ ...nullBodyRow(21, 'sent'), body: 'old', fetchedBodyAt: '2026-05-04T12:01:00Z' });
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request').mockImplementation(async (_m: string, path: string) => {
+      if (path.startsWith('/pub/v1/messageFolders')) return foldersResponse();
+      if (path.includes('folders=333')) return draftListResponse([{ id: 30 }]);
+      if (path === '/pub/v3/messages/30') return { body: 'my draft', subject: 'Draft 30', recipientIds: [] };
+      if (path.includes('folders=111') && path.includes('page=1&')) return listResponse([{ id: 10 }, { id: 11, unread: true }]);
+      if (path.includes('folders=222') && path.includes('page=1&')) return listResponse([{ id: 20 }, { id: 21 }]);
+      if (path.includes('folders=')) return listResponse([]);
+      throw new Error(`unexpected request ${path}`);
+    });
+
+    const result = await syncAll(client, { fetchUnreadBodies: true }, store());
+
+    const detailPaths = spy.mock.calls.map((c) => c[1] as string).filter((p) => /^\/pub\/v3\/messages\/\d+$/.test(p));
+    // Drafts are the account holder's own words and still sync; nothing else.
+    expect(detailPaths).toEqual(['/pub/v3/messages/30']);
+    expect(getMessage(10)).toMatchObject({ subject: 'Subject 10', body: null, fetchedBodyAt: null });
+    expect(getMessage(11)?.body).toBeNull();
+    expect(getMessage(20)?.body).toBeNull();
+    expect(getDraft(30)?.body).toBe('my draft');
+    expect(result).toMatchObject({ bodiesWithheld: true, synced: { inbox: 2, sent: 1, drafts: 1 } });
+    // Only the genuinely unread message is reported as unread.
+    expect(result.unreadInbox.map((u) => u.id)).toEqual([11]);
+    expect(result.note).toMatch(/no-read day/);
+  });
+
+  it('fills in withheld bodies on the next reading day — never an unread inbox one', async () => {
+    delete process.env.OFW_NO_READ_DAYS;
+    upsertMessage(nullBodyRow(10, 'inbox'));   // read on OFW since
+    upsertMessage(nullBodyRow(11, 'inbox'));   // still unread
+    upsertMessage(nullBodyRow(12, 'inbox'));   // read, detail omits recipients and body
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request').mockImplementation(async (_m: string, path: string) => {
+      if (path.includes('page=1&')) return listResponse([{ id: 10 }, { id: 11, unread: true }, { id: 12 }]);
+      if (path.includes('page=')) return listResponse([]);
+      if (path === '/pub/v3/messages/10') {
+        return { body: 'body-10', files: [500], recipients: [{ user: { id: 1, name: 'Bob' }, viewed: { dateTime: '2026-05-05T09:00:00' } }] };
+      }
+      if (path === '/pub/v3/messages/12') return {};
+      if (path === '/pub/v1/myfiles/500') return { fileId: 500, fileName: 'a.pdf', fileType: 'application/pdf' };
+      throw new Error(`unexpected request ${path}`);
+    });
+
+    const result = await syncMessageFolder(client, 'inbox', '111', { fetchUnreadBodies: false }, store());
+
+    expect(getMessage(10)).toMatchObject({ body: 'body-10' });
+    expect(getMessage(10)?.recipients[0].viewedAt).toBe('2026-05-05T09:00:00');
+    expect(getMessage(10)?.fetchedBodyAt).not.toBeNull();
+    expect(listAttachmentsForMessage(10).map((a) => a.fileId)).toEqual([500]);
+    expect(getMessage(12)?.body).toBe('');
+    expect(getMessage(11)?.body).toBeNull();
+    expect(spy).not.toHaveBeenCalledWith('GET', '/pub/v3/messages/11');
+    expect(result.synced).toBe(2);
+  });
+
+  it('a body backfill that exhausts the budget pauses and resumes on that page', async () => {
+    delete process.env.OFW_NO_READ_DAYS;
+    upsertMessage(nullBodyRow(10, 'sent'));
+    const client = new OFWClient();
+    vi.spyOn(client, 'request').mockResolvedValueOnce(listResponse([{ id: 10 }]));
+
+    const result = await syncMessageFolder(client, 'sent', '222', { fetchUnreadBodies: false, budget: makeBudget(1) }, store());
+
+    expect(result.done).toBe(false);
+    expect(getMessage(10)?.body).toBeNull();
+  });
+});

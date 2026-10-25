@@ -296,7 +296,7 @@ OFW_READ_DAYS=mon,thu                       # allow list: read only on these day
 OFW_NO_READ_DAYS=2026-12-24..2026-12-26     # deny list: never on these (wins over the allow list)
 ```
 
-Tokens are weekday names (`mon`, `Monday`, …), dates (`2026-12-25`) or inclusive ranges (`2026-12-24..2026-12-31`), separated by commas or spaces, and "today" is decided in `DISPLAY_TZ`. Unset means every day is a reading day. A token that cannot be parsed fails closed (content withheld every day, warning on stderr). Like `OFW_ALLOW_MARK_READ`, no per-call argument can override it. Refusals come back as `READING_BLOCKED` with `nextReadableDay`. Drafts stay readable, and sending is not affected.
+Tokens are weekday names (`mon`, `Monday`, …), dates (`2026-12-25`) or inclusive ranges (`2026-12-24..2026-12-31`), separated by commas or spaces, and "today" is decided in `DISPLAY_TZ`. Unset means every day is a reading day. A token that cannot be parsed fails closed (content withheld every day, warning on stderr). Like `OFW_ALLOW_MARK_READ`, no per-call argument can override it. Refusals come back as `READING_BLOCKED` with `nextReadableDay`. `ofw_sync_messages` downloads no message content on those days (only the list: sender, date, subject); the first sync on a reading day fills the bodies in, except for unread inbox messages, which still wait for you to open them. Drafts stay readable, and sending is not affected.
 
 #### Calendar opt-in (`OFW_CALENDAR_WRITES`)
 

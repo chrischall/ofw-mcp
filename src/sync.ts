@@ -7,6 +7,7 @@ import { z } from 'zod';
 import { ApiRecipientSchema, hasRealView, mapRecipients, threadedReplyTo } from './tools/_shared.js';
 import { parseLenient } from '@chrischall/mcp-utils';
 import { nowNaiveWallClock } from './timestamps.js';
+import { readingBlockedToday } from './read-days.js';
 
 // Each OFW message detail returns `files: [fileId, ...]`. We fetch the metadata
 // for each file id (cheap JSON call) so the model can see filenames/mime types
@@ -247,6 +248,14 @@ async function walkPages(
      */
     stopAtCachedPage: boolean;
     fetchUnreadBodies: boolean;
+    /**
+     * False on a no-read day (see read-days.ts): make NO detail request for any
+     * message, read or unread. A detail GET downloads the body even when we
+     * throw it away, and that is the content the day forbids. Rows are cached
+     * from the list payload alone (body null), and the next sync on a reading
+     * day fills the bodies in — see the heal path below.
+     */
+    fetchBodies: boolean;
     budget: Budget;
   },
   store: CacheStore,
@@ -287,7 +296,35 @@ async function walkPages(
     for (const item of items) {
       if (newestId === null || item.id > newestId) newestId = item.id;
       const existing = existingById.get(item.id);
+      const isInboxUnread = folder === 'inbox' && item.showNeverViewed === true;
       if (existing) {
+        // Heal a row cached without its body — typically one listed on a
+        // no-read day — once fetching it can stamp nothing: a sent message, or
+        // an inbox message OFW already reports as read. An unread inbox body
+        // stays the caller's explicit choice (ofw_get_message), as before.
+        if (opts.fetchBodies && existing.body === null && !isInboxUnread) {
+          if (!budget.take()) { pageBudgetHit = true; break; }
+          const detail = parseLenient(
+            DetailResponseSchema,
+            await client.request('GET', `/pub/v3/messages/${item.id}`),
+            { label: 'ofw-mcp', context: 'GET /pub/v3/messages/{id} (body backfill)' },
+          );
+          toUpsert.push({
+            ...existing,
+            body: detail.body ?? '',
+            fetchedBodyAt: new Date().toISOString(),
+            recipients: mapRecipients(detail.recipients ?? item.recipients),
+            listData: item,
+          });
+          synced++;
+          // Counts as new: a forward pass must keep walking past a page it
+          // still had work on, or older withheld rows would never be reached.
+          pageHadNewItem = true;
+          if (Array.isArray(detail.files) && detail.files.length > 0) {
+            await fetchAttachmentMetaBudgeted(client, item.id, detail.files, store, budget);
+          }
+          continue;
+        }
         // A sent message's read status changes AFTER it's first cached, when
         // the recipient opens it — so we can't just skip existing rows. The
         // list item carries the reliable `showNeverViewed` boolean but only an
@@ -295,7 +332,7 @@ async function walkPages(
         // on the detail endpoint. So when a sent message has flipped to read
         // and we don't yet hold a real viewed time, re-fetch detail to capture
         // it (no body re-fetch — only the recipient view fields can change).
-        if (folder === 'sent' && item.showNeverViewed === false && !hasRealView(existing.recipients)) {
+        if (opts.fetchBodies && folder === 'sent' && item.showNeverViewed === false && !hasRealView(existing.recipients)) {
           if (!budget.take()) { pageBudgetHit = true; break; }
           const detail = parseLenient(
             DetailResponseSchema,
@@ -309,8 +346,7 @@ async function walkPages(
       }
       pageHadNewItem = true;
 
-      const isInboxUnread = folder === 'inbox' && item.showNeverViewed === true;
-      const shouldFetchBody = !isInboxUnread || opts.fetchUnreadBodies;
+      const shouldFetchBody = opts.fetchBodies && (!isInboxUnread || opts.fetchUnreadBodies);
 
       let body: string | null = null;
       let fetchedBodyAt: string | null = null;
@@ -335,7 +371,7 @@ async function walkPages(
         if (Array.isArray(detail.files) && detail.files.length > 0) {
           detailFileIds = detail.files;
         }
-      } else {
+      } else if (isInboxUnread) {
         unread.push({
           id: item.id,
           subject: item.subject,
@@ -408,9 +444,10 @@ export async function syncMessageFolder(
   client: OFWClient,
   folder: 'inbox' | 'sent',
   folderId: string,
-  opts: { fetchUnreadBodies: boolean; deep?: boolean; budget?: Budget },
+  opts: { fetchUnreadBodies: boolean; fetchBodies?: boolean; deep?: boolean; budget?: Budget },
   store: CacheStore,
 ): Promise<MessageSyncResult> {
+  const fetchBodies = opts.fetchBodies ?? true;
   // No budget → unbounded (local stdio): every take() succeeds, so an ordinary
   // sync is byte-for-byte the original unbounded walk (forward pass only).
   const budget = opts.budget ?? makeBudget(Number.POSITIVE_INFINITY);
@@ -421,6 +458,7 @@ export async function syncMessageFolder(
     startPage: 1,
     stopAtCachedPage: true,
     fetchUnreadBodies: opts.fetchUnreadBodies,
+    fetchBodies,
     budget,
   }, store);
 
@@ -469,6 +507,7 @@ export async function syncMessageFolder(
       startPage: savedResume ?? fwd.nextPage,
       stopAtCachedPage: false,
       fetchUnreadBodies: opts.fetchUnreadBodies,
+      fetchBodies,
       budget,
     }, store);
     synced += bf.synced;
@@ -717,6 +756,8 @@ export interface SyncAllResult {
    * carry no `synced` count.
    */
   notRefreshed: FolderName[];
+  /** Present (true) when today is a no-read day and no message body was fetched. */
+  bodiesWithheld?: true;
   note?: string;
 }
 
@@ -736,6 +777,9 @@ export async function syncAll(client: OFWClient, opts: SyncAllOptions, store: Ca
   // ONE budget shared across resolveFolderIds and every requested folder, in
   // order — so the whole invocation stays under the hosting subrequest cap.
   const budget = makeBudget(opts.maxRequests ?? Number.POSITIVE_INFINITY);
+  // Decided HERE, not by each caller, so every path into a sync — the tool,
+  // a read's autoRefresh, ofw_status — honours a no-read day (read-days.ts).
+  const readingBlocked = readingBlockedToday() !== null;
   // resolveFolderIds always makes exactly one request; the tool guarantees
   // maxRequests >= 1, so this unit is always available (result intentionally
   // ignored — we account for it without a branch that can't be reached).
@@ -764,7 +808,8 @@ export async function syncAll(client: OFWClient, opts: SyncAllOptions, store: Ca
   for (const folder of folders) {
     if (folder === 'inbox') {
       const r = await syncMessageFolder(client, 'inbox', ids.inbox, {
-        fetchUnreadBodies: opts.fetchUnreadBodies ?? false,
+        fetchUnreadBodies: !readingBlocked && (opts.fetchUnreadBodies ?? false),
+        fetchBodies: !readingBlocked,
         deep: opts.deep ?? false,
         budget,
       }, store);
@@ -774,6 +819,7 @@ export async function syncAll(client: OFWClient, opts: SyncAllOptions, store: Ca
     } else if (folder === 'sent') {
       const r = await syncMessageFolder(client, 'sent', ids.sent, {
         fetchUnreadBodies: false,
+        fetchBodies: !readingBlocked,
         deep: opts.deep ?? false,
         budget,
       }, store);
@@ -794,6 +840,9 @@ export async function syncAll(client: OFWClient, opts: SyncAllOptions, store: Ca
   }
 
   const notes: string[] = [];
+  if (readingBlocked) {
+    notes.push('Today is a no-read day (OFW_READ_DAYS / OFW_NO_READ_DAYS): new inbox and sent messages were cached from the list only — sender, date and subject — and no message body was downloaded. The first sync on a reading day fills in bodies that can be fetched without marking anything read.');
+  }
   if (draftsUnverified) {
     notes.push('The drafts folder was NOT checked against OurFamilyWizard on this call (the request budget ran out first), so no drafts count is reported and the cached drafts are marked "unverified". Cached draft bodies may be behind the server. Call ofw_sync_messages again — or ofw_sync_messages with folders:["drafts"] — before editing or deleting a draft.');
   }
@@ -815,6 +864,7 @@ export async function syncAll(client: OFWClient, opts: SyncAllOptions, store: Ca
     syncComplete: done,
     refreshed,
     notRefreshed,
+    ...(readingBlocked ? { bodiesWithheld: true as const } : {}),
     ...(note ? { note } : {}),
   };
 }
