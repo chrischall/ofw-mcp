@@ -1,5 +1,18 @@
 # Changelog
 
+## [2.21.0](https://github.com/chrischall/ofw-mcp/compare/v2.20.6...v2.21.0) (2026-10-25)
+
+
+### Features
+
+* **messages:** add no-read days (OFW_READ_DAYS / OFW_NO_READ_DAYS) ([#392](https://github.com/chrischall/ofw-mcp/issues/392)) ([2a66085](https://github.com/chrischall/ofw-mcp/commit/2a66085f553377568c0d9bb34b279752b0d35d2d))
+* **sync:** download no message content on a no-read day ([#394](https://github.com/chrischall/ofw-mcp/issues/394)) ([05e893a](https://github.com/chrischall/ofw-mcp/commit/05e893acd4820187298f033e7d3e860b4d495484))
+
+
+### Bug Fixes
+
+* **deps:** bump the production-dependencies group with 3 updates ([#395](https://github.com/chrischall/ofw-mcp/issues/395)) ([d4a0757](https://github.com/chrischall/ofw-mcp/commit/d4a07573731fe4e5a30e3ef28d6d0adc1c15f920))
+
 ## [2.20.6](https://github.com/chrischall/ofw-mcp/compare/v2.20.5...v2.20.6) (2026-10-20)
 
 
