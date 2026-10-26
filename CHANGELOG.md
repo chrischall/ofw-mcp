@@ -5,7 +5,7 @@
 
 ### Features
 
-* **expenses:** record confirmed external reimbursements ([#391](https://github.com/chrischall/ofw-mcp/issues/391)) ([fd89e14](https://github.com/chrischall/ofw-mcp/commit/fd89e145b21d55d3dd4cd818dafe95e199d58981))
+* **expenses:** record confirmed external reimbursements (thanks @adraynor) ([#391](https://github.com/chrischall/ofw-mcp/issues/391)) ([fd89e14](https://github.com/chrischall/ofw-mcp/commit/fd89e145b21d55d3dd4cd818dafe95e199d58981))
 
 ## [2.21.0](https://github.com/chrischall/ofw-mcp/compare/v2.20.6...v2.21.0) (2026-10-25)
 
