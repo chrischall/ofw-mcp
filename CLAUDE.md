@@ -43,8 +43,11 @@ The record is `boundTo` a salted digest of username+password, so rotating either
 discards it; neither value is written. A failed write is reported to stderr and is
 NOT fatal — OFW tokens are re-mintable from the environment.
 
-`tests/_setup.ts` forces the cache off and pins its path into a temp dir for the
-whole suite, so no test can reach the developer's real `~/.ofw-mcp`.
+`tests/_setup.ts` forces the cache off, pins its path into a temp dir, and points
+`HOME` at a per-process sandbox, so no test can reach the developer's real
+`~/.ofw-mcp`. Its leak tripwire deletes only inside that sandbox; the real
+`~/.ofw-mcp` is fingerprinted and compared, never removed — it may hold the
+developer's live session (#390).
 
 ## Architecture
 
