@@ -124,7 +124,29 @@ When `OFW_EXPENSE_ONLY=true`, only the healthcheck and expense tools exist. When
 | `ofw_list_expense_categories` | Category ids and split metadata (use the id in create/update) |
 | `ofw_upload_expense_pdf(path \| url, fileName?, label?, description?)` | Upload one receipt PDF to My Files (SHARED, co-parent-visible even on a private expense) for later attachment; confirm-gated; mode `all` only |
 | `ofw_create_expense(title, amount, purchaseDate, categoryId, payerId, children, description?, privateExpense?, receiptFileId?)` | Log a new expense; confirm-gated; optionally private with one receipt |
+| `ofw_mark_expense_reimbursed(expenseId, expectedRemainingAmount, confirmToken?)` | Confirm-gated, irreversible FULL remaining external reimbursement only; no money transfer or partial amount. Mode `all`, never upload-only. |
 | `ofw_update_expense(expenseId, …only the fields to change…)` | Reads the expense and keeps every field you omit; `privateExpense:false` publishes a private expense; `receiptFileId` replaces all receipts, `null` clears it or `description`; refuses as `EXPENSE_FIELDS_UNREADABLE` (naming the fields) rather than erase one it can't read; confirm-gated |
+
+### Recording reimbursement (not sending money)
+
+Use `ofw_mark_expense_reimbursed` only after the user explicitly says the FULL
+remaining balance was reimbursed outside OFW. Require `expectedRemainingAmount`
+in currency units and exact cents, matching `amount.leftToPay`, not `amount.total`
+or a guessed half. Show the tool's complete preview and irreversible warning,
+confirm the author/payer ids refer to the intended parents, and wait for explicit
+approval before returning the single-use `confirmToken` with identical args.
+This is a status-only record: it never pays anyone or accesses payment/bank
+endpoints and supports no partial reimbursement. It is absent in upload-only
+mode and in write modes `none`/`drafts`.
+
+The tool refuses pending/unknown statuses or unreadable financial details, binds
+the full current detail to confirmation, re-GETs immediately before writing, and
+verifies paid/zero/external-marker plus unchanged expense fields afterward. An
+already paid zero balance is a no-op, not a new reimbursement. On
+`EXPENSE_REIMBURSEMENT_UNCONFIRMED` (`mayHaveLanded=true`), inspect the expense in
+the OFW web app; never automatically replay or roll back. Pre-write checks are
+best-effort, not atomic against concurrent edits. See README's external
+reimbursement section for the exact endpoint and verification contract.
 
 ### Journal
 | Tool | Notes |

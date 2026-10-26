@@ -79,6 +79,7 @@ src/
     messages.ts     folders, list, get, send, drafts, get_unread_sent, upload/download_attachment, sync_messages, check_freshness, status
     calendar.ts     list/create/update/delete events
     expenses.ts     totals, list, create
+    expense-reimbursement.ts  ofw_mark_expense_reimbursed — confirm-gated status PUT recording a reimbursement already settled outside OFW (never moves money); registered only in write mode all, not on the upload-only surface
     journal.ts      list, create entries
 tests/              mirrors src/; mocks OFWClient.request via vi.spyOn; cache tests use OFW_CACHE_DIR + tmp dir
 ```
@@ -223,7 +224,7 @@ The split into `auth.ts` + `auth-password.ts` is deliberate: tests mock `auth-pa
 
 ## Confirmation gate (`tools/_confirm.ts`)
 
-Every write that reaches the co-parent or the court-visible record calls `confirmWrite(ctx, …)` before its request: `ofw_send_message`, `ofw_create_expense` / `ofw_update_expense`, `ofw_create_event` (unless `privateEvent`), `ofw_update_event` / `ofw_delete_event` (when the event is shared before or after), `ofw_upload_attachment` with `shareClass: SHARED`, and `ofw_upload_expense_pdf` (always SHARED — the share class an expense's `fileIds` accepts — so the receipt is co-parent-visible in My Files even when the expense is private). It is `requireConfirmationWithFallback` + `confirmationFromEnv` from `@chrischall/mcp-utils` — a real elicitation where the client supports it (unless `MCP_CONFIRM_ELICITATION=off`), otherwise the two-phase `confirmToken` flow governed by `MCP_CONFIRM_MODE` / `_TTL_SECONDS` / `_SECRET`. Do not hand-roll a `confirm` boolean.
+Every write that reaches the co-parent or the court-visible record calls `confirmWrite(ctx, …)` before its request: `ofw_send_message`, `ofw_create_expense` / `ofw_update_expense`, `ofw_create_event` (unless `privateEvent`), `ofw_update_event` / `ofw_delete_event` (when the event is shared before or after), `ofw_upload_attachment` with `shareClass: SHARED`, and `ofw_upload_expense_pdf` (always SHARED — the share class an expense's `fileIds` accepts — so the receipt is co-parent-visible in My Files even when the expense is private), and `ofw_mark_expense_reimbursed` (irreversible: binds `stateRevision` of the whole expense detail, re-reads before the status PUT, and refuses a stale approval). It is `requireConfirmationWithFallback` + `confirmationFromEnv` from `@chrischall/mcp-utils` — a real elicitation where the client supports it (unless `MCP_CONFIRM_ELICITATION=off`), otherwise the two-phase `confirmToken` flow governed by `MCP_CONFIRM_MODE` / `_TTL_SECONDS` / `_SECRET`. Do not hand-roll a `confirm` boolean.
 
 Rules for a new gated write:
 - Call it on EVERY invocation, after all reads and validation and before the write, with the freshly built payload. Pass `confirmToken: confirmTokenParam` in the input schema and end the description with `CONFIRM_NOTE`.
