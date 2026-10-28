@@ -24,8 +24,10 @@ import { normalizeTimestampsInValue } from '../timestamps.js';
 // content, and `JSON.stringify` never touches them; the rule is pinned by
 // tests here and in mcp-utils, so do not replace this with a text-level
 // minifier.
-export function jsonResponse(data: unknown): ReturnType<typeof textResult> {
-  return minifiedResult(normalizeTimestampsInValue(data));
+//
+// `tz` is a per-call zone (resolveTimeZoneArg); omitted, DISPLAY_TZ applies.
+export function jsonResponse(data: unknown, tz?: string): ReturnType<typeof textResult> {
+  return minifiedResult(normalizeTimestampsInValue(data, tz));
 }
 
 // Raw-string tool result. Wrapper over @chrischall/mcp-utils' `rawTextResult`.
@@ -33,8 +35,8 @@ export const textResponse = rawTextResult;
 
 // The JSON half of a mixed text response, through the same seam as
 // jsonResponse: timestamps normalized, no formatting whitespace.
-export function jsonText(data: unknown): string {
-  return JSON.stringify(normalizeTimestampsInValue(data));
+export function jsonText(data: unknown, tz?: string): string {
+  return JSON.stringify(normalizeTimestampsInValue(data, tz));
 }
 
 // A write tool's result: its transparency NOTEs/WARNINGs (null entries are

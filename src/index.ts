@@ -48,11 +48,14 @@ const messageRegistrar = (
   deps: typeof client,
 ) => registerMessageTools(server, deps, nodeCacheProvider, nodeAttachmentIO);
 
+const calendarRegistrar = (server: Parameters<typeof registerCalendarTools>[0], deps: typeof client) =>
+  registerCalendarTools(server, deps, nodeAttachmentIO);
+
 const tools = selectToolRegistrars({
   healthcheck: registerHealthcheckTools,
   user: registerUserTools,
   messages: messageRegistrar,
-  calendar: registerCalendarTools,
+  calendar: calendarRegistrar,
   expenses: expenseRegistrar,
   journal: registerJournalTools,
 });

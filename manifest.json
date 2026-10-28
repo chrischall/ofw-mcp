@@ -296,7 +296,11 @@
     },
     {
       "name": "ofw_list_events",
-      "description": "List calendar events in a date range"
+      "description": "List calendar events and custody handoffs in a date range, filterable by type, as JSON or iCalendar (.ics) text"
+    },
+    {
+      "name": "ofw_save_calendar_ics",
+      "description": "Save a date range, custody schedule included, as an .ics file (a private download link when hosted)"
     },
     {
       "name": "ofw_create_event",

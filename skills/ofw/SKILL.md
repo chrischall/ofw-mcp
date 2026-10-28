@@ -107,7 +107,8 @@ Always pass `--config ~/.mcporter/mcporter.json` unless a local `config/mcporter
 ### Calendar
 | Tool | Notes |
 |------|-------|
-| `ofw_list_events(startDate, endDate, detailed?)` | Dates as `YYYY-MM-DD` |
+| `ofw_list_events(startDate, endDate, detailed?, types?, timeZone?, format?)` | Dates as `YYYY-MM-DD`. `types` keeps only `EVENT`/`CONNECTED_EVENT`/`TRANSITION` (custody handoffs)/`SCHEDULE` (the per-day custody grid — heavy; omit unless needed). `timeZone` is the account's IANA zone when it differs from the server's. `format:"ics"` returns a summary then iCalendar text |
+| `ofw_save_calendar_ics(startDate, endDate, types?, timeZone?, saveTo?, linkMinutes?)` | The `.ics` as a file: a private download link that expires (hosted) or a path in the attachments directory (local). Each custody period becomes a "Parenting time" event. A snapshot — it does not update |
 | `ofw_create_event(title, startDate, endDate, ...)` | `startDate`/`endDate` as ISO datetime |
 | `ofw_update_event(eventId, ...)` | Partial update — only pass fields to change |
 | `ofw_delete_event(eventId)` | Permanent delete |

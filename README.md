@@ -145,7 +145,8 @@ Read-only tools run automatically. Writes that reach your co-parent or the court
 | `ofw_save_draft` | Create or update a draft | Confirm | `drafts` |
 | `ofw_delete_draft` | Delete a draft | Confirm | `drafts` |
 | `ofw_upload_attachment` | Upload a local file from the upload directory (`OFW_UPLOAD_DIR`, default `~/Downloads/ofw-mcp`) to My Files; returns a fileId to attach via `ofw_send_message`/`ofw_save_draft`. Sharing (`shareClass: SHARED`) needs mode `all` | Auto (PRIVATE) / Confirm (server) (SHARED) | `drafts` |
-| `ofw_list_events` | Calendar events in a date range | Auto | any |
+| `ofw_list_events` | Calendar events and custody handoffs in a date range; filter with `types`, read in a per-call `timeZone`, or get iCalendar text with `format: "ics"` | Auto | any |
+| `ofw_save_calendar_ics` | Save a date range as an `.ics` file — custody schedule included, which OFW's own export leaves out. A private, expiring download link on a hosted connector; a file in the attachments directory locally | Auto | any |
 | `ofw_create_event` | Create a calendar event | Confirm (server) unless private | `all` (or `drafts` + `OFW_CALENDAR_WRITES`) |
 | `ofw_update_event` | Update a calendar event | Confirm (server) if shared | `all` (or `drafts` + `OFW_CALENDAR_WRITES`) |
 | `ofw_delete_event` | Delete a calendar event | Confirm (server) if shared | `all` (or `drafts` + `OFW_CALENDAR_WRITES`) |

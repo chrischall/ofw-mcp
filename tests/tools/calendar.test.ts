@@ -3,6 +3,10 @@ import { McpServer } from '@modelcontextprotocol/server';
 import { OFWClient } from '../../src/client.js';
 import { z } from 'zod';
 import { registerCalendarTools } from '../../src/tools/calendar.js';
+import { NodeAttachmentIO, type AttachmentIO } from '../../src/tools/attachments.js';
+import { mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { CAN_ASK_CTX, NO_ELICIT_CTX, callConfirmed, callPreview, type GatedHandler } from './_confirm-helpers.js';
 
 type ToolHandler = (args: Record<string, unknown>, ctx?: unknown) => Promise<{ content: Array<{ type: string; text: string }>; isError?: boolean; resultType?: string }>;
@@ -36,14 +40,14 @@ function makeClient(returnValue: unknown) {
   return c;
 }
 
-function setup(client: OFWClient) {
+function setup(client: OFWClient, io?: AttachmentIO) {
   server = new McpServer({ name: 'test', version: '0.0.0' });
   handlers = new Map();
   vi.spyOn(server, 'registerTool').mockImplementation((name: string, _config: unknown, cb: unknown) => {
     handlers.set(name, cb as ToolHandler);
     return undefined as never;
   });
-  registerCalendarTools(server, client);
+  registerCalendarTools(server, client, io);
 }
 
 afterEach(() => vi.restoreAllMocks());
@@ -73,6 +77,167 @@ describe('ofw_list_events', () => {
       'GET',
       '/pub/v1/calendar/detailed?startDate=2026-03-01&endDate=2026-03-31'
     );
+  });
+});
+
+// Live shape (2026-10-28), synthetic names: naive local times, every
+// TRANSITION carrying id 1, sentinels at the window edges.
+const PA = { userId: 101, name: 'Parent A' };
+const PB = { userId: 202, name: 'Parent B' };
+const CALENDAR = {
+  calendarItems: [
+    { id: 1, type: 'TRANSITION', allDay: false, startDate: { dateTime: '2026-08-31T00:00:00' }, transitionStartParent: null, transitionEndParent: PA },
+    { id: 1, type: 'TRANSITION', allDay: false, startDate: { dateTime: '2026-09-04T12:00:00' }, transitionStartParent: PA, transitionEndParent: PB },
+    { id: 1, type: 'TRANSITION', allDay: false, startDate: { dateTime: '2026-09-07T00:00:00' }, transitionStartParent: PB, transitionEndParent: null },
+    { id: 55, type: 'EVENT', allDay: false, title: 'Recital', repeating: false, startDate: { dateTime: '2026-09-05T17:00:00' }, endDate: { dateTime: '2026-09-05T18:00:00' } },
+  ],
+  guardianData: { '2026-09-04': [{ guardianId: 101, startTime: 0, endTime: 720, type: 'SCHEDULE', id: 9 }] },
+};
+const RANGE = { startDate: '2026-09-01', endDate: '2026-09-06' };
+
+describe('ofw_list_events — types, timeZone, format', () => {
+  it('filters to the named types and drops the custody grid', async () => {
+    const client = makeClient(CALENDAR);
+    setup(client);
+    const result = await handlers.get('ofw_list_events')!({ ...RANGE, detailed: true, types: ['EVENT'] });
+    const body = JSON.parse(result.content[0].text);
+    expect(body.calendarItems.map((i: { type: string }) => i.type)).toEqual(['EVENT']);
+    expect(body).not.toHaveProperty('guardianData');
+  });
+
+  it('renders timestamps in a per-call timeZone instead of DISPLAY_TZ', async () => {
+    const client = makeClient(CALENDAR);
+    setup(client);
+    const result = await handlers.get('ofw_list_events')!({ ...RANGE, types: ['EVENT'], timeZone: 'America/Chicago' });
+    const body = JSON.parse(result.content[0].text);
+    expect(body.calendarItems[0].startDate.dateTime).toBe('2026-09-05T17:00:00-05:00');
+    expect(body.calendarItems[0].startDate.dateTimeDisplay).toMatch(/CDT$/);
+  });
+
+  it('rejects an unknown timeZone before calling OFW', async () => {
+    const client = makeClient(CALENDAR);
+    setup(client);
+    await expect(handlers.get('ofw_list_events')!({ ...RANGE, timeZone: 'Nowhere/Land' })).rejects.toThrow(/IANA/);
+    expect(client.request).not.toHaveBeenCalled();
+  });
+
+  it("format:'ics' always reads the detailed endpoint and returns a summary then the calendar", async () => {
+    const client = makeClient(CALENDAR);
+    setup(client);
+    const result = await handlers.get('ofw_list_events')!({ ...RANGE, format: 'ics' });
+    expect(client.request).toHaveBeenCalledWith('GET', '/pub/v1/calendar/detailed?startDate=2026-09-01&endDate=2026-09-06');
+    expect(result.content).toHaveLength(2);
+    const summary = JSON.parse(result.content[0].text);
+    expect(Object.keys(summary).slice(0, 3)).toEqual(['format', 'events', 'custodyPeriods']);
+    expect(summary).toMatchObject({ format: 'ics', events: 1, custodyPeriods: 2, omittedCount: 0, timeZone: 'America/New_York', ...RANGE });
+    expect(result.content[1].text).toMatch(/^BEGIN:VCALENDAR\r\n/);
+    expect(result.content[1].text).toContain('SUMMARY:Recital');
+    expect(result.content[1].text).toContain('SUMMARY:Parenting time: Parent B');
+  });
+
+  it("format:'ics' lists what it left out, with reasons", async () => {
+    const client = makeClient({ calendarItems: [...CALENDAR.calendarItems, { id: 8, type: 'HOLIDAY' }] });
+    setup(client);
+    const summary = JSON.parse((await handlers.get('ofw_list_events')!({ ...RANGE, format: 'ics' })).content[0].text);
+    expect(summary).toMatchObject({ omittedCount: 1, omitted: [{ type: 'HOLIDAY', id: 8, reason: 'unsupported_type' }] });
+  });
+
+  it('warns on stderr, and still answers, when the detailed calendar changes shape', async () => {
+    const warn = vi.spyOn(console, 'error').mockImplementation(() => {});
+    setup(makeClient({ items: [] }));
+    const result = await handlers.get('ofw_list_events')!({ ...RANGE, format: 'ics' });
+    expect(JSON.parse(result.content[0].text)).toMatchObject({ events: 0, custodyPeriods: 0 });
+    expect(warn.mock.calls.flat().join(' ')).toMatch(/GET \/pub\/v1\/calendar\/detailed/);
+  });
+
+  it("format:'ics' respects the type filter", async () => {
+    const client = makeClient(CALENDAR);
+    setup(client);
+    const result = await handlers.get('ofw_list_events')!({ ...RANGE, format: 'ics', types: ['TRANSITION'] });
+    expect(JSON.parse(result.content[0].text)).toMatchObject({ events: 0, custodyPeriods: 2 });
+  });
+});
+
+describe('ofw_save_calendar_ics', () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'ofw-ics-'));
+    vi.stubEnv('OFW_ATTACHMENTS_DIR', dir);
+    vi.stubEnv('MCP_BLOB_BASE_URL', '');
+    vi.stubEnv('MCP_BLOB_SIGNING_KEY', '');
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
+  });
+
+  it('writes a 0600 file inside the attachments directory and returns its path', async () => {
+    setup(makeClient(CALENDAR), new NodeAttachmentIO());
+    const result = await handlers.get('ofw_save_calendar_ics')!({ ...RANGE });
+    const body = JSON.parse(result.content[0].text);
+    expect(body).toMatchObject({ delivered: 'disk', events: 1, custodyPeriods: 2 });
+    expect(body.path.startsWith(dir)).toBe(true);
+    expect(body.path).toMatch(/ofw-calendar-2026-09-01_2026-09-06-\d{8}T\d{6}Z\.ics$/);
+    expect(readFileSync(body.path, 'utf8')).toMatch(/^BEGIN:VCALENDAR/);
+    expect(statSync(body.path).mode & 0o777).toBe(0o600);
+    expect(body).not.toHaveProperty('ics');
+  });
+
+  it('honours a saveTo inside the attachments directory and refuses one outside it', async () => {
+    setup(makeClient(CALENDAR), new NodeAttachmentIO());
+    const ok = JSON.parse((await handlers.get('ofw_save_calendar_ics')!({ ...RANGE, saveTo: 'cal/sept.ics' })).content[0].text);
+    expect(ok.path).toBe(join(dir, 'cal', 'sept.ics'));
+    const intoDir = JSON.parse((await handlers.get('ofw_save_calendar_ics')!({ ...RANGE, saveTo: 'cal/' })).content[0].text);
+    expect(intoDir.path).toMatch(new RegExp(`^${join(dir, 'cal')}/ofw-calendar-`));
+    await expect(handlers.get('ofw_save_calendar_ics')!({ ...RANGE, saveTo: '/etc/cal.ics' })).rejects.toThrow(/outside the attachments directory/);
+  });
+
+  it('never overwrites an existing file', async () => {
+    writeFileSync(join(dir, 'taken.ics'), 'mine');
+    setup(makeClient(CALENDAR), new NodeAttachmentIO());
+    const refusal = handlers.get('ofw_save_calendar_ics')!({ ...RANGE, saveTo: 'taken.ics' });
+    await expect(refusal).rejects.toThrow(/already exists/);
+    await expect(refusal).rejects.not.toThrow(/force/);
+    expect(readFileSync(join(dir, 'taken.ics'), 'utf8')).toBe('mine');
+  });
+
+  it('passes any other write failure through unchanged', async () => {
+    const io = new NodeAttachmentIO();
+    vi.spyOn(io, 'writeDownload').mockRejectedValue(new Error('EACCES: permission denied'));
+    setup(makeClient(CALENDAR), io);
+    await expect(handlers.get('ofw_save_calendar_ics')!({ ...RANGE })).rejects.toThrow('EACCES: permission denied');
+  });
+
+  it('on mcp-host uploads to the blob store and returns a signed link instead of touching disk', async () => {
+    vi.stubEnv('MCP_BLOB_BASE_URL', 'https://host.example/b/reg_0123456789abcdef01234567');
+    vi.stubEnv('MCP_BLOB_SIGNING_KEY', 'a2V5');
+    const fetchMock = vi.fn(async () => new Response(null, { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const io = new NodeAttachmentIO();
+    const write = vi.spyOn(io, 'writeDownload');
+    setup(makeClient(CALENDAR), io);
+    const body = JSON.parse((await handlers.get('ofw_save_calendar_ics')!({ ...RANGE, saveTo: 'ignored.ics' })).content[0].text);
+    expect(write).not.toHaveBeenCalled();
+    expect(body.delivered).toBe('link');
+    expect(body.url).toMatch(/^https:\/\/host\.example\/b\/reg_0123456789abcdef01234567\/calendar\/[0-9a-f-]{36}\/ofw-calendar-2026-09-01_2026-09-06-\d{8}T\d{6}Z\.ics\?exp=\d+&sig=/);
+    expect(typeof body.expiresAt).toBe('string');
+    expect(body.note).toMatch(/saveTo is ignored/);
+    const plain = JSON.parse((await handlers.get('ofw_save_calendar_ics')!({ ...RANGE, linkMinutes: 5 })).content[0].text);
+    expect(plain.note).not.toMatch(/saveTo/);
+    expect(Date.parse(plain.expiresAt) - Date.now()).toBeLessThanOrEqual(5 * 60_000);
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toMatch(/\/calendar\/[0-9a-f-]{36}\/ofw-calendar-/);
+    expect(init.method).toBe('PUT');
+    expect(new Headers(init.headers).get('content-type')).toBe('text/calendar');
+  });
+
+  it('with neither disk nor blob store, returns the calendar inline rather than failing', async () => {
+    const io: AttachmentIO = { ...new NodeAttachmentIO(), supportsDisk: false } as AttachmentIO;
+    setup(makeClient(CALENDAR), io);
+    const result = await handlers.get('ofw_save_calendar_ics')!({ ...RANGE });
+    const body = JSON.parse(result.content[0].text);
+    expect(body).toMatchObject({ delivered: 'inline', forcedInline: true });
+    expect(result.content[1].text).toMatch(/^BEGIN:VCALENDAR/);
   });
 });
 

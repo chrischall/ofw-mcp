@@ -16,7 +16,7 @@ import { CONFIRM_NOTE, confirmTokenParam, confirmWrite } from './_confirm.js';
 import { getFolderVerifiedAt } from '../sync.js';
 import type { AttachmentIO } from './attachments.js';
 import { buildInlineDelivery, tryExtract } from './delivery.js';
-import { isWithin, resolveDownloadMime } from './attachments.js';
+import { resolveDownloadMime, resolveSaveDest } from './attachments.js';
 import {
   getAllowMarkRead, getAttachmentsDir, getAutoRefreshStaleReads, getDefaultInlineAttachments,
   getFetchUnreadBodies, getSyncMaxRequests, getWriteMode,
@@ -1834,7 +1834,6 @@ export function registerMessageTools(
       });
     }
 
-    let dest: string;
     // The filename comes from OFW file metadata — i.e. it is controlled by the
     // co-parent who uploaded the attachment. basename() it before interpolating
     // into a path so a crafted `../…` name can't escape the target directory
@@ -1845,19 +1844,7 @@ export function registerMessageTools(
     // — reachable through an instruction injected into a message body — must
     // be impossible, not merely discouraged.
     const root = resolve(getAttachmentsDir());
-    if (args.saveTo) {
-      // Treat saveTo as a directory if it ends with a separator; otherwise as a full path.
-      const isDirArg = args.saveTo.endsWith('/') || args.saveTo.endsWith('\\');
-      // expandPath resolves a relative path against the process cwd; resolve
-      // it against the attachments dir instead, and only expand a leading ~.
-      const abs = resolve(root, args.saveTo.startsWith('~') ? expandPath(args.saveTo) : args.saveTo);
-      dest = isDirArg ? join(abs, `${fileId}-${safeName}`) : abs;
-      if (!isWithin(root, dest)) {
-        throw new Error(`Refusing to save to ${dest}: it is outside the attachments directory (${root}). Downloads can only be written inside it — pass a path or subdirectory under it, or set OFW_ATTACHMENTS_DIR to move it.`);
-      }
-    } else {
-      dest = join(root, `${fileId}-${safeName}`);
-    }
+    const dest = resolveSaveDest(root, args.saveTo, `${fileId}-${safeName}`);
 
     // Disk mode extracts only on request: the caller already has a real file to
     // open, so extraction is an add-on here rather than the point.
