@@ -46,6 +46,25 @@ export function displayTimeZone(): string {
   return DEFAULT_DISPLAY_TZ;
 }
 
+// A per-call zone (a tool's `timeZone` argument), falling back to
+// displayTimeZone() when none is given. DISPLAY_TZ is deployment-wide, so on a
+// host serving several accounts it cannot be every account's zone; this is how
+// one call says which zone ITS account is in. Unlike DISPLAY_TZ, an unusable
+// value throws rather than falling back: the caller asked for this zone, and
+// answering in another one would be wrong while looking right. A fixed offset
+// is refused for the same reason the deployment default is never one.
+export function resolveTimeZoneArg(tz: string | undefined): string {
+  const requested = tz?.trim();
+  if (!requested) return displayTimeZone();
+  if (/^(?:UTC|GMT)?[+-]\d/i.test(requested)) {
+    throw new Error(`timeZone "${requested}" is a fixed offset, which is an hour wrong for half the year once DST changes. Pass an IANA zone such as America/Chicago.`);
+  }
+  if (!isValidTimeZone(requested)) {
+    throw new Error(`timeZone "${requested}" is not a recognised IANA zone. Pass one such as America/Chicago or Europe/London.`);
+  }
+  return requested;
+}
+
 // Offset of `tz` at a given instant, as "+HH:MM"/"-HH:MM". Uses the IANA
 // database via Intl, so DST is handled per-instant rather than per-zone.
 function offsetAt(instant: Date, tz: string): string {

@@ -44,7 +44,7 @@ function registeredAnnotations(): Record<string, Ann | undefined> {
   registerHealthcheckTools(server, client);
   registerUserTools(server, client);
   registerMessageTools(server, client, cacheProvider, new NodeAttachmentIO());
-  registerCalendarTools(server, client);
+  registerCalendarTools(server, client, new NodeAttachmentIO());
   registerExpenseTools(server, client, new NodeAttachmentIO());
   registerJournalTools(server, client);
   return seen;
@@ -80,6 +80,8 @@ const EXPECTED: Record<string, Kind> = {
   ofw_check_freshness: 'destructive',
   ofw_status: 'destructive',
   ofw_list_events: 'read',
+  // Adds a new local file or uploaded object; never replaces one, never reaches OFW.
+  ofw_save_calendar_ics: 'additive',
   // A shared event is on the co-parent's calendar at once; ofw_delete_event cannot un-show it.
   ofw_create_event: 'destructive',
   ofw_update_event: 'destructive',

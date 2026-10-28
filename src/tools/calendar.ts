@@ -1,10 +1,16 @@
 import { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import type { OFWClient } from '../client.js';
-import { jsonResponse, requestWrite, textResponse, UnconfirmedWriteError, unconfirmedWriteResponse } from './_shared.js';
+import { jsonResponse, jsonText, requestWrite, textResponse, UnconfirmedWriteError, unconfirmedWriteResponse } from './_shared.js';
 import { CONFIRM_NOTE, confirmTokenParam, confirmWrite, stateRevision } from './_confirm.js';
-import { getCalendarWritesAllowed } from '../config.js';
+import { getAttachmentsDir, getCalendarWritesAllowed } from '../config.js';
 import { parseLenient } from '@chrischall/mcp-utils';
+import { blobStoreFromEnv } from '@chrischall/mcp-utils/export';
+import { randomUUID } from 'node:crypto';
+import { resolve } from 'node:path';
+import { NodeAttachmentIO, resolveSaveDest, type AttachmentIO } from './attachments.js';
+import { buildCalendarIcs, CALENDAR_ITEM_TYPES, filterCalendarTypes } from './calendar-ics.js';
+import { formatInstant, resolveTimeZoneArg } from '../timestamps.js';
 
 // OFW's real event-write API (reverse-engineered from the web app bundle):
 //   POST   /pub/v3/events                       create — 201 with the full event
@@ -161,26 +167,142 @@ function namesIn(d: EventDetail): Map<number, string> {
   return names;
 }
 
-export function registerCalendarTools(server: McpServer, client: OFWClient): void {
+const calendarRangeFields = {
+  startDate: z.string().describe('Start date YYYY-MM-DD'),
+  endDate: z.string().describe('End date YYYY-MM-DD'),
+  types: z.array(z.enum(CALENDAR_ITEM_TYPES)).describe('Keep only these: EVENT, CONNECTED_EVENT (from a subscribed outside calendar), TRANSITION (custody handoffs; in .ics they become "Parenting time" periods), SCHEDULE (the per-day custody grid, JSON only). Default: everything').optional(),
+  timeZone: z.string().describe("IANA zone of the user's OFW account, e.g. America/Chicago. OFW reports wall-clock times with no zone; this is the zone they are read and shown in. Default: the server's DISPLAY_TZ").optional(),
+};
+
+// GET /pub/v1/calendar/detailed, verified live 2026-10-28. Loose and lenient:
+// only what the .ics builder reads, so a drift warns on stderr instead of
+// quietly yielding an empty calendar. (The basic variant is a different shape
+// and is passed through unvalidated, as it always was.)
+const detailedCalendarSchema = z.looseObject({
+  calendarItems: z.array(z.looseObject({ type: z.string(), startDate: z.looseObject({ dateTime: z.string() }) })),
+});
+
+async function readDetailedCalendar(client: OFWClient, startDate: string, endDate: string): Promise<unknown> {
+  const path = `/pub/v1/calendar/detailed?startDate=${encodeURIComponent(startDate)}&endDate=${encodeURIComponent(endDate)}`;
+  return parseLenient(detailedCalendarSchema, await client.request('GET', path), { label: 'ofw-mcp', context: 'GET /pub/v1/calendar/detailed' });
+}
+
+// The JSON block every .ics delivery leads with. Counts come first, so a reader
+// that stops early still learns what the calendar holds and what it dropped.
+function icsSummary(
+  built: ReturnType<typeof buildCalendarIcs>,
+  args: { startDate: string; endDate: string; types?: readonly string[] },
+  timeZone: string,
+) {
+  return {
+    format: 'ics',
+    events: built.counts.events,
+    custodyPeriods: built.counts.custodyPeriods,
+    omittedCount: built.counts.omitted,
+    startDate: args.startDate,
+    endDate: args.endDate,
+    timeZone,
+    ...(args.types?.length ? { types: args.types } : {}),
+    ...(built.omitted.length ? { omitted: built.omitted } : {}),
+    snapshot: 'Static: it does not update when OurFamilyWizard changes. Re-importing a later export updates events in place.',
+  };
+}
+
+export function registerCalendarTools(
+  server: McpServer,
+  client: OFWClient,
+  attachmentIO: AttachmentIO = new NodeAttachmentIO(),
+): void {
   // Calendar writes land on the court-visible record with no draft stage, but
   // events are reversible — 'all' mode, or 'drafts' + OFW_CALENDAR_WRITES=true.
   const allowWrites = getCalendarWritesAllowed();
 
   server.registerTool('ofw_list_events', {
-    description: 'List OurFamilyWizard calendar events in a date range',
+    description: "List OurFamilyWizard calendar items in a date range: events, connected (subscribed outside-calendar) events, custody handoffs (TRANSITION) and the per-day custody grid (guardianData, type SCHEDULE). Pass `types` to keep only some of them — the custody grid is most of a response's weight, so leave SCHEDULE out unless you need who-has-the-children per day. Times are OFW wall clock in the account's zone, rendered with an offset in `timeZone` (default: the server's DISPLAY_TZ). format:\"ics\" returns an iCalendar (.ics) text you can show or save — events, all-day events, and each custody period as a \"Parenting time\" event — after a short JSON summary of what was included and what was left out. To get a file or download link instead, use ofw_save_calendar_ics.",
     annotations: { readOnlyHint: true, openWorldHint: true },
     inputSchema: z.object({
-      startDate: z.string().describe('Start date YYYY-MM-DD'),
-      endDate: z.string().describe('End date YYYY-MM-DD'),
-      detailed: z.boolean().describe('Return full event details (default false)').optional(),
+      ...calendarRangeFields,
+      detailed: z.boolean().describe('Return full event details (default false). Ignored for format:"ics", which always reads the detailed calendar').optional(),
+      format: z.enum(['json', 'ics']).describe('json (default): the OFW payload. ics: a summary block, then the iCalendar text').optional(),
     }),
   }, async (args) => {
-    const variant = args.detailed ? 'detailed' : 'basic';
-    const data = await client.request(
-      'GET',
-      `/pub/v1/calendar/${variant}?startDate=${encodeURIComponent(args.startDate)}&endDate=${encodeURIComponent(args.endDate)}`
-    );
-    return jsonResponse(data);
+    const timeZone = resolveTimeZoneArg(args.timeZone);
+    const ics = args.format === 'ics';
+    const raw = await (ics || args.detailed
+      ? readDetailedCalendar(client, args.startDate, args.endDate)
+      : client.request('GET', `/pub/v1/calendar/basic?startDate=${encodeURIComponent(args.startDate)}&endDate=${encodeURIComponent(args.endDate)}`));
+    const data = filterCalendarTypes(raw, args.types);
+    if (ics) {
+      const built = buildCalendarIcs(data, { timeZone });
+      return {
+        content: [
+          { type: 'text' as const, text: jsonText(icsSummary(built, args, timeZone), timeZone) },
+          { type: 'text' as const, text: built.ics },
+        ],
+      };
+    }
+    return jsonResponse(data, timeZone);
+  });
+
+  // File delivery lives on its own tool so ofw_list_events stays read-only:
+  // hosts auto-approve a read, and a tool that MAY write a file is not one.
+  server.registerTool('ofw_save_calendar_ics', {
+    description: "Save an OurFamilyWizard date range as an iCalendar (.ics) file the user can import into Google, Apple or Outlook calendar — events, all-day events, and each custody period as a \"Parenting time\" event (OFW's own export leaves the parenting schedule out). Same filters as ofw_list_events. On a hosted connector the file is uploaded and you get a private download link that expires (default 1 hour); locally it is written inside the attachments directory (OFW_ATTACHMENTS_DIR, default ~/Downloads/ofw-mcp) and you get its path. Never overwrites an existing file. The file is a snapshot: it does not update when OFW changes, and re-importing a later export updates events in place (stable UIDs).",
+    // Additive: it adds a new local file (or a new uploaded object) and never
+    // replaces one. Nothing reaches OFW.
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+    inputSchema: z.object({
+      ...calendarRangeFields,
+      saveTo: z.string().describe('Local installs only: path or directory (trailing /) INSIDE the attachments directory; relative paths resolve against it. Default: <attachments dir>/ofw-calendar-<start>_<end>-<time>.ics. Ignored on a hosted connector').optional(),
+      linkMinutes: z.number().int().min(1).max(1440).describe('Hosted connector only: how long the download link works, in minutes (default 60, max 1440)').optional(),
+    }),
+  }, async (args) => {
+    const timeZone = resolveTimeZoneArg(args.timeZone);
+    const data = filterCalendarTypes(await readDetailedCalendar(client, args.startDate, args.endDate), args.types);
+    const now = new Date();
+    const built = buildCalendarIcs(data, { timeZone, now });
+    const summary = icsSummary(built, args, timeZone);
+    const fileName = `ofw-calendar-${args.startDate}_${args.endDate}-${now.toISOString().replace(/[-:]/g, '').slice(0, 15)}Z.ics`;
+
+    // mcp-host hands a hosted child its blob store; its disk is the runner's,
+    // which nobody can open, so the link is the deliverable there. A local
+    // install has no blob store and writes to disk.
+    const blob = blobStoreFromEnv();
+    if (blob) {
+      // The random segment keeps the link unguessable; the readable last
+      // segment is the name a browser saves the download under.
+      const key = `calendar/${randomUUID()}/${fileName}`;
+      await blob.put(key, built.ics, 'text/calendar');
+      const link = blob.signGetUrl(key, { ttlMs: (args.linkMinutes ?? 60) * 60_000 });
+      return jsonResponse({
+        delivered: 'link',
+        url: link.url,
+        expiresAt: formatInstant(new Date(link.expiresAtMs), timeZone).iso,
+        ...summary,
+        note: `Private link to the .ics — anyone holding it can download the file until it expires, so give it only to the user.${args.saveTo ? ' saveTo is ignored on a hosted connector.' : ''}`,
+      }, timeZone);
+    }
+    if (!attachmentIO.supportsDisk) {
+      return {
+        content: [
+          { type: 'text' as const, text: jsonText({ delivered: 'inline', forcedInline: true, ...summary, note: 'No disk or download store on this deployment, so the calendar is returned inline instead.' }, timeZone) },
+          { type: 'text' as const, text: built.ics },
+        ],
+      };
+    }
+    const root = resolve(getAttachmentsDir());
+    const path = resolveSaveDest(root, args.saveTo, fileName);
+    try {
+      await attachmentIO.writeDownload(path, Buffer.from(built.ics, 'utf8'), { root, overwrite: false });
+    } catch (e) {
+      // writeDownload's refusal names the download tool's force:true, which
+      // this tool does not have — an export never replaces a file.
+      if (e instanceof Error && /already exists/.test(e.message)) {
+        throw new Error(`Refusing to overwrite ${path}: a file already exists there. Choose another saveTo, or omit it for a fresh timestamped name.`);
+      }
+      throw e;
+    }
+    return jsonResponse({ delivered: 'disk', path, ...summary }, timeZone);
   });
 
   if (allowWrites) server.registerTool('ofw_create_event', {

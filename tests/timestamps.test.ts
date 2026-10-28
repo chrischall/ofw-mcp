@@ -6,6 +6,7 @@ import {
   isNaiveTimestamp,
   normalizeTimestampsInValue,
   parseTimestampValue,
+  resolveTimeZoneArg,
   toNaiveWallClock,
 } from '../src/timestamps.js';
 
@@ -28,6 +29,31 @@ describe('displayTimeZone', () => {
   it('falls back when DISPLAY_TZ is not a real IANA zone', () => {
     vi.stubEnv('DISPLAY_TZ', 'Mars/Olympus_Mons');
     expect(displayTimeZone()).toBe(DEFAULT_DISPLAY_TZ);
+  });
+});
+
+describe('resolveTimeZoneArg', () => {
+  it('uses the deployment zone when no per-call zone is given', () => {
+    vi.stubEnv('DISPLAY_TZ', 'America/Denver');
+    expect(resolveTimeZoneArg(undefined)).toBe('America/Denver');
+    expect(resolveTimeZoneArg('  ')).toBe('America/Denver');
+  });
+
+  it('takes an explicit IANA zone over DISPLAY_TZ', () => {
+    vi.stubEnv('DISPLAY_TZ', 'America/Denver');
+    expect(resolveTimeZoneArg(' Europe/London ')).toBe('Europe/London');
+    expect(resolveTimeZoneArg('UTC')).toBe('UTC');
+  });
+
+  // Unlike DISPLAY_TZ, a per-call zone is a deliberate request: falling back
+  // would answer in a zone the caller just said was wrong.
+  it('refuses an unknown zone instead of falling back', () => {
+    expect(() => resolveTimeZoneArg('Mars/Olympus_Mons')).toThrow(/IANA/);
+  });
+
+  it('refuses a fixed offset, which would be an hour wrong across DST', () => {
+    expect(() => resolveTimeZoneArg('-05:00')).toThrow(/fixed offset/);
+    expect(() => resolveTimeZoneArg('+0100')).toThrow(/fixed offset/);
   });
 });
 

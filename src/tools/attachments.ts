@@ -10,7 +10,7 @@
 // node:fs.
 
 import { chmodSync, readFileSync, realpathSync, statSync, mkdirSync, unlinkSync } from 'node:fs';
-import { basename, dirname, extname, isAbsolute, relative, resolve, sep } from 'node:path';
+import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { getDefaultAttachmentsDir, getUploadDir } from '../config.js';
 import {
   assertPathWithinRoots,
@@ -78,6 +78,26 @@ export interface WriteDownloadOptions {
 export function isWithin(root: string, candidate: string): boolean {
   const rel = relative(root, candidate);
   return rel !== '' && !rel.startsWith('..') && !isAbsolute(rel);
+}
+
+/**
+ * Where a tool's `saveTo` lands: inside `root` (the attachments directory),
+ * or refused. A relative path resolves against `root`, a leading `~` expands,
+ * and a trailing separator names a directory to put `defaultName` in. Lexical
+ * only — `writeDownload` re-checks the real path, symlinks resolved, at write
+ * time. The write is the boundary; this is the early, legible refusal.
+ */
+export function resolveSaveDest(root: string, saveTo: string | undefined, defaultName: string): string {
+  if (!saveTo) return join(root, defaultName);
+  const isDirArg = saveTo.endsWith('/') || saveTo.endsWith('\\');
+  // expandPath resolves a relative path against the process cwd; resolve it
+  // against the root instead, and only expand a leading ~.
+  const abs = resolve(root, saveTo.startsWith('~') ? expandPath(saveTo) : saveTo);
+  const dest = isDirArg ? join(abs, defaultName) : abs;
+  if (!isWithin(root, dest)) {
+    throw new Error(`Refusing to save to ${dest}: it is outside the attachments directory (${root}). Files can only be written inside it — pass a path or subdirectory under it, or set OFW_ATTACHMENTS_DIR to move it.`);
+  }
+  return dest;
 }
 
 // Lightweight mime sniff from extension. OFW re-derives mime from the filename

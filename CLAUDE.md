@@ -80,7 +80,8 @@ src/
     lifecycle.ts    "is this entity still what I think it is?" — classifyState/probeIds/resolveDraftKey/newDraftKey
     user.ts         ofw_get_profile, ofw_get_notifications
     messages.ts     folders, list, get, send, drafts, get_unread_sent, upload/download_attachment, sync_messages, check_freshness, status
-    calendar.ts     list/create/update/delete events
+    calendar.ts     list/create/update/delete events; ofw_list_events `types`/`timeZone`/`format:"ics"`, ofw_save_calendar_ics
+    calendar-ics.ts the OFW calendar → RFC 5545 builder + the `types` filter (custody periods from TRANSITION rows)
     expenses.ts     totals, list, create
     expense-reimbursement.ts  ofw_mark_expense_reimbursed — confirm-gated status PUT recording a reimbursement already settled outside OFW (never moves money); registered only in write mode all, not on the upload-only surface
     journal.ts      list, create entries
@@ -203,7 +204,9 @@ The allowlist covers the freshness/sync bookkeeping fields (`lastServerSyncAt`, 
 
 `jsonErrorResponse` routes through `jsonResponse`, so a refusal payload carries the same normalized freshness block as the success path.
 
-**`DISPLAY_TZ` is deployment-wide, not per-tenant.** OFW reports naive times in the *account's* zone, so a tenant outside `DISPLAY_TZ` gets the wrong offset on those values.
+**`DISPLAY_TZ` is deployment-wide, not per-tenant.** OFW reports naive times in the *account's* zone, so a tenant outside `DISPLAY_TZ` gets the wrong offset on those values. OFW exposes no account zone to read instead (`/pub/v2/profiles` carries only `languageLocale`), so the calendar tools take a per-call `timeZone` (`resolveTimeZoneArg`), threaded through `jsonResponse(data, tz)`. Unlike `DISPLAY_TZ` an unusable per-call value THROWS — the caller named that zone, and answering in another would look right while being wrong — and a fixed offset is refused.
+
+**Calendar export (`.ics`).** `ofw_list_events format:"ics"` returns the text inline (a `text/calendar` resource would be rejected by the hosted client); `ofw_save_calendar_ics` is a separate tool so `ofw_list_events` stays `readOnlyHint: true`. Delivery: `blobStoreFromEnv()` set (mcp-host) → PUT `calendar/<uuid>/<name>.ics` and return a signed GET link (default 1h, max 24h) — the runner's disk is unreachable, so the link is the deliverable; else disk via `writeDownload`, never overwriting; else inline (`forcedInline`). Live shape (2026-10-28): TRANSITION rows all have `id: 1`, a start only, and window-edge sentinels with a null start/end parent, so a custody period is the gap between consecutive handoffs and its UID is derived — from its real start, or its real END when the start is a sentinel. Times are written in UTC.
 
 `auth.ts` ignores blank values, the strings `"undefined"`/`"null"`, and unsubstituted `${VAR}` placeholders — defensive against MCP hosts passing the env block through unexpanded.
 
