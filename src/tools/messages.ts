@@ -21,8 +21,8 @@ import {
   getAllowMarkRead, getAttachmentsDir, getAutoRefreshStaleReads, getDefaultInlineAttachments,
   getFetchUnreadBodies, getSyncMaxRequests, getWriteMode,
 } from '../config.js';
-import { basename, join, resolve } from 'node:path';
-import { ApiRecipientSchema, deriveRead, expandPath, hasRealView, jsonErrorResponse, jsonResponse, jsonText, mapRecipients, notedJsonResponse, postMessageAndRefetch, reportsThreaded, UnconfirmedWriteError, reportsUnthreaded, threadedReplyTo, verifyWriteLanded, withReadState } from './_shared.js';
+import { basename, resolve } from 'node:path';
+import { ApiRecipientSchema, deriveRead, hasRealView, jsonErrorResponse, jsonResponse, jsonText, mapRecipients, notedJsonResponse, postMessageAndRefetch, reportsThreaded, UnconfirmedWriteError, reportsUnthreaded, threadedReplyTo, verifyWriteLanded, withReadState } from './_shared.js';
 import { parseLenient } from '@chrischall/mcp-utils';
 import { pageState } from './pagination.js';
 import { MESSAGE_VIEWS, viewDrafts, viewMessages, viewOne } from './project.js';
