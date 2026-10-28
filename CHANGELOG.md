@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.23.0](https://github.com/chrischall/ofw-mcp/compare/v2.22.0...v2.23.0) (2026-10-28)
+
+
+### Features
+
+* **calendar:** .ics export with custody schedule, type filter and per-call timeZone ([#400](https://github.com/chrischall/ofw-mcp/issues/400)) ([27948df](https://github.com/chrischall/ofw-mcp/commit/27948df287438459fbd4fd96d52a45bec8f6727c))
+
 ## [2.22.0](https://github.com/chrischall/ofw-mcp/compare/v2.21.0...v2.22.0) (2026-10-26)
 
 
