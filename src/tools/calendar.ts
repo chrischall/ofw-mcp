@@ -5,6 +5,7 @@ import { jsonResponse, requestWrite, textResponse, UnconfirmedWriteError, unconf
 import { CONFIRM_NOTE, confirmTokenParam, confirmWrite, stateRevision } from './_confirm.js';
 import { getCalendarWritesAllowed } from '../config.js';
 import { parseLenient } from '@chrischall/mcp-utils';
+import { assertCalendarExportHost, validateCalendarExportRequest, writeObservedCalendarIcs } from './calendar-ics.js';
 
 // OFW's real event-write API (reverse-engineered from the web app bundle):
 //   POST   /pub/v3/events                       create — 201 with the full event
@@ -181,6 +182,24 @@ export function registerCalendarTools(server: McpServer, client: OFWClient): voi
       `/pub/v1/calendar/${variant}?startDate=${encodeURIComponent(args.startDate)}&endDate=${encodeURIComponent(args.endDate)}`
     );
     return jsonResponse(data);
+  });
+
+  server.registerTool('ofw_export_calendar_ics', {
+    description: 'Save one bounded, observed OFW calendar response as a static local .ics plus provenance manifest. Includes timed native and subscribed events returned by the one detailed-list call; skips unsupported or ambiguous events with reasons. Requires a user-confirmed IANA account timezone. The output does not sync changes, prove complete feed coverage, or establish subscribed-event creation/edit history. Files are on the connector host, not automatically downloaded to the chat.',
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+    inputSchema: z.object({
+      startDate: z.string().describe('First source-local date, YYYY-MM-DD'),
+      endDate: z.string().describe('Last source-local date, YYYY-MM-DD; at most 31 days inclusive'),
+      timeZone: z.string().describe('IANA timezone confirmed by the account holder; never infer from DISPLAY_TZ'),
+      timezoneConfirmed: z.literal(true).describe('True only after account holder confirms this account timezone'),
+    }),
+  }, async (args) => {
+    if (args.timezoneConfirmed !== true) throw new Error('TIMEZONE_NOT_CONFIRMED');
+    assertCalendarExportHost();
+    validateCalendarExportRequest(args.startDate, args.endDate, args.timeZone);
+    const data = await client.request('GET',
+      `/pub/v1/calendar/detailed?startDate=${encodeURIComponent(args.startDate)}&endDate=${encodeURIComponent(args.endDate)}`);
+    return jsonResponse(await writeObservedCalendarIcs(data, args));
   });
 
   if (allowWrites) server.registerTool('ofw_create_event', {

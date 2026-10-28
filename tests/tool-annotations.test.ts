@@ -80,6 +80,8 @@ const EXPECTED: Record<string, Kind> = {
   ofw_check_freshness: 'destructive',
   ofw_status: 'destructive',
   ofw_list_events: 'read',
+  // Reads OFW but writes a new private local snapshot file.
+  ofw_export_calendar_ics: 'additive',
   // A shared event is on the co-parent's calendar at once; ofw_delete_event cannot un-show it.
   ofw_create_event: 'destructive',
   ofw_update_event: 'destructive',

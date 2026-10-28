@@ -299,6 +299,10 @@
       "description": "List calendar events in a date range"
     },
     {
+      "name": "ofw_export_calendar_ics",
+      "description": "Save one bounded detailed calendar response as a private static iCalendar snapshot with an omission manifest"
+    },
+    {
       "name": "ofw_create_event",
       "description": "Create a calendar event (a shared one is confirmed first)"
     },

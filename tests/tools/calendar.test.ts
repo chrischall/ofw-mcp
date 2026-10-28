@@ -2,6 +2,9 @@ import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { McpServer } from '@modelcontextprotocol/server';
 import { OFWClient } from '../../src/client.js';
 import { z } from 'zod';
+import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { registerCalendarTools } from '../../src/tools/calendar.js';
 import { CAN_ASK_CTX, NO_ELICIT_CTX, callConfirmed, callPreview, type GatedHandler } from './_confirm-helpers.js';
 
@@ -47,6 +50,81 @@ function setup(client: OFWClient) {
 }
 
 afterEach(() => vi.restoreAllMocks());
+
+describe('ofw_export_calendar_ics', () => {
+  it('refuses an unqualified Windows host before reading OFW', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'ofw-ics-windows-test-'));
+    const previousRoot = process.env.OFW_CALENDAR_EXPORT_DIR;
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform');
+    process.env.OFW_CALENDAR_EXPORT_DIR = join(root, 'exports');
+    Object.defineProperty(process, 'platform', { configurable: true, value: 'win32' });
+    try {
+      const client = makeClient({ calendarItems: [] });
+      setup(client);
+      const handler = handlers.get('ofw_export_calendar_ics')!;
+      await expect(handler({ startDate: '2026-11-01', endDate: '2026-11-30',
+        timeZone: 'America/Phoenix', timezoneConfirmed: true }))
+        .rejects.toThrow('CALENDAR_EXPORT_WINDOWS_UNQUALIFIED');
+      expect(client.request).not.toHaveBeenCalled();
+    } finally {
+      if (platform) Object.defineProperty(process, 'platform', platform);
+      if (previousRoot === undefined) delete process.env.OFW_CALENDAR_EXPORT_DIR;
+      else process.env.OFW_CALENDAR_EXPORT_DIR = previousRoot;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses an unconfirmed timezone before making an OFW request', async () => {
+    const client = makeClient({ calendarItems: [] });
+    setup(client);
+    const handler = handlers.get('ofw_export_calendar_ics')!;
+    await expect(handler({ startDate: '2026-11-01', endDate: '2026-11-30',
+      timeZone: 'America/Phoenix', timezoneConfirmed: false })).rejects.toThrow('TIMEZONE_NOT_CONFIRMED');
+    expect(client.request).not.toHaveBeenCalled();
+  });
+
+  it('saves one observed native and subscribed response as a private UTC snapshot', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'ofw-ics-synthetic-'));
+    const previous = process.env.OFW_CALENDAR_EXPORT_DIR;
+    process.env.OFW_CALENDAR_EXPORT_DIR = join(root, 'exports');
+    try {
+      const rows = [
+        { id: 11, type: 'EVENT', title: 'Fictional dentist', allDay: false,
+          startDate: { dateTime: '2026-11-12T08:30:00' }, endDate: { dateTime: '2026-11-12T09:00:00' } },
+        { id: 12, type: 'CONNECTED_EVENT', connectedCalendarSubscriptionId: 42,
+          title: 'Fictional activity', location: 'Fictional gym', allDay: false,
+          startDate: { dateTime: '2026-11-12T10:00:00' }, endDate: { dateTime: '2026-11-12T11:00:00' } },
+      ];
+      const client = makeClient({ calendarItems: rows });
+      setup(client);
+      const handler = handlers.get('ofw_export_calendar_ics');
+      expect(handler).toBeDefined();
+      if (!handler) return;
+      const response = await handler({ startDate: '2026-11-01', endDate: '2026-11-30',
+        timeZone: 'America/Phoenix', timezoneConfirmed: true });
+      expect(client.request).toHaveBeenCalledExactlyOnceWith('GET',
+        '/pub/v1/calendar/detailed?startDate=2026-11-01&endDate=2026-11-30');
+      const receipt = JSON.parse(response.content[0].text);
+      expect(receipt.includedCount).toBe(2);
+      expect(receipt.omittedCount).toBe(0);
+      expect(receipt.sourceCoverageComplete).toBe(false);
+      expect(JSON.stringify(response)).not.toContain('Fictional activity');
+      const ics = readFileSync(receipt.path, 'utf8');
+      expect(ics).toContain('DTSTART:20261112T153000Z\r\n');
+      expect(ics).toContain('DTSTART:20261112T170000Z\r\n');
+      expect(ics).toContain('LOCATION:Fictional gym\r\n');
+      expect((ics.match(/BEGIN:VEVENT/g) ?? [])).toHaveLength(2);
+      expect(statSync(receipt.path).mode & 0o077).toBe(0);
+      const manifest = JSON.parse(readFileSync(receipt.manifestPath, 'utf8'));
+      expect(manifest.staticSnapshot).toBe(true);
+      expect(manifest.selectedSourceIds).toHaveLength(2);
+    } finally {
+      if (previous === undefined) delete process.env.OFW_CALENDAR_EXPORT_DIR;
+      else process.env.OFW_CALENDAR_EXPORT_DIR = previous;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
 
 describe('ofw_list_events', () => {
   it('calls calendar/basic by default', async () => {
