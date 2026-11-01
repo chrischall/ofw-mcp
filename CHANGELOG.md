@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.24.0](https://github.com/chrischall/ofw-mcp/compare/v2.23.0...v2.24.0) (2026-11-01)
+
+
+### Features
+
+* **messages:** optionally confirm before an unread message is marked read (OFW_CONFIRM_MARK_READ) ([#404](https://github.com/chrischall/ofw-mcp/issues/404)) ([d4010aa](https://github.com/chrischall/ofw-mcp/commit/d4010aa7b4e31fc0a3428e1c4209094e54cd2a23))
+
 ## [2.23.0](https://github.com/chrischall/ofw-mcp/compare/v2.22.0...v2.23.0) (2026-10-28)
 
 
