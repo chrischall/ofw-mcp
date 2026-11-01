@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DEFAULT_FRESHNESS_TTL_SECONDS, getAllowMarkRead, getAttachmentsDir, getCacheDbPath, getCalendarWritesAllowed, getDefaultInlineAttachments, getCacheDir, getExpenseOnly, getExpenseUploadOnly, getFetchUnreadBodies, getFreshnessTtlSeconds, getSyncMaxRequests, getUploadDir, getWriteMode } from '../src/config.js';
+import { DEFAULT_FRESHNESS_TTL_SECONDS, getAllowMarkRead, getAttachmentsDir, getCacheDbPath, getCalendarWritesAllowed, getConfirmMarkRead, getDefaultInlineAttachments, getCacheDir, getExpenseOnly, getExpenseUploadOnly, getFetchUnreadBodies, getFreshnessTtlSeconds, getSyncMaxRequests, getUploadDir, getWriteMode } from '../src/config.js';
 
 describe('getCacheDbPath', () => {
   let tmp: string;
@@ -243,6 +243,44 @@ describe('getAllowMarkRead', () => {
     process.env[KEY] = 'flase';
     expect(getAllowMarkRead()).toBe(false);
     expect(err).toHaveBeenCalledWith(expect.stringContaining('OFW_ALLOW_MARK_READ'));
+  });
+});
+
+describe('getConfirmMarkRead', () => {
+  const KEY = 'OFW_CONFIRM_MARK_READ';
+  let prev: string | undefined;
+  beforeEach(() => { prev = process.env[KEY]; delete process.env[KEY]; });
+  afterEach(() => {
+    if (prev === undefined) delete process.env[KEY];
+    else process.env[KEY] = prev;
+    vi.restoreAllMocks();
+  });
+
+  it('defaults to false when unset or blank — the pre-existing behaviour', () => {
+    expect(getConfirmMarkRead()).toBe(false);
+    process.env[KEY] = '  ';
+    expect(getConfirmMarkRead()).toBe(false);
+  });
+
+  it('accepts the affirmative spellings', () => {
+    for (const v of ['1', 'true', 'TRUE', 'yes', 'on', ' true ']) {
+      process.env[KEY] = v;
+      expect(getConfirmMarkRead()).toBe(true);
+    }
+  });
+
+  it('accepts the negative spellings', () => {
+    for (const v of ['0', 'false', 'no', 'off']) {
+      process.env[KEY] = v;
+      expect(getConfirmMarkRead()).toBe(false);
+    }
+  });
+
+  it('fails closed (confirmation required) with a warning on an unrecognized value', () => {
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    process.env[KEY] = 'ture';
+    expect(getConfirmMarkRead()).toBe(true);
+    expect(err).toHaveBeenCalledWith(expect.stringContaining('OFW_CONFIRM_MARK_READ'));
   });
 });
 

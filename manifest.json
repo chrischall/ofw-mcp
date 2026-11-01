@@ -43,6 +43,7 @@
         "OFW_WRITE_MODE": "${user_config.ofw_write_mode}",
         "OFW_CALENDAR_WRITES": "${user_config.ofw_calendar_writes}",
         "OFW_ALLOW_MARK_READ": "${user_config.ofw_allow_mark_read}",
+        "OFW_CONFIRM_MARK_READ": "${user_config.ofw_confirm_mark_read}",
         "OFW_FETCH_UNREAD_BODIES": "${user_config.ofw_fetch_unread_bodies}",
         "OFW_READ_DAYS": "${user_config.ofw_read_days}",
         "OFW_NO_READ_DAYS": "${user_config.ofw_no_read_days}",
@@ -118,6 +119,13 @@
       "description": "Reading a message body for the first time marks it READ on OurFamilyWizard and stamps a \"First Viewed\" time your co-parent can see - part of the record, and irreversible. Leave on for the long-standing behaviour; turn off to forbid it entirely (no per-call argument can override).",
       "required": false,
       "default": true
+    },
+    "ofw_confirm_mark_read": {
+      "type": "boolean",
+      "title": "Ask before marking messages read",
+      "description": "Before opening an unread message (which marks it READ and stamps a co-parent-visible \"First Viewed\" time), show its subject, sender and sent time and ask you to confirm. Also turns off the bulk paths that would mark messages read without asking.",
+      "required": false,
+      "default": false
     },
     "ofw_fetch_unread_bodies": {
       "type": "boolean",

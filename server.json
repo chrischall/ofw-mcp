@@ -48,6 +48,12 @@
           "format": "string"
         },
         {
+          "name": "OFW_CONFIRM_MARK_READ",
+          "description": "Default \"false\". Set \"true\" to show an unread message's subject, sender and sent time and ask for confirmation before opening it marks it read. Also disables the bulk mark-read paths (sync fetchUnreadBodies, allowMarkRead probes).",
+          "isRequired": false,
+          "format": "string"
+        },
+        {
           "name": "OFW_FETCH_UNREAD_BODIES",
           "description": "Default \"false\". Whether ofw_sync_messages fetches unread inbox bodies by default (each fetch stamps a First Viewed time). Capped by OFW_ALLOW_MARK_READ.",
           "isRequired": false,

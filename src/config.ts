@@ -178,6 +178,34 @@ export function getAllowMarkRead(): boolean {
 }
 
 /**
+ * Ask before a read stamps the record.
+ *
+ * With OFW_CONFIRM_MARK_READ=true, `ofw_get_message` no longer opens an unread
+ * inbox message silently: it shows the subject, sender and sent time and asks
+ * the user to confirm — through the same gate as a send (an elicitation prompt
+ * where the client supports one, otherwise the two-phase confirmToken flow).
+ * The bulk paths that stamp (`ofw_sync_messages fetchUnreadBodies`, the
+ * `allowMarkRead` probes of `ofw_check_freshness` / `ofw_status`) cannot ask
+ * about each message, so they are switched off instead.
+ *
+ * Default FALSE: unset is exactly the shipped behaviour. An unrecognized value
+ * fails CLOSED to true, with a warning: someone who typed "ture" meant to turn
+ * the prompt on, and honouring the typo as "off" would stamp without asking.
+ * OFW_ALLOW_MARK_READ=false still wins — confirmation cannot raise that ceiling.
+ */
+export function getConfirmMarkRead(): boolean {
+  const raw = process.env.OFW_CONFIRM_MARK_READ;
+  if (typeof raw !== 'string' || raw.trim().length === 0) return false;
+  const value = raw.trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(value)) return true;
+  if (['0', 'false', 'no', 'off'].includes(value)) return false;
+  console.error(
+    `[ofw-mcp] Unrecognized OFW_CONFIRM_MARK_READ "${raw.trim()}" — failing closed to "true" (opening an unread message asks for confirmation first). Valid values: true, false.`,
+  );
+  return true;
+}
+
+/**
  * Default for ofw_sync_messages' `fetchUnreadBodies` arg. False (the shipped
  * default) so an ordinary sync never stamps unread inbox messages; set
  * OFW_FETCH_UNREAD_BODIES=true on a deployment where read receipts are routine
