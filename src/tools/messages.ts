@@ -18,16 +18,16 @@ import type { AttachmentIO } from './attachments.js';
 import { buildInlineDelivery, tryExtract } from './delivery.js';
 import { resolveDownloadMime, resolveSaveDest } from './attachments.js';
 import {
-  getAllowMarkRead, getAttachmentsDir, getAutoRefreshStaleReads, getDefaultInlineAttachments,
+  getAllowMarkRead, getConfirmMarkRead, getAttachmentsDir, getAutoRefreshStaleReads, getDefaultInlineAttachments,
   getFetchUnreadBodies, getSyncMaxRequests, getWriteMode,
 } from '../config.js';
 import { basename, resolve } from 'node:path';
 import { ApiRecipientSchema, deriveRead, hasRealView, jsonErrorResponse, jsonResponse, jsonText, mapRecipients, notedJsonResponse, postMessageAndRefetch, reportsThreaded, UnconfirmedWriteError, reportsUnthreaded, threadedReplyTo, verifyWriteLanded, withReadState } from './_shared.js';
 import { parseLenient } from '@chrischall/mcp-utils';
 import { pageState } from './pagination.js';
-import { MESSAGE_VIEWS, viewDrafts, viewMessages, viewOne } from './project.js';
+import { MESSAGE_VIEWS, senderOf, viewDrafts, viewMessages, viewOne } from './project.js';
 import { resolveView, viewParam } from '@chrischall/mcp-utils';
-import { nowNaiveWallClock, toNaiveWallClock } from '../timestamps.js';
+import { normalizeTimestampsInValue, nowNaiveWallClock, toNaiveWallClock } from '../timestamps.js';
 import { readingBlockedToday } from '../read-days.js';
 
 // Schemas for the load-bearing fields of each /pub/v3 response this file
@@ -251,12 +251,65 @@ function unverifiedEmptyResponse(input: {
 }
 
 /**
- * Whether ANY tool may mark a message read right now: the OFW_ALLOW_MARK_READ
- * ceiling, AND today being a reading day (OFW_READ_DAYS / OFW_NO_READ_DAYS).
- * Both are deployment settings a per-call argument cannot raise.
+ * Whether a BULK path may mark messages read right now (sync's
+ * fetchUnreadBodies, the allowMarkRead probes): the OFW_ALLOW_MARK_READ
+ * ceiling, today being a reading day (OFW_READ_DAYS / OFW_NO_READ_DAYS), and
+ * OFW_CONFIRM_MARK_READ being off — those paths stamp many messages without
+ * looking at any of them, so they have nothing to put in front of the user.
+ * With confirmation on, ofw_get_message (which asks) is the one way in. All
+ * are deployment settings a per-call argument cannot raise.
  */
 function markReadPermitted(): boolean {
-  return getAllowMarkRead() && readingBlockedToday() === null;
+  return getAllowMarkRead() && readingBlockedToday() === null && !getConfirmMarkRead();
+}
+
+/**
+ * OFW_CONFIRM_MARK_READ: before `ofw_get_message` fetches a body that would
+ * mark an unread inbox message read, show the user which message it is and
+ * ask. Called only after markReadVerdict let the fetch through, so the
+ * OFW_ALLOW_MARK_READ ceiling and allowMarkRead:false have already refused.
+ *
+ * Returns undefined to proceed with the fetch, otherwise the result to return.
+ */
+async function confirmMarkRead(
+  ctx: Parameters<typeof confirmWrite>[0],
+  cached: MessageRow | null,
+  args: { messageId: string; confirmToken?: string },
+): Promise<Awaited<ReturnType<typeof confirmWrite>>> {
+  if (!getConfirmMarkRead()) return undefined;
+  // Same "would this stamp?" rule as markReadVerdict: a sent or already-read
+  // message changes nothing on OFW, so there is nothing to ask about.
+  if (cached !== null && !(cached.folder === 'inbox' && !deriveRead(cached))) return undefined;
+  if (cached === null) {
+    // Nothing to show: the subject and time live only behind the request that
+    // would stamp it. A prompt reading "open message 123?" is not a choice.
+    return jsonErrorResponse({
+      error: 'MARK_READ_CONFIRMATION_UNAVAILABLE',
+      messageId: Number(args.messageId),
+      reason: 'This server asks before opening an unread message (OFW_CONFIRM_MARK_READ), but this id is not in the cache, so there is no subject or time to show — and fetching them is the request that would mark it read.',
+      hint: 'Run ofw_sync_messages first: it walks list pages, not bodies, so it learns the subject and sent time without marking anything read. Then call ofw_get_message again.',
+    });
+  }
+  // The preview never passes through jsonResponse, so normalize here: sentAt
+  // gains its explicit offset and a weekday-first sentAtDisplay.
+  const when = normalizeTimestampsInValue({ sentAt: cached.sentAt });
+  return confirmWrite(ctx, {
+    args,
+    tool: 'ofw_get_message',
+    action: 'ofw.message.mark_read',
+    message: `Open this unread OurFamilyWizard message and mark it read? "${cached.subject}" — ${(when as Record<string, unknown>).sentAtDisplay ?? cached.sentAt}. Opening it stamps a "First Viewed" time your co-parent can see; that cannot be undone.`,
+    target: `message:${cached.id}`,
+    payload: { messageId: cached.id, markRead: true },
+    preview: {
+      action: 'Open unread OurFamilyWizard message (marks it READ)',
+      warning: 'Opening this message marks it read on OurFamilyWizard and stamps a "First Viewed" time your co-parent can see. It is part of the record and cannot be undone.',
+      messageId: cached.id,
+      subject: cached.subject,
+      from: senderOf(cached),
+      ...when,
+    },
+    confirmToken: args.confirmToken,
+  });
 }
 
 /**
@@ -537,7 +590,7 @@ export function registerMessageTools(
   });
 
   server.registerTool('ofw_get_message', {
-    description: 'Get a single OurFamilyWizard message OR draft by ID. Reads from local cache when available; otherwise fetches from OFW — and for an UNREAD INBOX message that fetch marks it read and stamps a "First Viewed" time the co-parent can see, which is part of the record and cannot be undone. Pass allowMarkRead:false to refuse such a fetch instead (cached bodies, sent messages and already-read messages are unaffected, because none of them stamp anything). For ids that match a draft (in the drafts cache), the response carries folder="drafts" and the body/subject/recipients reflect the drafts cache (which ofw_sync_messages keeps fresh) — drafts have no `fromUser`, and `sentAt`/`fetchedBodyAt` mirror the draft\'s `modifiedAt`. For inbox/sent messages, folder is "inbox" or "sent" as before. On a server-configured no-read day (OFW_READ_DAYS / OFW_NO_READ_DAYS) inbox/sent bodies are withheld (body:null, bodyWithheld:true, readingBlocked says when reading resumes) and OFW is never contacted.',
+    description: 'Get a single OurFamilyWizard message OR draft by ID. Reads from local cache when available; otherwise fetches from OFW — and for an UNREAD INBOX message that fetch marks it read and stamps a "First Viewed" time the co-parent can see, which is part of the record and cannot be undone. Pass allowMarkRead:false to refuse such a fetch instead (cached bodies, sent messages and already-read messages are unaffected, because none of them stamp anything). For ids that match a draft (in the drafts cache), the response carries folder="drafts" and the body/subject/recipients reflect the drafts cache (which ofw_sync_messages keeps fresh) — drafts have no `fromUser`, and `sentAt`/`fetchedBodyAt` mirror the draft\'s `modifiedAt`. For inbox/sent messages, folder is "inbox" or "sent" as before. On a server-configured no-read day (OFW_READ_DAYS / OFW_NO_READ_DAYS) inbox/sent bodies are withheld (body:null, bodyWithheld:true, readingBlocked says when reading resumes) and OFW is never contacted. When the server runs with OFW_CONFIRM_MARK_READ=true, opening an unread inbox message first shows its subject, sender and sent time and asks the user to confirm marking it read: a confirmation prompt where the client supports one; otherwise the first call fetches NOTHING and returns that preview plus a confirmToken, and only a repeat call with that token opens the message (see MCP_CONFIRM_MODE). Show the user the preview and wait for their yes before repeating the call.',
     annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
     inputSchema: z.object({
       messageId: z.string().describe('Message ID (also accepts draft IDs — drafts are routed via the drafts cache)'),
@@ -545,8 +598,9 @@ export function registerMessageTools(
       view: viewParam(MESSAGE_VIEWS, {
         note: 'compact omits OurFamilyWizard\'s raw `listData` echo, which duplicates this record\'s own id, subject, sentAt, recipients and read flag; the sender is promoted to `from`, and `files`/`replied` are kept. Pass "full" for the echo.',
       }),
+      confirmToken: confirmTokenParam,
     }),
-  }, async (args) => {
+  }, async (args, ctx) => {
     const id = Number(args.messageId);
     const view = resolveView(args.view, MESSAGE_VIEWS);
     const cache = cacheProvider();
@@ -693,6 +747,8 @@ export function registerMessageTools(
     // made as a side effect of an ordinary read, so it gets an explicit gate.
     const markReadCheck = markReadVerdict(cached, args.allowMarkRead);
     if (markReadCheck !== null) return markReadCheck;
+    const confirmGate = await confirmMarkRead(ctx, cached, args);
+    if (confirmGate) return confirmGate;
 
     const detail = parseLenient(
       MessageDetailSchema,

@@ -50,7 +50,7 @@ function asRecord(value: unknown): Record<string, unknown> | null {
  * it would have taken the sender's name off every message, and compact is
  * where a field that has never worked starts working.
  */
-function senderOf(row: MessageRow): string | null {
+export function senderOf(row: MessageRow): string | null {
   if (typeof row.fromUser === 'string' && row.fromUser !== '') return row.fromUser;
   const author = asRecord(asRecord(row.listData)?.author);
   const name = author?.name;
