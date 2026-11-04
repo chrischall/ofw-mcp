@@ -5,7 +5,7 @@ import { syncAll, unreadInboxNote, fetchAttachmentMeta, fetchAttachmentMetaForMe
 import type { DraftsCacheStatus } from '../sync.js';
 import { buildFreshness } from './freshness.js';
 import type { FreshnessBlock } from './freshness.js';
-import { briefDate, briefLine, briefText, familyMeta } from './hints.js';
+import { briefDate, briefLine, briefPage, briefResult, familyMeta } from './hints.js';
 import {
   DraftFreshnessError, checkDraftFreshness, draftRevision, fetchServerDraft, staleDraftPayload,
 } from './draft-freshness.js';
@@ -470,7 +470,7 @@ async function describeRecipients(
 const LIST_MESSAGES_VIEW = z.enum([...MESSAGE_VIEWS, 'brief']).optional().describe(
   `${viewParam(MESSAGE_VIEWS, {
     note: 'compact omits OurFamilyWizard\'s raw `listData` echo, which duplicates this record\'s own id, subject, sentAt, recipients and read flag; the sender is promoted to `from`, and `files`/`replied` are kept. Pass "full" for the echo.',
-  }).description} "brief" answers plain text instead, one line per message: sender: subject — sent time (ISO-8601) — unread|read|sent; a page that is not the whole result ends with a "-- N of M shown" line, and no match answers "-- none".`,
+  }).description} "brief" answers the lines inside an untrusted-data envelope ({untrusted_content, note, data: string[]}) instead, one line per message: sender: subject — sent time (ISO-8601) — unread|read|sent; a subject starting with "-- " or "\\" gains one leading "\\"; a page that is not the whole result ends with a "-- N of M shown" line, and no match answers "-- none".`,
 );
 
 /** One message as a brief line: `<sender>: <subject> — <sent> — unread|read|sent`. */
@@ -612,7 +612,10 @@ export function registerMessageTools(
 
     const { messages, total, freshness } = value;
     if (brief) {
-      return { content: [{ type: 'text' as const, text: briefText(messages.map(briefMessageLine), { shown: messages.length, total }) }] };
+      return briefResult(
+        briefPage(messages.map(briefMessageLine), { shown: messages.length, total }),
+        'Message subjects and sender names are written by your co-parent and other OurFamilyWizard users.',
+      );
     }
     // `complete` describes the RESULT SET, not the sync: true only when this
     // payload holds every matching message the server has. `syncComplete` /

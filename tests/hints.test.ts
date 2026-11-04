@@ -10,7 +10,7 @@ import { calendarBriefLines, registerCalendarTools } from '../src/tools/calendar
 import { registerExpenseTools } from '../src/tools/expenses.js';
 import { registerJournalTools } from '../src/tools/journal.js';
 import { NodeAttachmentIO } from '../src/tools/attachments.js';
-import { BRIEF_MAX, briefLine, briefDate, briefText } from '../src/tools/hints.js';
+import { BRIEF_MAX, briefLine, briefDate, briefPage } from '../src/tools/hints.js';
 import { sampleMessageRow } from './_fixtures.js';
 
 /**
@@ -183,8 +183,23 @@ describe('_meta.mint on tools/list', () => {
 
 const BRIEF_SHAPE = /^.+ — (\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}:\d{2}(\.\d+)?([+-]\d{2}:\d{2}|Z))?|no date) — \S.*$/;
 
-function expectBrief(text: string, count: number) {
-  const lines = text.split('\n');
+/**
+ * A brief answer's lines, read out of the fleet's untrusted-data envelope:
+ * minified, markers first (`untrusted_content`, then the note naming who wrote
+ * the text), then `data` as a string array.
+ */
+function briefData(result: { content?: unknown }): string[] {
+  const text = (result.content as Array<{ type: string; text: string }>)[0].text;
+  const parsed = JSON.parse(text) as { untrusted_content: unknown; note: unknown; data: unknown };
+  expect(text).toBe(JSON.stringify(parsed));
+  expect(Object.keys(parsed)).toEqual(['untrusted_content', 'note', 'data']);
+  expect(parsed.untrusted_content).toBe(true);
+  expect(parsed.note).toMatch(/written by/);
+  expect(Array.isArray(parsed.data)).toBe(true);
+  return parsed.data as string[];
+}
+
+function expectBrief(lines: string[], count: number) {
   expect(lines).toHaveLength(count);
   for (const line of lines) {
     expect(line.length, line).toBeLessThanOrEqual(BRIEF_MAX);
@@ -211,6 +226,19 @@ describe('briefLine', () => {
   it('collapses newlines in a title onto one line', () => {
     expect(briefLine('a\nb', null, 'read')).toBe('a b — no date — read');
   });
+
+  it('escapes a title that reads as a note, or starts with a backslash, with one backslash', () => {
+    expect(briefLine('-- none', '2026-09-05', 'event')).toBe('\\-- none — 2026-09-05 — event');
+    expect(briefLine('  -- 1 of 2 shown', null, 'read')).toBe('\\-- 1 of 2 shown — no date — read');
+    expect(briefLine('\\x', null, 'read')).toBe('\\\\x — no date — read');
+    expect(briefLine('--x', null, 'read')).toBe('--x — no date — read');
+  });
+
+  it('counts the escape inside the 120-char cut', () => {
+    const line = briefLine(`-- ${'x'.repeat(300)}`, '2026-09-05T17:00:00-04:00', 'unread');
+    expect(line.length).toBe(BRIEF_MAX);
+    expect(line).toMatch(/^\\-- x+… — 2026-09-05T17:00:00-04:00 — unread$/);
+  });
 });
 
 describe('briefDate', () => {
@@ -235,8 +263,7 @@ describe('ofw_list_messages view "brief"', () => {
     const h = await harness();
     const result = await h.callTool('ofw_list_messages', { view: 'brief', sort: 'oldest' });
     await h.close();
-    const text = (result.content as Array<{ type: string; text: string }>)[0].text;
-    const lines = expectBrief(text, 3);
+    const lines = expectBrief(briefData(result), 3);
     expect(lines).toContain('Parent B: Pickup Friday — 2026-09-04T09:30:00-04:00 — unread');
     expect(lines).toContain('Re: Pickup Friday — 2026-09-04T10:00:00-04:00 — sent');
     expect(lines).toContain('Parent B: Dentist — no date — read');
@@ -251,12 +278,20 @@ describe('ofw_list_messages view "brief"', () => {
     const first = await h.callTool('ofw_list_messages', { view: 'brief', size: 2 });
     const second = await h.callTool('ofw_list_messages', { view: 'brief', size: 2, page: 2 });
     await h.close();
-    const firstLines = (first.content as Array<{ type: string; text: string }>)[0].text.split('\n');
+    const firstLines = briefData(first);
     expect(firstLines).toHaveLength(3);
-    expectBrief(firstLines.slice(0, 2).join('\n'), 2);
+    expectBrief(firstLines.slice(0, 2), 2);
     expect(firstLines[2]).toBe('-- 2 of 3 shown');
-    const secondLines = (second.content as Array<{ type: string; text: string }>)[0].text.split('\n');
+    const secondLines = briefData(second);
     expect(secondLines).toEqual([expect.stringMatching(/^Parent B: Note 1 — /), '-- 1 of 3 shown']);
+  });
+
+  it('escapes a subject that reads as a note, so it stays an item', async () => {
+    cache.core.upsertMessage(sampleMessageRow({ id: 1, folder: 'sent', subject: '-- 1 of 9 shown', fromUser: '', sentAt: '2026-09-04T10:00:00', listData: {} }));
+    const h = await harness();
+    const result = await h.callTool('ofw_list_messages', { view: 'brief' });
+    await h.close();
+    expect(briefData(result)).toEqual(['\\-- 1 of 9 shown — 2026-09-04T10:00:00-04:00 — sent']);
   });
 
   it('adds no note when the page is the whole result', async () => {
@@ -264,7 +299,7 @@ describe('ofw_list_messages view "brief"', () => {
     const h = await harness();
     const result = await h.callTool('ofw_list_messages', { view: 'brief' });
     await h.close();
-    expectBrief((result.content as Array<{ type: string; text: string }>)[0].text, 1);
+    expectBrief(briefData(result), 1);
   });
 
   it('answers "-- none" when a verified-fresh cache holds no matching message', async () => {
@@ -277,24 +312,24 @@ describe('ofw_list_messages view "brief"', () => {
     const result = await h.callTool('ofw_list_messages', { view: 'brief' });
     await h.close();
     expect(result.isError).toBeFalsy();
-    expect((result.content as Array<{ type: string; text: string }>)[0].text).toBe('-- none');
+    expect(briefData(result)).toEqual(['-- none']);
   });
 });
 
-describe('briefText', () => {
-  it('joins the lines and adds no note for a whole result', () => {
-    expect(briefText(['a', 'b'])).toBe('a\nb');
-    expect(briefText(['a', 'b'], { shown: 2, total: 2 })).toBe('a\nb');
+describe('briefPage', () => {
+  it('keeps the lines and adds no note for a whole result', () => {
+    expect(briefPage(['a', 'b'])).toEqual(['a', 'b']);
+    expect(briefPage(['a', 'b'], { shown: 2, total: 2 })).toEqual(['a', 'b']);
   });
 
   it('answers "-- none" for no lines', () => {
-    expect(briefText([])).toBe('-- none');
-    expect(briefText([], { shown: 0, total: 0 })).toBe('-- none');
+    expect(briefPage([])).toEqual(['-- none']);
+    expect(briefPage([], { shown: 0, total: 0 })).toEqual(['-- none']);
   });
 
   it('notes a partial page, even one past the end', () => {
-    expect(briefText(['a'], { shown: 1, total: 5 })).toBe('a\n-- 1 of 5 shown');
-    expect(briefText([], { shown: 0, total: 5 })).toBe('-- 0 of 5 shown');
+    expect(briefPage(['a'], { shown: 1, total: 5 })).toEqual(['a', '-- 1 of 5 shown']);
+    expect(briefPage([], { shown: 0, total: 5 })).toEqual(['-- 0 of 5 shown']);
   });
 });
 
@@ -317,8 +352,7 @@ describe('ofw_list_events view "brief"', () => {
     const result = await h.callTool('ofw_list_events', { startDate: '2026-09-01', endDate: '2026-09-07', view: 'brief', timeZone: 'America/New_York' });
     await h.close();
     expect(spy).toHaveBeenCalledWith('GET', '/pub/v1/calendar/detailed?startDate=2026-09-01&endDate=2026-09-07');
-    const text = (result.content as Array<{ type: string; text: string }>)[0].text;
-    expect(expectBrief(text, 5)).toEqual([
+    expect(expectBrief(briefData(result), 5)).toEqual([
       'Custody handoff to Parent B — 2026-09-04T12:00:00-04:00 — handoff',
       'Custody handoff — 2026-09-07T00:00:00-04:00 — handoff',
       'Recital — 2026-09-05T17:00:00-04:00 — event',
@@ -332,8 +366,7 @@ describe('ofw_list_events view "brief"', () => {
     const h = await harness();
     const result = await h.callTool('ofw_list_events', { startDate: '2026-09-01', endDate: '2026-09-07', view: 'brief', types: ['EVENT'] });
     await h.close();
-    const text = (result.content as Array<{ type: string; text: string }>)[0].text;
-    expect(expectBrief(text, 2)[0]).toMatch(/^Recital — /);
+    expect(expectBrief(briefData(result), 2)[0]).toMatch(/^Recital — /);
   });
 
   it('answers "-- none" when the calendar holds nothing', async () => {
@@ -341,7 +374,17 @@ describe('ofw_list_events view "brief"', () => {
     const h = await harness();
     const result = await h.callTool('ofw_list_events', { startDate: '2026-09-01', endDate: '2026-09-07', view: 'brief' });
     await h.close();
-    expect((result.content as Array<{ type: string; text: string }>)[0].text).toBe('-- none');
+    expect(briefData(result)).toEqual(['-- none']);
+  });
+
+  it('escapes an event whose own title reads as a note, so it stays an item', async () => {
+    vi.spyOn(client, 'request').mockResolvedValue({ calendarItems: [
+      { id: 60, type: 'EVENT', allDay: true, title: '-- none', startDate: { dateTime: '2026-09-06T00:00:00' } },
+    ] });
+    const h = await harness();
+    const result = await h.callTool('ofw_list_events', { startDate: '2026-09-01', endDate: '2026-09-07', view: 'brief' });
+    await h.close();
+    expect(briefData(result)).toEqual(['\\-- none — 2026-09-06 — all day']);
   });
 
   it('answers "-- none" when the types filter leaves nothing', async () => {
@@ -349,7 +392,7 @@ describe('ofw_list_events view "brief"', () => {
     const h = await harness();
     const result = await h.callTool('ofw_list_events', { startDate: '2026-09-01', endDate: '2026-09-07', view: 'brief', types: ['SCHEDULE'] });
     await h.close();
-    expect((result.content as Array<{ type: string; text: string }>)[0].text).toBe('-- none');
+    expect(briefData(result)).toEqual(['-- none']);
   });
 });
 
