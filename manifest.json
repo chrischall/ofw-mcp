@@ -123,7 +123,7 @@
     "ofw_confirm_mark_read": {
       "type": "boolean",
       "title": "Ask before marking messages read",
-      "description": "Before opening an unread message (which marks it READ and stamps a co-parent-visible \"First Viewed\" time), show its subject, sender and sent time and ask you to confirm. Also turns off the bulk paths that would mark messages read without asking.",
+      "description": "Before opening an unread message (which marks it READ and stamps a co-parent-visible \"First Viewed\" time), show its subject, sender and sent time and ask you to confirm. A sync asked to fetch unread bodies lists them and asks first too; the probes that cannot show you a message stay off.",
       "required": false,
       "default": false
     },

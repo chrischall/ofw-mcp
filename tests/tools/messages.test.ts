@@ -2830,6 +2830,34 @@ describe('mark-read gate (issue #192)', () => {
     expect(spy).not.toHaveBeenCalled();
   });
 
+  it('ofw_sync_messages SAYS when the ceiling refused fetchUnreadBodies — never silently', async () => {
+    process.env[KEY] = 'false';
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request');
+    vi.spyOn(syncModule, 'syncAll').mockResolvedValue({
+      synced: {}, unreadInbox: [], refreshed: [], notRefreshed: [], done: true, syncComplete: true,
+    } as never);
+    upsertMessage(unreadInbox(720));
+    setup(client);
+
+    const parsed = JSON.parse((await handlers.get('ofw_sync_messages')!({ fetchUnreadBodies: true })).content[0].text);
+    expect(parsed.unreadBodies).toMatchObject({ requested: true, fetched: false, gate: 'OFW_ALLOW_MARK_READ' });
+    expect(parsed.unreadBodies.reason).toMatch(/OFW_ALLOW_MARK_READ/);
+    expect(spy).not.toHaveBeenCalled();
+    expect(getMessage(720)!.body).toBeNull();
+  });
+
+  it('ofw_sync_messages reports nothing about unread bodies when none were asked for', async () => {
+    process.env[KEY] = 'false';
+    const client = new OFWClient();
+    vi.spyOn(syncModule, 'syncAll').mockResolvedValue({
+      synced: {}, unreadInbox: [], refreshed: [], notRefreshed: [], done: true, syncComplete: true,
+    } as never);
+    setup(client);
+    const parsed = JSON.parse((await handlers.get('ofw_sync_messages')!({})).content[0].text);
+    expect(parsed.unreadBodies).toBeUndefined();
+  });
+
   it('OFW_FETCH_UNREAD_BODIES=true flips the sync default; the ceiling still overrides it', async () => {
     const prevFetch = process.env.OFW_FETCH_UNREAD_BODIES;
     process.env.OFW_FETCH_UNREAD_BODIES = 'true';
@@ -3015,11 +3043,219 @@ describe('mark-read confirmation (OFW_CONFIRM_MARK_READ)', () => {
     }
   });
 
-  it('turns off the bulk stamping paths, which cannot confirm per message', async () => {
+  describe('ofw_sync_messages fetchUnreadBodies under confirmation', () => {
+    const emptySync = () => vi.spyOn(syncModule, 'syncAll').mockResolvedValue({
+      synced: { inbox: 0 }, unreadInbox: [], refreshed: ['inbox'], notRefreshed: [], done: true, syncComplete: true,
+    } as never);
+
+    it('syncs WITHOUT stamping, then previews every unread message it would open — and opens none', async () => {
+      const client = new OFWClient();
+      const spy = vi.spyOn(client, 'request');
+      const syncSpy = emptySync();
+      upsertMessage(unreadInbox(920));
+      upsertMessage({ ...unreadInbox(921), subject: 'Dentist', sentAt: '2026-07-28T09:00:00' });
+      setup(client);
+
+      const preview = await callPreview(handlers.get('ofw_sync_messages')!, { fetchUnreadBodies: true });
+      expect(syncSpy.mock.calls[0][1]).toMatchObject({ fetchUnreadBodies: false });
+      expect(preview.action).toBe('ofw.message.mark_read');
+      const messages = preview.preview.messages as Array<Record<string, unknown>>;
+      expect(messages.map((m) => m.messageId)).toEqual([921, 920]);
+      expect(messages[0]).toMatchObject({ subject: 'Dentist', from: 'Alice', sentAt: '2026-07-28T09:00:00-04:00' });
+      expect(messages[1]).toMatchObject({ subject: 'Pickup Friday', sentAtDisplay: 'Mon, Jul 27, 2026, 11:31 PM EDT' });
+      expect(String(preview.preview.warning)).toMatch(/First Viewed/);
+      expect(spy).not.toHaveBeenCalled();
+      expect(getMessage(920)!.body).toBeNull();
+    });
+
+    it('with the token, opens exactly the approved messages and reports them', async () => {
+      const client = new OFWClient();
+      const spy = vi.spyOn(client, 'request').mockImplementation(async (_m: string, path: string) => {
+        const id = Number(path.split('/').pop());
+        return detail(id);
+      });
+      emptySync();
+      upsertMessage(unreadInbox(922));
+      setup(client);
+
+      const result = await callConfirmed(handlers.get('ofw_sync_messages')!, { fetchUnreadBodies: true });
+      const parsed = JSON.parse(result.content[0].text);
+      expect(spy).toHaveBeenCalledWith('GET', '/pub/v3/messages/922');
+      expect(parsed.unreadBodies).toMatchObject({ requested: true, fetched: true, opened: [922] });
+      expect(getMessage(922)!.body).toBe('live body');
+      expect(getMessage(922)!.fetchedBodyAt).not.toBeNull();
+    });
+
+    it('a client that can be prompted is asked, naming the messages, and nothing is fetched', async () => {
+      const client = new OFWClient();
+      const spy = vi.spyOn(client, 'request');
+      emptySync();
+      upsertMessage(unreadInbox(923));
+      setup(client);
+
+      const result = await handlers.get('ofw_sync_messages')!({ fetchUnreadBodies: true }, CAN_ASK_CTX) as unknown as {
+        resultType: string;
+        inputRequests: { confirmation: { params: { message: string } } };
+      };
+      expect(result.resultType).toBe('input_required');
+      const prompt = result.inputRequests.confirmation.params.message;
+      expect(prompt).toContain('"Pickup Friday"');
+      expect(prompt).toContain('Mon, Jul 27, 2026, 11:31 PM EDT');
+      expect(prompt).toMatch(/mark (them|it) read/);
+      expect(spy).not.toHaveBeenCalled();
+    });
+
+    it('refuses a stale approval: the set of unread messages changed between the phases', async () => {
+      const client = new OFWClient();
+      const spy = vi.spyOn(client, 'request').mockResolvedValue(detail(924));
+      emptySync();
+      upsertMessage(unreadInbox(924));
+      setup(client);
+
+      const { confirmToken } = await callPreview(handlers.get('ofw_sync_messages')!, { fetchUnreadBodies: true });
+      upsertMessage({ ...unreadInbox(925), sentAt: '2026-07-29T08:00:00' });
+      const result = await handlers.get('ofw_sync_messages')!({ fetchUnreadBodies: true, confirmToken }, NO_ELICIT_CTX);
+      expect(result.isError).toBe(true);
+      expect(spy).not.toHaveBeenCalled();
+      expect(getMessage(924)!.body).toBeNull();
+    });
+
+    it('drops the opened messages from unreadInbox and from the note', async () => {
+      const client = new OFWClient();
+      vi.spyOn(client, 'request').mockResolvedValue(detail(930));
+      const hint = { id: 930, subject: 'Pickup Friday', from: 'Alice', sentAt: '2026-07-27T23:31:09' };
+      vi.spyOn(syncModule, 'syncAll').mockResolvedValue({
+        synced: { inbox: 1 }, unreadInbox: [hint], refreshed: ['inbox'], notRefreshed: [], done: true, syncComplete: true,
+        note: syncModule.unreadInboxNote(1),
+      } as never);
+      upsertMessage(unreadInbox(930));
+      setup(client);
+
+      const parsed = JSON.parse((await callConfirmed(handlers.get('ofw_sync_messages')!, { fetchUnreadBodies: true })).content[0].text);
+      expect(parsed.unreadInbox).toEqual([]);
+      expect(parsed.note).toBeUndefined();
+    });
+
+    it('keeps the other notes and recounts the unread still waiting', async () => {
+      const client = new OFWClient();
+      vi.spyOn(client, 'request').mockResolvedValue(detail(931));
+      const hint = (id: number) => ({ id, subject: 'S', from: 'Alice', sentAt: '2026-07-27T23:31:09' });
+      const paused = 'Paused after the request budget.';
+      vi.spyOn(syncModule, 'syncAll').mockResolvedValue({
+        // 932 is a hint the cache does not hold, so it is not opened.
+        synced: { inbox: 2 }, unreadInbox: [hint(931), hint(932)], refreshed: ['inbox'], notRefreshed: [], done: false, syncComplete: false,
+        note: `${syncModule.unreadInboxNote(2)}\n\n${paused}`,
+      } as never);
+      upsertMessage(unreadInbox(931));
+      setup(client);
+
+      const parsed = JSON.parse((await callConfirmed(handlers.get('ofw_sync_messages')!, { fetchUnreadBodies: true })).content[0].text);
+      expect(parsed.unreadInbox.map((h: { id: number }) => h.id)).toEqual([932]);
+      expect(parsed.note).toBe(`${paused}\n\n${syncModule.unreadInboxNote(1)}`);
+    });
+
+    it('caches what OFW returned: attachments harvested, missing fields never invented', async () => {
+      const client = new OFWClient();
+      const spy = vi.spyOn(client, 'request').mockImplementation(async (_m: string, path: string) => {
+        if (path === '/pub/v3/messages/933') return { id: 933, subject: 'Pickup Friday', date: { dateTime: '2026-07-27T23:31:09' }, files: [77] };
+        if (path === '/pub/v3/messages/934') return { ...detail(934), files: [] };
+        return { id: 77, name: 'schedule.pdf', label: 'schedule', fileType: 'application/pdf', fileSize: 10 };
+      });
+      emptySync();
+      upsertMessage(unreadInbox(933));
+      upsertMessage({ ...unreadInbox(934), sentAt: '2026-07-20T08:00:00' });
+      setup(client);
+
+      await callConfirmed(handlers.get('ofw_sync_messages')!, { fetchUnreadBodies: true });
+      const row = getMessage(933)!;
+      expect(row.body).toBe('');
+      expect(row.recipients).toEqual([{ userId: 1, name: 'Me', viewedAt: null }]);
+      expect(spy.mock.calls.some(([, path]) => String(path).includes('77'))).toBe(true);
+      expect(getMessage(934)!.body).toBe('live body');
+    });
+
+    it('shows the raw time when it cannot be parsed — never drops it', async () => {
+      const client = new OFWClient();
+      vi.spyOn(client, 'request');
+      emptySync();
+      upsertMessage({ ...unreadInbox(935), sentAt: 'sometime' });
+      setup(client);
+      const result = await handlers.get('ofw_sync_messages')!({ fetchUnreadBodies: true }, CAN_ASK_CTX) as unknown as {
+        inputRequests: { confirmation: { params: { message: string } } };
+      };
+      expect(result.inputRequests.confirmation.params.message).toContain('"Pickup Friday" — sometime');
+    });
+
+    it('asks nothing when no cached message would be stamped', async () => {
+      const client = new OFWClient();
+      const spy = vi.spyOn(client, 'request');
+      emptySync();
+      // Already read (OFW listed it read) and a sent message: neither can stamp.
+      upsertMessage({ ...unreadInbox(926), listData: { id: 926, showNeverViewed: false }, recipients: [{ userId: 1, name: 'Me', viewedAt: '2026-07-27T23:40:00' }] });
+      upsertMessage({ ...unreadInbox(927), folder: 'sent' });
+      setup(client);
+
+      const parsed = JSON.parse((await handlers.get('ofw_sync_messages')!({ fetchUnreadBodies: true }, NO_ELICIT_CTX)).content[0].text);
+      expect(parsed.status).toBeUndefined();
+      expect(parsed.unreadBodies).toMatchObject({ requested: true, fetched: true, opened: [] });
+      expect(spy).not.toHaveBeenCalled();
+    });
+
+    it('asks nothing when unread bodies were not requested', async () => {
+      const client = new OFWClient();
+      emptySync();
+      upsertMessage(unreadInbox(928));
+      setup(client);
+      const parsed = JSON.parse((await handlers.get('ofw_sync_messages')!({}, NO_ELICIT_CTX)).content[0].text);
+      expect(parsed.status).toBeUndefined();
+      expect(parsed.unreadBodies).toBeUndefined();
+    });
+
+    it('the OFW_ALLOW_MARK_READ ceiling wins: no prompt, and the refusal is reported', async () => {
+      const prevAllow = process.env.OFW_ALLOW_MARK_READ;
+      process.env.OFW_ALLOW_MARK_READ = 'false';
+      try {
+        const client = new OFWClient();
+        const spy = vi.spyOn(client, 'request');
+        emptySync();
+        upsertMessage(unreadInbox(929));
+        setup(client);
+        const parsed = JSON.parse((await handlers.get('ofw_sync_messages')!({ fetchUnreadBodies: true }, CAN_ASK_CTX)).content[0].text);
+        expect(parsed.unreadBodies).toMatchObject({ fetched: false, gate: 'OFW_ALLOW_MARK_READ' });
+        expect(spy).not.toHaveBeenCalled();
+      } finally {
+        if (prevAllow === undefined) delete process.env.OFW_ALLOW_MARK_READ;
+        else process.env.OFW_ALLOW_MARK_READ = prevAllow;
+      }
+    });
+
+    it('opens at most the newest batch per call and says how many remain', async () => {
+      const client = new OFWClient();
+      emptySync();
+      vi.spyOn(client, 'request');
+      for (let i = 0; i < 30; i++) {
+        upsertMessage({ ...unreadInbox(1000 + i), sentAt: `2026-07-${String(1 + i).padStart(2, '0')}T08:00:00` });
+      }
+      setup(client);
+      const preview = await callPreview(handlers.get('ofw_sync_messages')!, { fetchUnreadBodies: true });
+      const messages = preview.preview.messages as Array<Record<string, unknown>>;
+      expect(messages).toHaveLength(25);
+      expect(messages[0].messageId).toBe(1029);
+      expect(preview.preview.remaining).toBe(5);
+
+      vi.spyOn(client, 'request').mockImplementation(async (_m: string, path: string) => detail(Number(path.split('/').pop())));
+      const parsed = JSON.parse((await handlers.get('ofw_sync_messages')!({ fetchUnreadBodies: true, confirmToken: preview.confirmToken }, NO_ELICIT_CTX)).content[0].text);
+      expect(parsed.unreadBodies.opened).toHaveLength(25);
+      expect(parsed.unreadBodies.remaining).toBe(5);
+      expect(getMessage(1004)!.body).toBeNull();
+    });
+  });
+
+  it('sync never stamps inside the walk, and the probes stay off — they cannot confirm per message', async () => {
     const client = new OFWClient();
     const spy = vi.spyOn(client, 'request').mockResolvedValue({ systemFolders: [] });
     const syncSpy = vi.spyOn(syncModule, 'syncAll').mockResolvedValue({
-      synced: {}, refreshed: [], notRefreshed: [], syncComplete: true, unreadWithoutBodies: [],
+      synced: {}, refreshed: [], notRefreshed: [], syncComplete: true, unreadInbox: [], done: true,
     } as never);
     setup(client);
 
@@ -7080,6 +7316,17 @@ describe('no-read days (OFW_READ_DAYS / OFW_NO_READ_DAYS)', () => {
     setup(client);
     const result = await handlers.get('ofw_download_attachment')!({ fileId: 80, inline: true });
     expect(result.isError).toBeFalsy();
+  });
+
+  it('ofw_sync_messages reports that a no-read day refused fetchUnreadBodies', async () => {
+    const client = new OFWClient();
+    vi.spyOn(syncModule, 'syncAll').mockResolvedValue({
+      synced: {}, unreadInbox: [], refreshed: [], notRefreshed: [], done: true, syncComplete: true,
+    } as never);
+    setup(client);
+    const parsed = JSON.parse((await handlers.get('ofw_sync_messages')!({ fetchUnreadBodies: true })).content[0].text);
+    expect(parsed.unreadBodies).toMatchObject({ requested: true, fetched: false, gate: 'OFW_READ_DAYS' });
+    expect(parsed.unreadBodies.readingBlocked).toBeDefined();
   });
 
   it('caps sync, ofw_check_freshness and ofw_status: nothing may be marked read', async () => {

@@ -761,6 +761,16 @@ export interface SyncAllResult {
   note?: string;
 }
 
+/**
+ * The sync note for unread inbox messages cached without bodies. Exported so
+ * ofw_sync_messages can rewrite it after a confirmed open of some of them —
+ * a note still counting messages the same call opened would contradict
+ * `unreadInbox` in one payload.
+ */
+export function unreadInboxNote(count: number): string {
+  return `${count} unread inbox messages cached without bodies. Call ofw_get_message(id) to read them — this will mark them as read on OFW.`;
+}
+
 export async function syncAll(client: OFWClient, opts: SyncAllOptions, store: CacheStore): Promise<SyncAllResult> {
   const requested = opts.folders ?? ['inbox', 'sent', 'drafts'];
   // Drafts go FIRST. They are the only folder a destructive tool
@@ -847,7 +857,7 @@ export async function syncAll(client: OFWClient, opts: SyncAllOptions, store: Ca
     notes.push('The drafts folder was NOT checked against OurFamilyWizard on this call (the request budget ran out first), so no drafts count is reported and the cached drafts are marked "unverified". Cached draft bodies may be behind the server. Call ofw_sync_messages again — or ofw_sync_messages with folders:["drafts"] — before editing or deleting a draft.');
   }
   if (unreadInbox.length > 0) {
-    notes.push(`${unreadInbox.length} unread inbox messages cached without bodies. Call ofw_get_message(id) to read them — this will mark them as read on OFW.`);
+    notes.push(unreadInboxNote(unreadInbox.length));
   }
   if (notRefreshed.length > 0) {
     notes.push(`NOT checked against OurFamilyWizard on this call: ${notRefreshed.join(', ')}. No count is reported for ${notRefreshed.length > 1 ? 'those folders' : 'that folder'} — absence of a count means "not looked at", not "no changes". Cached contents may be behind the server; call ofw_sync_messages again to finish, or ofw_check_freshness for a cheap live confirmation.`);
