@@ -193,11 +193,14 @@ projection.
 Every tool except `ofw_healthcheck` carries a `_meta.mint` hint in the
 **family** group, so a host such as mcp-host can answer a "what's going on
 with the family" ask across OFW and its sibling connectors. Two reads are
-canonical, and both take `view: "brief"` (plain text, one line per item,
-`title — <ISO date | no date> — <status>`). A line starting with `-- ` is a
-note, not an item: `-- N of M shown` ends a page that is not the whole result
-(walk `page`, or narrow the range), and `-- none` is the whole answer when
-nothing matched:
+canonical, and both take `view: "brief"` (one line per item,
+`title — <ISO date | no date> — <status>`, at most 120 chars). The lines carry
+text other people wrote, so they arrive inside the untrusted-data envelope as
+`data` (`{"untrusted_content":true,"note":…,"data":[…]}`). A line starting
+with `-- ` is a note, not an item: `-- N of M shown` ends a page that is not
+the whole result (walk `page`, or narrow the range), and `-- none` is the
+whole answer when nothing matched. A title that itself starts with `-- ` or
+`\` is escaped with one leading `\`:
 
 - **What's new:** `ofw_list_messages`, its range on `since` / `until`. A line
   is `sender: subject — sent — unread|read|sent`. It reads the local cache, so

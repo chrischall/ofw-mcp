@@ -78,7 +78,7 @@ src/
     pagination.ts   paging state that survives a lossy reader: pageState/offsetState/readUpstreamPaging/withPaginationFirst
     project.ts      the `view` projection — compactMessage/compactDraft/viewMessages/viewDrafts/viewOne, MESSAGE_VIEWS
     lifecycle.ts    "is this entity still what I think it is?" — classifyState/probeIds/resolveDraftKey/newDraftKey
-    hints.ts        familyMeta() — the `_meta.mint` context-group hint on every tool (family group); briefLine/briefDate/briefText for the `view: "brief"` lines (and their `-- N of M shown` / `-- none` notes) of the two canonical reads
+    hints.ts        familyMeta() — the `_meta.mint` context-group hint on every tool (family group); briefLine/briefDate/briefPage/briefResult for the `view: "brief"` lines (their `-- N of M shown` / `-- none` notes, the one-`\` escape, the untrusted-data envelope) of the two canonical reads
     user.ts         ofw_get_profile, ofw_get_notifications
     messages.ts     folders, list, get, send, drafts, get_unread_sent, upload/download_attachment, sync_messages, check_freshness, status
     calendar.ts     list/create/update/delete events; ofw_list_events `types`/`timeZone`/`format:"ics"`, ofw_save_calendar_ics

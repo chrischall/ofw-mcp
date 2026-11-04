@@ -1,3 +1,5 @@
+import type { CallToolResult } from '@modelcontextprotocol/server';
+import { UNTRUSTED_CONTENT_RULE, untrustedResult } from '@chrischall/mcp-utils';
 import { formatInstant, parseTimestampValue } from '../timestamps.js';
 
 /**
@@ -36,12 +38,15 @@ export function familyMeta(
 export const BRIEF_MAX = 120;
 
 /**
- * One `view: "brief"` line: `title — <ISO date | no date> — <status>`, at most
- * {@link BRIEF_MAX} chars. The title is what gets shortened, never the date or
- * the status a host reads back.
+ * One `view: "brief"` line: `title — <ISO date | no date> — <status>`, cut to
+ * at most {@link BRIEF_MAX} chars as a whole, title first — never the date or
+ * the status a host reads back. A title starting with `-- ` (which would read
+ * as a note) or `\` (the host strips one leading backslash from every item
+ * line) is escaped with one leading `\`, counted inside the cut.
  */
 export function briefLine(title: string, date: string | null, status: string): string {
-  const flat = title.replace(/\s+/g, ' ').trim() || '(untitled)';
+  const trimmed = title.replace(/\s+/g, ' ').trim() || '(untitled)';
+  const flat = trimmed.startsWith('-- ') || trimmed.startsWith('\\') ? `\\${trimmed}` : trimmed;
   const tail = ` — ${date ?? 'no date'} — ${status}`;
   const room = BRIEF_MAX - tail.length;
   const shown = flat.length > room ? `${flat.slice(0, Math.max(room - 1, 0))}…` : flat;
@@ -49,14 +54,24 @@ export function briefLine(title: string, date: string | null, status: string): s
 }
 
 /**
- * A `view: "brief"` answer: the item lines, then the contract's `-- ` note
- * lines — `-- N of M shown` when `page` is a slice of a larger result (so a
- * host never mistakes a truncated page for the whole range), and `-- none`
- * when there is nothing to list (never an empty text).
+ * A `view: "brief"` answer's lines: the item lines, then the contract's `-- `
+ * note lines — `-- N of M shown` when `page` is a slice of a larger result (so
+ * a host never mistakes a truncated page for the whole range), and `-- none`
+ * when there is nothing to list (never an empty answer).
  */
-export function briefText(lines: string[], page?: { shown: number; total: number }): string {
-  if (page && page.shown < page.total) return [...lines, `-- ${page.shown} of ${page.total} shown`].join('\n');
-  return lines.length ? lines.join('\n') : '-- none';
+export function briefPage(lines: string[], page?: { shown: number; total: number }): string[] {
+  if (page && page.shown < page.total) return [...lines, `-- ${page.shown} of ${page.total} shown`];
+  return lines.length ? lines : ['-- none'];
+}
+
+/**
+ * A `view: "brief"` answer whose lines carry text other people wrote (message
+ * subjects, sender names, event titles): the fleet's untrusted-data envelope,
+ * minified, note first — `{"untrusted_content":true,"note":…,"data":[…]}`.
+ * `whoWrote` is the note's first sentence, naming the authors.
+ */
+export function briefResult(lines: string[], whoWrote: string): CallToolResult {
+  return untrustedResult(lines, { note: `${whoWrote} ${UNTRUSTED_CONTENT_RULE}` });
 }
 
 /**
