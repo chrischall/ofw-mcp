@@ -1,7 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import type { OFWClient } from '../client.js';
-import { syncAll, fetchAttachmentMeta, fetchAttachmentMetaForMessage, getDraftsCacheStatus } from '../sync.js';
+import { syncAll, unreadInboxNote, fetchAttachmentMeta, fetchAttachmentMetaForMessage, getDraftsCacheStatus } from '../sync.js';
 import type { DraftsCacheStatus } from '../sync.js';
 import { buildFreshness } from './freshness.js';
 import type { FreshnessBlock } from './freshness.js';
@@ -29,6 +29,7 @@ import { MESSAGE_VIEWS, senderOf, viewDrafts, viewMessages, viewOne } from './pr
 import { resolveView, viewParam } from '@chrischall/mcp-utils';
 import { normalizeTimestampsInValue, nowNaiveWallClock, toNaiveWallClock } from '../timestamps.js';
 import { readingBlockedToday } from '../read-days.js';
+import type { ReadingBlocked } from '../read-days.js';
 
 // Schemas for the load-bearing fields of each /pub/v3 response this file
 // reads (issue #83). Loose: unknown keys pass through into cached listData.
@@ -251,8 +252,8 @@ function unverifiedEmptyResponse(input: {
 }
 
 /**
- * Whether a BULK path may mark messages read right now (sync's
- * fetchUnreadBodies, the allowMarkRead probes): the OFW_ALLOW_MARK_READ
+ * Whether a BULK path may mark messages read right now without asking (the
+ * allowMarkRead probes; sync asks instead — see ofw_sync_messages): the OFW_ALLOW_MARK_READ
  * ceiling, today being a reading day (OFW_READ_DAYS / OFW_NO_READ_DAYS), and
  * OFW_CONFIRM_MARK_READ being off — those paths stamp many messages without
  * looking at any of them, so they have nothing to put in front of the user.
@@ -261,6 +262,68 @@ function unverifiedEmptyResponse(input: {
  */
 function markReadPermitted(): boolean {
   return getAllowMarkRead() && readingBlockedToday() === null && !getConfirmMarkRead();
+}
+
+/**
+ * Which deployment CEILING (not the confirmation prompt) refuses marking
+ * anything read right now, or null when none does. Unlike
+ * markReadPermitted(), OFW_CONFIRM_MARK_READ is not a refusal here — it is a
+ * question the caller can put to the user.
+ */
+function markReadCeiling(): { gate: 'OFW_ALLOW_MARK_READ' | 'OFW_READ_DAYS'; reason: string; readingBlocked?: ReadingBlocked } | null {
+  if (!getAllowMarkRead()) {
+    return {
+      gate: 'OFW_ALLOW_MARK_READ',
+      reason: 'This server is configured with OFW_ALLOW_MARK_READ=false, so no tool may mark a message read on OurFamilyWizard. Unread inbox bodies were NOT fetched, and no per-call argument can change that.',
+    };
+  }
+  const blocked = readingBlockedToday();
+  if (blocked !== null) {
+    return {
+      gate: 'OFW_READ_DAYS',
+      reason: 'Today is a no-read day (OFW_READ_DAYS / OFW_NO_READ_DAYS), so no message body was fetched. readingBlocked says when reading resumes.',
+      readingBlocked: blocked,
+    };
+  }
+  return null;
+}
+
+/** How many unread messages one confirmed sync opens — the prompt must stay readable. */
+export const MAX_SYNC_OPEN_UNREAD = 25;
+
+/**
+ * The cached unread INBOX messages a confirmed sync would open, newest first:
+ * no body yet, and `deriveRead` cannot rule out unread — exactly the rows whose
+ * detail GET stamps "First Viewed". Read from the cache rather than from the
+ * sync's own "new this walk" list, because the confirming call re-runs the sync
+ * and finds nothing new — the set must be the same on both phases for the
+ * approval to bind to it.
+ */
+async function unreadCandidates(cache: CacheStore): Promise<{ rows: MessageRow[]; remaining: number }> {
+  const all = (await cache.listMessages({ folder: 'inbox', page: 1, size: 1000 }))
+    .filter((row) => row.body === null && !deriveRead(row));
+  return { rows: all.slice(0, MAX_SYNC_OPEN_UNREAD), remaining: Math.max(0, all.length - MAX_SYNC_OPEN_UNREAD) };
+}
+
+/**
+ * Fetch one unread inbox body and cache it — the request that marks it read.
+ * Only ever called after the confirmation gate approved this exact message.
+ */
+async function openUnreadBody(client: OFWClient, cache: CacheStore, cached: MessageRow): Promise<void> {
+  const detail = parseLenient(
+    MessageDetailSchema,
+    await client.request('GET', `/pub/v3/messages/${cached.id}`),
+    { label: 'ofw-mcp', context: 'GET /pub/v3/messages/{id} (sync, confirmed mark-read)' },
+  );
+  await cache.upsertMessage({
+    ...cached,
+    recipients: detail.recipients ? mapRecipients(detail.recipients) : cached.recipients,
+    body: detail.body ?? '',
+    fetchedBodyAt: new Date().toISOString(),
+  });
+  if (Array.isArray(detail.files) && detail.files.length > 0) {
+    await fetchAttachmentMetaForMessage(client, cached.id, detail.files, cache);
+  }
 }
 
 /**
@@ -1947,28 +2010,89 @@ export function registerMessageTools(
     annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
     inputSchema: z.object({
       folders: z.array(z.enum(['inbox', 'sent', 'drafts'])).min(1).describe('Folders to sync (default: all three). Must be non-empty if given — an empty list would sync nothing while reporting success.').optional(),
-      fetchUnreadBodies: z.boolean().describe('If true, also fetch bodies for unread inbox messages — which marks each one READ on OurFamilyWizard and stamps a co-parent-visible "First Viewed" time that cannot be undone. Defaults to the OFW_FETCH_UNREAD_BODIES env var (false unless set), and is forced off entirely when OFW_ALLOW_MARK_READ=false.').optional(),
+      fetchUnreadBodies: z.boolean().describe('If true, also fetch bodies for unread inbox messages — which marks each one READ on OurFamilyWizard and stamps a co-parent-visible "First Viewed" time that cannot be undone. Defaults to the OFW_FETCH_UNREAD_BODIES env var (false unless set). Refused outright when OFW_ALLOW_MARK_READ=false or on a no-read day (the response\'s unreadBodies says which). When the server runs with OFW_CONFIRM_MARK_READ=true, the sync runs WITHOUT marking anything read and then asks the user to confirm opening the listed unread messages (newest ' + MAX_SYNC_OPEN_UNREAD + ' per call): a confirmation prompt where the client supports one; otherwise it returns that list plus a confirmToken, and only a repeat call with that token opens them. Show the user the list and wait for their yes.').optional(),
       deep: z.boolean().describe('If true, walk every OFW page until empty regardless of cache state. Use to backfill gaps. Default false.').optional(),
       maxRequests: z.number().int().min(1).describe('Maximum OFW requests this single call may make before pausing. When hit, the response reports done:false — call again with the same arguments to continue. Omit to use the server default (OFW_SYNC_MAX_REQUESTS, or unbounded on local installs).').optional(),
+      confirmToken: confirmTokenParam,
     }),
-  }, async (args) => {
+  }, async (args, ctx) => {
     const cache = cacheProvider();
+    // Default from OFW_FETCH_UNREAD_BODIES (false unless set). Fetching those
+    // bodies is exactly what stamps a First Viewed time on every unread
+    // message it touches, so two gates stand in front of it:
+    //   1. the CEILINGS — OFW_ALLOW_MARK_READ=false and a no-read day — refuse
+    //      outright, and the response says which one refused;
+    //   2. OFW_CONFIRM_MARK_READ asks the user, naming every message it would
+    //      open, before a single one is fetched.
+    const requested = args.fetchUnreadBodies ?? getFetchUnreadBodies();
+    const ceiling = requested ? markReadCeiling() : null;
+    const askFirst = requested && ceiling === null && getConfirmMarkRead();
     const result = await syncAll(client, {
       folders: args.folders,
-      // Default from OFW_FETCH_UNREAD_BODIES (false unless set), and capped by
-      // the OFW_ALLOW_MARK_READ ceiling — fetching those bodies is exactly what
-      // stamps a First Viewed time on every unread message it touches.
-      fetchUnreadBodies: markReadPermitted() && (args.fetchUnreadBodies ?? getFetchUnreadBodies()),
+      // Under confirmation the sync itself never stamps: it walks list pages
+      // only, and the approved bodies are opened below, one by one.
+      fetchUnreadBodies: requested && ceiling === null && !askFirst,
       deep: args.deep,
       maxRequests: args.maxRequests ?? getSyncMaxRequests(),
     }, cache);
+
+    let unreadBodies: Record<string, unknown> | undefined;
+    if (ceiling !== null) {
+      unreadBodies = { requested: true, fetched: false, ...ceiling };
+    } else if (askFirst) {
+      const { rows, remaining } = await unreadCandidates(cache);
+      if (rows.length > 0) {
+        const messages = rows.map((row): Record<string, unknown> => ({
+          messageId: row.id,
+          subject: row.subject,
+          from: senderOf(row),
+          // The preview never passes through jsonResponse, so normalize here.
+          ...(normalizeTimestampsInValue({ sentAt: row.sentAt }) as Record<string, unknown>),
+        }));
+        const lines = messages.map((m) => `"${m.subject}" — ${String(m.sentAtDisplay ?? m.sentAt)}`);
+        const gate = await confirmWrite(ctx, {
+          args,
+          tool: 'ofw_sync_messages',
+          action: 'ofw.message.mark_read',
+          message: `Open ${rows.length} unread OurFamilyWizard message${rows.length === 1 ? '' : 's'} and mark ${rows.length === 1 ? 'it' : 'them'} read? ${lines.join('; ')}.${remaining > 0 ? ` (Older unread messages not listed here: ${remaining}; they wait for the next sync.)` : ''} Opening stamps a "First Viewed" time your co-parent can see; that cannot be undone.`,
+          target: 'messages:unread-inbox',
+          // The approval binds to THIS set: a message arriving (or being read
+          // elsewhere) between the preview and the confirming call changes
+          // the revision, and the stale approval is refused.
+          revision: rows.map((row) => row.id).join(','),
+          payload: { messageIds: rows.map((row) => row.id), markRead: true },
+          preview: {
+            action: `Open ${rows.length} unread OurFamilyWizard message${rows.length === 1 ? '' : 's'} (marks ${rows.length === 1 ? 'it' : 'them'} READ)`,
+            warning: 'Opening these messages marks each one read on OurFamilyWizard and stamps a "First Viewed" time your co-parent can see. It is part of the record and cannot be undone. The sync itself already ran and marked nothing read.',
+            messages,
+            ...(remaining > 0 ? { remaining } : {}),
+          },
+          confirmToken: args.confirmToken,
+        });
+        if (gate) return gate;
+        for (const row of rows) await openUnreadBody(client, cache, row);
+      }
+      const opened = new Set(rows.map((row) => row.id));
+      const before = result.unreadInbox.length;
+      result.unreadInbox = result.unreadInbox.filter((hint) => !opened.has(hint.id));
+      if (result.unreadInbox.length !== before) {
+        // Keep the note in step with unreadInbox: one payload, one count.
+        // syncAll always writes a note when it reports unread hints, and the
+        // count only moved because there were some, so the note is present.
+        const notes = (result.note as string).split('\n\n').filter((n) => n !== unreadInboxNote(before));
+        if (result.unreadInbox.length > 0) notes.push(unreadInboxNote(result.unreadInbox.length));
+        result.note = notes.length > 0 ? notes.join('\n\n') : undefined;
+      }
+      unreadBodies = { requested: true, fetched: true, opened: [...opened], ...(remaining > 0 ? { remaining } : {}) };
+    }
+
     // Freshness of the cache AS OF this sync completing — so a paused call
     // that skipped a folder says so here too, not just in `notRefreshed`.
     const freshness = await buildFreshness(cache, {
       source: 'cache',
       folders: args.folders ?? ['inbox', 'sent', 'drafts'],
     });
-    return jsonResponse({ ...result, freshness });
+    return jsonResponse({ ...result, ...(unreadBodies ? { unreadBodies } : {}), freshness });
   });
 
   server.registerTool('ofw_check_freshness', {

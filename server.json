@@ -49,7 +49,7 @@
         },
         {
           "name": "OFW_CONFIRM_MARK_READ",
-          "description": "Default \"false\". Set \"true\" to show an unread message's subject, sender and sent time and ask for confirmation before opening it marks it read. Also disables the bulk mark-read paths (sync fetchUnreadBodies, allowMarkRead probes).",
+          "description": "Default \"false\". Set \"true\" to show an unread message's subject, sender and sent time and ask for confirmation before opening it marks it read. Sync fetchUnreadBodies asks too; allowMarkRead probes are disabled.",
           "isRequired": false,
           "format": "string"
         },

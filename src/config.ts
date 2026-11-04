@@ -184,9 +184,10 @@ export function getAllowMarkRead(): boolean {
  * inbox message silently: it shows the subject, sender and sent time and asks
  * the user to confirm — through the same gate as a send (an elicitation prompt
  * where the client supports one, otherwise the two-phase confirmToken flow).
- * The bulk paths that stamp (`ofw_sync_messages fetchUnreadBodies`, the
- * `allowMarkRead` probes of `ofw_check_freshness` / `ofw_status`) cannot ask
- * about each message, so they are switched off instead.
+ * `ofw_sync_messages fetchUnreadBodies` asks too: it syncs without stamping,
+ * then lists the cached unread messages it would open and waits for a yes.
+ * The `allowMarkRead` probes of `ofw_check_freshness` / `ofw_status` have no
+ * message to show before the request that stamps, so they are switched off.
  *
  * Default FALSE: unset is exactly the shipped behaviour. An unrecognized value
  * fails CLOSED to true, with a warning: someone who typed "ture" meant to turn
