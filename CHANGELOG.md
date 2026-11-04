@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.26.1](https://github.com/chrischall/ofw-mcp/compare/v2.26.0...v2.26.1) (2026-11-04)
+
+
+### Bug Fixes
+
+* **brief:** align the brief view with the fleet contract ([#415](https://github.com/chrischall/ofw-mcp/issues/415)) ([e35cf9a](https://github.com/chrischall/ofw-mcp/commit/e35cf9a21a91cc6d4023735ad1f9718020ab02c8))
+
 ## [2.26.0](https://github.com/chrischall/ofw-mcp/compare/v2.25.0...v2.26.0) (2026-11-04)
 
 
