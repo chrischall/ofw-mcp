@@ -10,7 +10,7 @@ import { calendarBriefLines, registerCalendarTools } from '../src/tools/calendar
 import { registerExpenseTools } from '../src/tools/expenses.js';
 import { registerJournalTools } from '../src/tools/journal.js';
 import { NodeAttachmentIO } from '../src/tools/attachments.js';
-import { BRIEF_MAX, briefLine, briefDate } from '../src/tools/hints.js';
+import { BRIEF_MAX, briefLine, briefDate, briefText } from '../src/tools/hints.js';
 import { sampleMessageRow } from './_fixtures.js';
 
 /**
@@ -242,6 +242,60 @@ describe('ofw_list_messages view "brief"', () => {
     expect(lines).toContain('Parent B: Dentist — no date — read');
     expect(spy).not.toHaveBeenCalled();
   });
+
+  it('ends a page that is not the whole result with a "-- N of M shown" note', async () => {
+    for (let id = 1; id <= 3; id++) {
+      cache.core.upsertMessage(sampleMessageRow({ id, folder: 'inbox', subject: `Note ${id}`, fromUser: 'Parent B', sentAt: `2026-09-0${id}T09:30:00`, recipients: [], listData: { read: true } }));
+    }
+    const h = await harness();
+    const first = await h.callTool('ofw_list_messages', { view: 'brief', size: 2 });
+    const second = await h.callTool('ofw_list_messages', { view: 'brief', size: 2, page: 2 });
+    await h.close();
+    const firstLines = (first.content as Array<{ type: string; text: string }>)[0].text.split('\n');
+    expect(firstLines).toHaveLength(3);
+    expectBrief(firstLines.slice(0, 2).join('\n'), 2);
+    expect(firstLines[2]).toBe('-- 2 of 3 shown');
+    const secondLines = (second.content as Array<{ type: string; text: string }>)[0].text.split('\n');
+    expect(secondLines).toEqual([expect.stringMatching(/^Parent B: Note 1 — /), '-- 1 of 3 shown']);
+  });
+
+  it('adds no note when the page is the whole result', async () => {
+    cache.core.upsertMessage(sampleMessageRow({ id: 1, folder: 'inbox', subject: 'Only one', fromUser: 'Parent B', sentAt: '2026-09-04T09:30:00', recipients: [], listData: { read: true } }));
+    const h = await harness();
+    const result = await h.callTool('ofw_list_messages', { view: 'brief' });
+    await h.close();
+    expectBrief((result.content as Array<{ type: string; text: string }>)[0].text, 1);
+  });
+
+  it('answers "-- none" when a verified-fresh cache holds no matching message', async () => {
+    const now = new Date().toISOString();
+    for (const folder of ['inbox', 'sent'] as const) {
+      cache.core.setSyncState(folder, { lastSyncAt: now, newestId: null, resumePage: null });
+      cache.core.setMeta(`folder_verified_at:${folder}`, now);
+    }
+    const h = await harness();
+    const result = await h.callTool('ofw_list_messages', { view: 'brief' });
+    await h.close();
+    expect(result.isError).toBeFalsy();
+    expect((result.content as Array<{ type: string; text: string }>)[0].text).toBe('-- none');
+  });
+});
+
+describe('briefText', () => {
+  it('joins the lines and adds no note for a whole result', () => {
+    expect(briefText(['a', 'b'])).toBe('a\nb');
+    expect(briefText(['a', 'b'], { shown: 2, total: 2 })).toBe('a\nb');
+  });
+
+  it('answers "-- none" for no lines', () => {
+    expect(briefText([])).toBe('-- none');
+    expect(briefText([], { shown: 0, total: 0 })).toBe('-- none');
+  });
+
+  it('notes a partial page, even one past the end', () => {
+    expect(briefText(['a'], { shown: 1, total: 5 })).toBe('a\n-- 1 of 5 shown');
+    expect(briefText([], { shown: 0, total: 5 })).toBe('-- 0 of 5 shown');
+  });
 });
 
 describe('ofw_list_events view "brief"', () => {
@@ -282,12 +336,20 @@ describe('ofw_list_events view "brief"', () => {
     expect(expectBrief(text, 2)[0]).toMatch(/^Recital — /);
   });
 
-  it('answers an empty text when the calendar holds nothing', async () => {
+  it('answers "-- none" when the calendar holds nothing', async () => {
     vi.spyOn(client, 'request').mockResolvedValue({ calendarItems: [] });
     const h = await harness();
     const result = await h.callTool('ofw_list_events', { startDate: '2026-09-01', endDate: '2026-09-07', view: 'brief' });
     await h.close();
-    expect((result.content as Array<{ type: string; text: string }>)[0].text).toBe('');
+    expect((result.content as Array<{ type: string; text: string }>)[0].text).toBe('-- none');
+  });
+
+  it('answers "-- none" when the types filter leaves nothing', async () => {
+    vi.spyOn(client, 'request').mockResolvedValue(CALENDAR);
+    const h = await harness();
+    const result = await h.callTool('ofw_list_events', { startDate: '2026-09-01', endDate: '2026-09-07', view: 'brief', types: ['SCHEDULE'] });
+    await h.close();
+    expect((result.content as Array<{ type: string; text: string }>)[0].text).toBe('-- none');
   });
 });
 

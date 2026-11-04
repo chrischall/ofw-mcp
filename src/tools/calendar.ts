@@ -11,7 +11,7 @@ import { resolve } from 'node:path';
 import { NodeAttachmentIO, resolveSaveDest, type AttachmentIO } from './attachments.js';
 import { buildCalendarIcs, CALENDAR_ITEM_TYPES, filterCalendarTypes } from './calendar-ics.js';
 import { formatInstant, resolveTimeZoneArg } from '../timestamps.js';
-import { briefDate, briefLine, familyMeta } from './hints.js';
+import { briefDate, briefLine, briefText, familyMeta } from './hints.js';
 
 // OFW's real event-write API (reverse-engineered from the web app bundle):
 //   POST   /pub/v3/events                       create — 201 with the full event
@@ -255,13 +255,13 @@ export function registerCalendarTools(
       ...calendarRangeFields,
       detailed: z.boolean().describe('Return full event details (default false). Ignored for format:"ics", which always reads the detailed calendar').optional(),
       format: z.enum(['json', 'ics']).describe('json (default): the OFW payload. ics: a summary block, then the iCalendar text').optional(),
-      view: z.enum(['full', 'brief']).describe('full (default): the response `format` asks for. brief: plain text, one line per calendar item (the custody grid is never included) — title — start (ISO-8601, a bare date for all-day items) — event|all day|outside calendar|handoff. Overrides format and detailed').optional(),
+      view: z.enum(['full', 'brief']).describe('full (default): the response `format` asks for. brief: plain text, one line per calendar item (the custody grid is never included) — title — start (ISO-8601, a bare date for all-day items) — event|all day|outside calendar|handoff; an empty range answers "-- none". Overrides format and detailed').optional(),
     }),
   }, async (args) => {
     const timeZone = resolveTimeZoneArg(args.timeZone);
     if (args.view === 'brief') {
       const data = filterCalendarTypes(await readDetailedCalendar(client, args.startDate, args.endDate), args.types);
-      return { content: [{ type: 'text' as const, text: calendarBriefLines(data, timeZone).join('\n') }] };
+      return { content: [{ type: 'text' as const, text: briefText(calendarBriefLines(data, timeZone)) }] };
     }
     const ics = args.format === 'ics';
     const raw = await (ics || args.detailed
