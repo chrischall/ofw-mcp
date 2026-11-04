@@ -188,6 +188,28 @@ for when something already looks wrong.
 (`{id, subject, sentAt, unreadBy}`) that is already narrower than the
 projection.
 
+## In context groups
+
+Every tool except `ofw_healthcheck` carries a `_meta.mint` hint in the
+**family** group, so a host such as mcp-host can answer a "what's going on
+with the family" ask across OFW and its sibling connectors. Two reads are
+canonical, and both take `view: "brief"` (plain text, one line per item,
+`title — <ISO date | no date> — <status>`):
+
+- **What's new:** `ofw_list_messages`, its range on `since` / `until`. A line
+  is `sender: subject — sent — unread|read|sent`. It reads the local cache, so
+  the usual freshness rules apply (an unverified empty cache is still refused).
+- **What's on:** `ofw_list_events`, its range on `startDate` / `endDate`. A
+  line is an event, an all-day item, an outside-calendar item or a custody
+  handoff; the per-day custody grid is never in the brief answer.
+
+Neither declares a `subject`: OFW has no per-child argument to fan out over,
+so a compound ask ("any new OFW messages, and what's on the custody calendar
+this weekend?") is one call per canonical read, not one per child. Nothing
+here answers a what's-due question. When the server authenticates through the
+browser bridge rather than `OFW_USERNAME`/`OFW_PASSWORD`, the group answers
+"needs your browser open" until a signed-in OurFamilyWizard tab is reachable.
+
 ## Freshness, completeness, and lifecycle
 
 Message and draft reads come from a local cache, so **a result can be stale without looking stale**. Three separate questions, three separate signals — do not substitute one for another:
