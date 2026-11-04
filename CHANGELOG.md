@@ -1,5 +1,18 @@
 # Changelog
 
+## [2.25.0](https://github.com/chrischall/ofw-mcp/compare/v2.24.0...v2.25.0) (2026-11-04)
+
+
+### Features
+
+* **messages:** ask before a sync marks unread messages read, and report when a gate refused ([#409](https://github.com/chrischall/ofw-mcp/issues/409)) ([019e495](https://github.com/chrischall/ofw-mcp/commit/019e4950795c40c4d9d92b49a01a7a2a03b8ef90))
+
+
+### Bug Fixes
+
+* **deps:** bump the production-dependencies group across 1 directory with 2 updates ([#407](https://github.com/chrischall/ofw-mcp/issues/407)) ([5462731](https://github.com/chrischall/ofw-mcp/commit/54627315338c67277e46217618756ef1e17c95a8))
+* **messages:** only ask to open unread messages when the sync covers the inbox ([#410](https://github.com/chrischall/ofw-mcp/issues/410)) ([7c8c07d](https://github.com/chrischall/ofw-mcp/commit/7c8c07de75a7957ab43784833132ab4fa5f04384))
+
 ## [2.24.0](https://github.com/chrischall/ofw-mcp/compare/v2.23.0...v2.24.0) (2026-11-01)
 
 
