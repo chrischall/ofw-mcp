@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.26.0](https://github.com/chrischall/ofw-mcp/compare/v2.25.0...v2.26.0) (2026-11-04)
+
+
+### Features
+
+* context-group hints, a brief view on messages and events ([#411](https://github.com/chrischall/ofw-mcp/issues/411)) ([fcdc18e](https://github.com/chrischall/ofw-mcp/commit/fcdc18e50d974657064be08a29f53e53c7ac6e64))
+
+
+### Bug Fixes
+
+* brief views say when a page is partial or empty ([#414](https://github.com/chrischall/ofw-mcp/issues/414)) ([f80bb29](https://github.com/chrischall/ofw-mcp/commit/f80bb2926d8f449c01ff7a9292a9105b5c0fef96))
+
 ## [2.25.0](https://github.com/chrischall/ofw-mcp/compare/v2.24.0...v2.25.0) (2026-11-04)
 
 
