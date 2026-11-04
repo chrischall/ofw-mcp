@@ -3201,6 +3201,30 @@ describe('mark-read confirmation (OFW_CONFIRM_MARK_READ)', () => {
       expect(spy).not.toHaveBeenCalled();
     });
 
+    it('asks nothing when the inbox is not among the folders synced', async () => {
+      const client = new OFWClient();
+      const spy = vi.spyOn(client, 'request');
+      const syncSpy = emptySync();
+      upsertMessage(unreadInbox(936));
+      setup(client);
+      const parsed = JSON.parse((await handlers.get('ofw_sync_messages')!({ folders: ['sent', 'drafts'], fetchUnreadBodies: true }, CAN_ASK_CTX)).content[0].text);
+      expect(parsed.status).toBeUndefined();
+      expect(parsed.unreadBodies).toBeUndefined();
+      expect(syncSpy.mock.calls[0][1]).toMatchObject({ fetchUnreadBodies: false });
+      expect(spy).not.toHaveBeenCalled();
+      expect(getMessage(936)!.body).toBeNull();
+    });
+
+    it('still asks when the inbox is one of the folders synced', async () => {
+      const client = new OFWClient();
+      vi.spyOn(client, 'request');
+      emptySync();
+      upsertMessage(unreadInbox(937));
+      setup(client);
+      const preview = await callPreview(handlers.get('ofw_sync_messages')!, { folders: ['inbox'], fetchUnreadBodies: true });
+      expect((preview.preview.messages as Array<{ messageId: number }>).map((m) => m.messageId)).toEqual([937]);
+    });
+
     it('asks nothing when unread bodies were not requested', async () => {
       const client = new OFWClient();
       emptySync();
