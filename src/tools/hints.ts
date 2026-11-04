@@ -49,6 +49,17 @@ export function briefLine(title: string, date: string | null, status: string): s
 }
 
 /**
+ * A `view: "brief"` answer: the item lines, then the contract's `-- ` note
+ * lines — `-- N of M shown` when `page` is a slice of a larger result (so a
+ * host never mistakes a truncated page for the whole range), and `-- none`
+ * when there is nothing to list (never an empty text).
+ */
+export function briefText(lines: string[], page?: { shown: number; total: number }): string {
+  if (page && page.shown < page.total) return [...lines, `-- ${page.shown} of ${page.total} shown`].join('\n');
+  return lines.length ? lines.join('\n') : '-- none';
+}
+
+/**
  * An OFW date or timestamp as ISO-8601 for a brief line: a bare `YYYY-MM-DD`
  * stays a date (an all-day item has no time to invent), a naive wall clock is
  * read in `tz` and gains its offset, and anything else is `null`.
