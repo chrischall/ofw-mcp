@@ -4,6 +4,7 @@ import { z } from 'zod';
 import type { OFWClient } from '../client.js';
 import { CONFIRM_NOTE, confirmTokenParam, confirmWrite, stateRevision } from './_confirm.js';
 import { jsonErrorResponse, jsonResponse, requestWrite, UnconfirmedWriteError, unconfirmedWriteResponse } from './_shared.js';
+import { familyMeta } from './hints.js';
 
 // Allow ordinary binary floating point representations of exact cents, but
 // never round a genuinely fractional cent or accept an unsafe monetary value.
@@ -35,6 +36,7 @@ function immutableRevision(d: Detail): string {
 /** Registered only by the full expense surface in write mode all. */
 export function registerExpenseReimbursementTool(server: McpServer, client: OFWClient): void {
   server.registerTool('ofw_mark_expense_reimbursed', {
+    _meta: familyMeta('change'),
     description: 'Irreversibly mark the FULL remaining expense balance reimbursed externally. Records an already completed outside-OFW reimbursement only: does NOT send money or use bank/payment endpoints; no partial amounts. Requires expectedRemainingAmount (currency units, positive exact cents) matching the current leftToPay, NOT the full expense total. Reads the current expense, binds the entire detail to confirmation, rechecks immediately before writing, then verifies paid status and unchanged fields. Cannot be undone. On EXPENSE_REIMBURSEMENT_UNCONFIRMED, mayHaveLanded=true: inspect the OFW Expenses log before any retry; never replay blindly. ' + CONFIRM_NOTE,
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
     inputSchema: z.object({

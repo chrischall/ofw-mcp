@@ -11,6 +11,7 @@ import { resolve } from 'node:path';
 import { NodeAttachmentIO, resolveSaveDest, type AttachmentIO } from './attachments.js';
 import { buildCalendarIcs, CALENDAR_ITEM_TYPES, filterCalendarTypes } from './calendar-ics.js';
 import { formatInstant, resolveTimeZoneArg } from '../timestamps.js';
+import { briefDate, briefLine, familyMeta } from './hints.js';
 
 // OFW's real event-write API (reverse-engineered from the web app bundle):
 //   POST   /pub/v3/events                       create — 201 with the full event
@@ -208,6 +209,31 @@ function icsSummary(
   };
 }
 
+/**
+ * The calendar as brief lines (`view: "brief"`, the context-group canonical
+ * whats-on): one line per item of `calendarItems`, in OFW's order. The
+ * `guardianData` custody grid is not an item list and is never included.
+ */
+export function calendarBriefLines(data: unknown, timeZone: string): string[] {
+  const items = isRecord(data) && Array.isArray(data.calendarItems) ? data.calendarItems : [];
+  return items.filter(isRecord).map((item) => {
+    const start = isRecord(item.startDate) ? item.startDate.dateTime : undefined;
+    if (item.type === 'TRANSITION') {
+      const to = isRecord(item.transitionEndParent) ? item.transitionEndParent.name : undefined;
+      return briefLine(typeof to === 'string' && to ? `Custody handoff to ${to}` : 'Custody handoff', briefDate(start, timeZone), 'handoff');
+    }
+    const title = typeof item.title === 'string' ? item.title : '';
+    if (item.allDay === true) {
+      return briefLine(title, briefDate(typeof start === 'string' ? start.slice(0, 10) : undefined, timeZone), 'all day');
+    }
+    return briefLine(title, briefDate(start, timeZone), item.type === 'CONNECTED_EVENT' ? 'outside calendar' : 'event');
+  });
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 export function registerCalendarTools(
   server: McpServer,
   client: OFWClient,
@@ -218,15 +244,25 @@ export function registerCalendarTools(
   const allowWrites = getCalendarWritesAllowed();
 
   server.registerTool('ofw_list_events', {
+    _meta: familyMeta('whats-on', {
+      canonical: true,
+      when: { start: 'startDate', end: 'endDate' },
+      aliases: ['custody', 'parenting time', 'calendar', 'schedule', 'pickup', 'drop off', 'handoff', 'kids'],
+    }),
     description: "List OurFamilyWizard calendar items in a date range: events, connected (subscribed outside-calendar) events, custody handoffs (TRANSITION) and the per-day custody grid (guardianData, type SCHEDULE). Pass `types` to keep only some of them — the custody grid is most of a response's weight, so leave SCHEDULE out unless you need who-has-the-children per day. Times are OFW wall clock in the account's zone, rendered with an offset in `timeZone` (default: the server's DISPLAY_TZ). format:\"ics\" returns an iCalendar (.ics) text you can show or save — events, all-day events, and each custody period as a \"Parenting time\" event — after a short JSON summary of what was included and what was left out. To get a file or download link instead, use ofw_save_calendar_ics.",
     annotations: { readOnlyHint: true, openWorldHint: true },
     inputSchema: z.object({
       ...calendarRangeFields,
       detailed: z.boolean().describe('Return full event details (default false). Ignored for format:"ics", which always reads the detailed calendar').optional(),
       format: z.enum(['json', 'ics']).describe('json (default): the OFW payload. ics: a summary block, then the iCalendar text').optional(),
+      view: z.enum(['full', 'brief']).describe('full (default): the response `format` asks for. brief: plain text, one line per calendar item (the custody grid is never included) — title — start (ISO-8601, a bare date for all-day items) — event|all day|outside calendar|handoff. Overrides format and detailed').optional(),
     }),
   }, async (args) => {
     const timeZone = resolveTimeZoneArg(args.timeZone);
+    if (args.view === 'brief') {
+      const data = filterCalendarTypes(await readDetailedCalendar(client, args.startDate, args.endDate), args.types);
+      return { content: [{ type: 'text' as const, text: calendarBriefLines(data, timeZone).join('\n') }] };
+    }
     const ics = args.format === 'ics';
     const raw = await (ics || args.detailed
       ? readDetailedCalendar(client, args.startDate, args.endDate)
@@ -247,6 +283,7 @@ export function registerCalendarTools(
   // File delivery lives on its own tool so ofw_list_events stays read-only:
   // hosts auto-approve a read, and a tool that MAY write a file is not one.
   server.registerTool('ofw_save_calendar_ics', {
+    _meta: familyMeta('other'),
     description: "Save an OurFamilyWizard date range as an iCalendar (.ics) file the user can import into Google, Apple or Outlook calendar — events, all-day events, and each custody period as a \"Parenting time\" event (OFW's own export leaves the parenting schedule out). Same filters as ofw_list_events. On a hosted connector the file is uploaded and you get a private download link that expires (default 1 hour); locally it is written inside the attachments directory (OFW_ATTACHMENTS_DIR, default ~/Downloads/ofw-mcp) and you get its path. Never overwrites an existing file. The file is a snapshot: it does not update when OFW changes, and re-importing a later export updates events in place (stable UIDs).",
     // Additive: it adds a new local file (or a new uploaded object) and never
     // replaces one. Nothing reaches OFW.
@@ -306,6 +343,7 @@ export function registerCalendarTools(
   });
 
   if (allowWrites) server.registerTool('ofw_create_event', {
+    _meta: familyMeta('change'),
     description: 'Create a calendar event in OurFamilyWizard. Unless privateEvent is true, the event is immediately visible to the co-parent — there is no draft stage — so a shared event is confirmed first (a private one is not). If the request fails without a definitive answer the result is EVENT_UNCONFIRMED: the event may already exist, so do NOT retry until ofw_list_events shows it did not land. ' + CONFIRM_NOTE,
     // Destructive by the inverse test: a shared event is on the co-parent's
     // calendar the moment it lands, and ofw_delete_event removes it but cannot
@@ -355,6 +393,7 @@ export function registerCalendarTools(
   });
 
   if (allowWrites) server.registerTool('ofw_update_event', {
+    _meta: familyMeta('change'),
     description: 'Update an existing OurFamilyWizard calendar event. Fetches the event, applies the given changes, and writes the merged result back (OFW has no partial update). A change to an event the co-parent can see (shared before or after the change) is confirmed first; the confirmation is bound to the event exactly as read, so if it changes on OFW in between (say the co-parent edited it) the update is refused instead of overwriting their edit. If the write fails without a definitive answer, or lands but cannot be re-read to confirm it, the result is EVENT_UNCONFIRMED: the change may already be on OFW, so do NOT retry until ofw_list_events shows whether it landed. ' + CONFIRM_NOTE,
     annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
     inputSchema: z.object({
@@ -434,6 +473,7 @@ export function registerCalendarTools(
   });
 
   if (allowWrites) server.registerTool('ofw_delete_event', {
+    _meta: familyMeta('change'),
     description: 'Delete an OurFamilyWizard calendar event. Reads the event first; deleting one the co-parent can see is confirmed first, with a preview of exactly which event (title, date, time) is removed, and is refused if the event changed on OFW after that preview. If the request fails without a definitive answer the result is EVENT_UNCONFIRMED: the event may already be gone, so do NOT retry until ofw_list_events shows whether it is still there. ' + CONFIRM_NOTE,
     annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
     inputSchema: z.object({

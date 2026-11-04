@@ -9,6 +9,7 @@ import { getExpenseUploadOnly, getWriteMode } from '../config.js';
 import { parseLenient } from '@chrischall/mcp-utils';
 import { RECEIPT_HOST_SUFFIX } from '../protocol.js';
 import { registerExpenseReimbursementTool } from './expense-reimbursement.js';
+import { familyMeta } from './hints.js';
 
 const UploadedExpenseFileSchema = z.looseObject({
   fileId: z.number(),
@@ -253,6 +254,7 @@ export function registerExpenseTools(
   const allowReceiptUploads = allowWrites && attachmentIO !== undefined;
 
   if (!uploadOnly) server.registerTool('ofw_get_expense_totals', {
+    _meta: familyMeta('lookup', { aliases: ['expenses', 'owe', 'reimbursement'] }),
     description: 'Get OurFamilyWizard expense summary totals (owed/paid)',
     annotations: { readOnlyHint: true, openWorldHint: true },
   }, async () => {
@@ -261,6 +263,7 @@ export function registerExpenseTools(
   });
 
   if (!uploadOnly) server.registerTool('ofw_list_expense_categories', {
+    _meta: familyMeta('lookup'),
     description: 'List OurFamilyWizard expense categories, including preset and custom categories with their responsibility split metadata. Read-only.',
     annotations: { readOnlyHint: true, openWorldHint: true },
   }, async () => {
@@ -269,6 +272,7 @@ export function registerExpenseTools(
   });
 
   if (!uploadOnly) server.registerTool('ofw_list_expenses', {
+    _meta: familyMeta('lookup', { aliases: ['expenses', 'reimbursement', 'receipts'] }),
     description: 'List OurFamilyWizard expenses. OFW pages this endpoint with 1-based page/size parameters; its older start/max parameters are ignored and repeatedly return page 1. The response leads with hasMore and nextPage (null when exhausted) before the records. Continue by passing nextPage.',
     annotations: { readOnlyHint: true, openWorldHint: true },
     inputSchema: z.object({
@@ -320,6 +324,7 @@ export function registerExpenseTools(
   });
 
   if (allowReceiptUploads) server.registerTool('ofw_upload_expense_pdf', {
+    _meta: familyMeta('other'),
     // Destructive by the inverse test: always uploaded SHARED, so the
     // co-parent sees it in My Files at once, and no tool here deletes it.
     description: 'Upload a PDF to OurFamilyWizard My Files for later attachment to an expense. Accepts either a local path or a signed ChatGPT/oaiusercontent HTTPS URL plus fileName. Exactly one of path or url must be supplied. This tool accepts PDF files only and uploads them using the same SHARED file metadata as the OFW expense form so the returned fileId can be attached to an expense. A SHARED file is visible to the co-parent in My Files immediately, whatever the visibility of the expense it is later attached to (that is set separately by ofw_create_expense privateExpense). ' + CONFIRM_NOTE,
@@ -406,6 +411,7 @@ export function registerExpenseTools(
   });
 
   if (allowWrites) server.registerTool('ofw_update_expense', {
+    _meta: familyMeta('change'),
     description: `Change an existing OurFamilyWizard expense. Pass expenseId plus ONLY the fields you want to change; every field you omit keeps its current value. The tool reads the expense from OFW first and sends the merged result, because OFW's update replaces the whole expense and a field left out would otherwise be erased. If a field you did not pass cannot be read back from OFW, the update is refused as EXPENSE_FIELDS_UNREADABLE and names the field; pass it explicitly (description:null or receiptFileId:null to send none). receiptFileId REPLACES all current receipts; omit it to keep them. Set privateExpense=false to publish a private expense to the co-parent. The confirmation is bound to the expense exactly as read, so if it changes on OFW in between, the update is refused instead of overwriting that change. If the request fails without a definitive answer the result is EXPENSE_UNCONFIRMED: the update may already have been applied, so check ${checkIn} before retrying. ` + CONFIRM_NOTE,
     annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
     inputSchema: z.object({
@@ -573,6 +579,7 @@ export function registerExpenseTools(
   });
 
   if (allowWrites) server.registerTool('ofw_create_expense', {
+    _meta: familyMeta('change', { aliases: ['expense', 'reimbursement', 'split'] }),
     description: `Log a new expense in OurFamilyWizard using the current web-app expense contract. Required fields are title, amount, purchaseDate, categoryId, payerId (the parent who owes), and at least one child user id. Supports one previously-uploaded receipt PDF and private entries. privateExpense=true creates an expense visible only to you; false/default creates the normal shared expense. receiptFileId should come from ofw_upload_expense_pdf. A shared expense is a money claim that appears in the ledger in front of the co-parent immediately, and this server cannot delete it. If the request fails without a definitive answer the result is EXPENSE_UNCONFIRMED: the expense may already exist, so do NOT retry until ${checkIn} shows it did not land. ` + CONFIRM_NOTE,
     // Not a harmless local write: a shared claim is co-parent-visible at once
     // and this server has no way to take it back. destructiveHint keeps a host

@@ -1,9 +1,11 @@
 import { McpServer } from '@modelcontextprotocol/server';
 import type { OFWClient } from '../client.js';
 import { jsonResponse } from './_shared.js';
+import { familyMeta } from './hints.js';
 
 export function registerUserTools(server: McpServer, client: OFWClient): void {
   server.registerTool('ofw_get_profile', {
+    _meta: familyMeta('lookup'),
     description: 'Get current user and co-parent profile information from OurFamilyWizard',
     annotations: { readOnlyHint: true, openWorldHint: true },
   }, async () => {
@@ -12,6 +14,7 @@ export function registerUserTools(server: McpServer, client: OFWClient): void {
   });
 
   server.registerTool('ofw_get_notifications', {
+    _meta: familyMeta('whats-new', { aliases: ['ofw', 'dashboard', 'unread', 'co-parent'] }),
     description:
       'Get OurFamilyWizard dashboard summary: unread message count, upcoming events, outstanding expenses. Note: updates your last-seen status.',
     // Not read-only: this GET updates the last-seen status the co-parent can

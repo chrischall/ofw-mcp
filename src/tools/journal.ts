@@ -4,12 +4,14 @@ import type { OFWClient } from '../client.js';
 import { jsonResponse, requestWrite, UnconfirmedWriteError, unconfirmedWriteResponse } from './_shared.js';
 import { offsetState, readUpstreamPaging, withPaginationFirst } from './pagination.js';
 import { getWriteMode } from '../config.js';
+import { familyMeta } from './hints.js';
 
 export function registerJournalTools(server: McpServer, client: OFWClient): void {
   // Journal writes land on the court-visible record — OFW_WRITE_MODE 'all' only.
   const allowWrites = getWriteMode() === 'all';
 
   server.registerTool('ofw_list_journal_entries', {
+    _meta: familyMeta('lookup'),
     description: 'List OurFamilyWizard journal entries. Offset-paged via start/max (1-based). The response leads with its paging state — `hasMore` and `nextStart` (null when the list is exhausted) — BEFORE the records, so a truncated or partially-read response still says whether more remain. Never state an entry count or an absence from one page.',
     annotations: { readOnlyHint: true, openWorldHint: true },
     inputSchema: z.object({
@@ -42,6 +44,7 @@ export function registerJournalTools(server: McpServer, client: OFWClient): void
   });
 
   if (allowWrites) server.registerTool('ofw_create_journal_entry', {
+    _meta: familyMeta('change', { aliases: ['journal', 'note'] }),
     // Destructive by the inverse test: the entry lands on the court-visible
     // record and no tool here edits or deletes a journal entry.
     description: 'Create a new journal entry in OurFamilyWizard',
