@@ -2010,7 +2010,7 @@ export function registerMessageTools(
     annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
     inputSchema: z.object({
       folders: z.array(z.enum(['inbox', 'sent', 'drafts'])).min(1).describe('Folders to sync (default: all three). Must be non-empty if given — an empty list would sync nothing while reporting success.').optional(),
-      fetchUnreadBodies: z.boolean().describe('If true, also fetch bodies for unread inbox messages — which marks each one READ on OurFamilyWizard and stamps a co-parent-visible "First Viewed" time that cannot be undone. Defaults to the OFW_FETCH_UNREAD_BODIES env var (false unless set). Refused outright when OFW_ALLOW_MARK_READ=false or on a no-read day (the response\'s unreadBodies says which). When the server runs with OFW_CONFIRM_MARK_READ=true, the sync runs WITHOUT marking anything read and then asks the user to confirm opening the listed unread messages (newest ' + MAX_SYNC_OPEN_UNREAD + ' per call): a confirmation prompt where the client supports one; otherwise it returns that list plus a confirmToken, and only a repeat call with that token opens them. Show the user the list and wait for their yes.').optional(),
+      fetchUnreadBodies: z.boolean().describe('If true, also fetch bodies for unread inbox messages — which marks each one READ on OurFamilyWizard and stamps a co-parent-visible "First Viewed" time that cannot be undone. Defaults to the OFW_FETCH_UNREAD_BODIES env var (false unless set). Applies only when the inbox is among the folders synced. Refused outright when OFW_ALLOW_MARK_READ=false or on a no-read day (the response\'s unreadBodies says which). When the server runs with OFW_CONFIRM_MARK_READ=true, the sync runs WITHOUT marking anything read and then asks the user to confirm opening the listed unread messages (newest ' + MAX_SYNC_OPEN_UNREAD + ' per call): a confirmation prompt where the client supports one; otherwise it returns that list plus a confirmToken, and only a repeat call with that token opens them. Show the user the list and wait for their yes.').optional(),
       deep: z.boolean().describe('If true, walk every OFW page until empty regardless of cache state. Use to backfill gaps. Default false.').optional(),
       maxRequests: z.number().int().min(1).describe('Maximum OFW requests this single call may make before pausing. When hit, the response reports done:false — call again with the same arguments to continue. Omit to use the server default (OFW_SYNC_MAX_REQUESTS, or unbounded on local installs).').optional(),
       confirmToken: confirmTokenParam,
@@ -2024,7 +2024,11 @@ export function registerMessageTools(
     //      outright, and the response says which one refused;
     //   2. OFW_CONFIRM_MARK_READ asks the user, naming every message it would
     //      open, before a single one is fetched.
-    const requested = args.fetchUnreadBodies ?? getFetchUnreadBodies();
+    // Only an INBOX sync can have unread bodies to fetch — sent messages carry
+    // no read state of ours. A sent/drafts-only call has nothing to ask about,
+    // and a prompt to open inbox messages there is one the caller never invited.
+    const syncsInbox = (args.folders ?? ['inbox']).includes('inbox');
+    const requested = syncsInbox && (args.fetchUnreadBodies ?? getFetchUnreadBodies());
     const ceiling = requested ? markReadCeiling() : null;
     const askFirst = requested && ceiling === null && getConfirmMarkRead();
     const result = await syncAll(client, {
