@@ -13,7 +13,7 @@ function row(over: Partial<MessageRow> = {}): MessageRow & { read: boolean } {
     // Empty on EVERY cached row ever observed — inbox and sent alike.
     fromUser: '',
     sentAt: '2026-07-10T23:38:50',
-    recipients: [{ userId: 3039201, name: 'Chris Hall', viewedAt: null }],
+    recipients: [{ userId: 2000001, name: 'Chris Hall', viewedAt: null }],
     body: 'I sent a text today.\n\nThanks ',
     fetchedBodyAt: '2026-07-12T01:57:43.445Z',
     replyToId: null,
@@ -24,7 +24,7 @@ function row(over: Partial<MessageRow> = {}): MessageRow & { read: boolean } {
       subject: 'Tyler Place 2027',
       date: { dateTime: '2026-07-10T23:38:50', displayDate: '7/10/2026', weekday: 'Friday' },
       showNeverViewed: false,
-      recipients: [{ user: { name: 'Chris Hall', userId: 3039201, displayInitials: 'CH', color: '#3366CC' } }],
+      recipients: [{ user: { name: 'Chris Hall', userId: 2000001, displayInitials: 'CH', color: '#3366CC' } }],
       folder: 13471258,
       draft: false,
       preview: 'I sent a text today...',
@@ -32,7 +32,7 @@ function row(over: Partial<MessageRow> = {}): MessageRow & { read: boolean } {
       read: true,
       replied: false,
       canReply: true,
-      author: { userId: 3039202, name: 'Alison Hall', displayInitials: 'AH', color: '#66AA00' },
+      author: { userId: 2000002, name: 'Pat Doe', displayInitials: 'PD', color: '#66AA00' },
     },
     ...over,
   } as MessageRow & { read: boolean };
@@ -67,7 +67,7 @@ describe('compactMessage', () => {
    * every message, so compact is where that field starts working.
    */
   it('promotes the sender, which no top-level field has ever carried', () => {
-    expect(compactMessage(row()).from).toBe('Alison Hall');
+    expect(compactMessage(row()).from).toBe('Pat Doe');
     expect(compactMessage(row()).fromUser).toBeUndefined();
   });
 
@@ -112,7 +112,7 @@ describe('compactMessage', () => {
   });
 
   it('keeps the recipients the row already normalised, not OFW’s eight-field user objects', () => {
-    expect(compactMessage(row()).recipients).toEqual([{ userId: 3039201, name: 'Chris Hall', viewedAt: null }]);
+    expect(compactMessage(row()).recipients).toEqual([{ userId: 2000001, name: 'Chris Hall', viewedAt: null }]);
   });
 
   it('never alters a body — whitespace in a message is content', () => {

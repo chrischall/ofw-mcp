@@ -168,14 +168,14 @@ There are three ways to get a file to OurFamilyWizard, and which one works depen
 
 ```jsonc
 // 1. ofw_upload_attachment
-{ "uploadSlots": [{ "filename": "Finn_Think_Sheet_2026-11-03.jpg" }] }
+{ "uploadSlots": [{ "filename": "Sam_Think_Sheet_2026-11-03.jpg" }] }
 // → { "blobKeys": ["uploads/…"], "slots": [{ "uploadUrl": "https://…", "mimeType": "image/jpeg",
 //      "curl": "curl -sS --fail -X PUT -H 'Content-Type: image/jpeg' --data-binary @'<path to …>' '…'", "expiresAt": "…" }] }
 
 // 2. run the slot's curl with the real file path
 
 // 3. ofw_upload_attachment — or pass blobKeys straight to ofw_save_draft / ofw_send_message
-{ "blobKeys": ["uploads/…"], "label": "Finn Think Sheet 11-3-26" }
+{ "blobKeys": ["uploads/…"], "label": "Sam Think Sheet 11-3-26" }
 // → { "uploaded": 1, "failed": 0, "fileIds": [12345], "results": [{ "ok": true, "fileId": 12345, "blobDeleted": true, … }] }
 ```
 
@@ -192,12 +192,14 @@ The PUT must send the slot's `Content-Type` (the URL is signed for it), and the 
 **Local installs: `path`.** A file inside the upload directory (`OFW_UPLOAD_DIR`, default `~/Downloads/ofw-mcp`, created `0700` on first use). Paths outside it after resolving symlinks, hidden files, and files over 25 MiB are refused:
 
 ```jsonc
-{ "path": "Finn_Think_Sheet_2026-11-03.jpg" }
+{ "path": "Sam_Think_Sheet_2026-11-03.jpg" }
 ```
 
 Every source has the same limits: up to 10 files per call, each non-empty and at most 25 MiB, with a bare filename. The MIME type comes from the extension unless you pass `mimeType`. Uploads are `PRIVATE` unless you pass `shareClass: "SHARED"`, which goes one file at a time and is confirmed first.
 
-To upload and attach in one step, give `ofw_save_draft` or `ofw_send_message` `inlineAttachments` (the same `{filename, contentBase64, mimeType?}` entries) or `blobKeys`. Every entry is validated before anything is uploaded. `ofw_send_message` uploads only after the send is approved, and its approval is bound to each file's SHA-256. Editing a draft (`ofw_save_draft` with `messageId`) keeps the draft's existing attachments unless you pass `myFileIDs`.
+To upload and attach in one step, give `ofw_save_draft` or `ofw_send_message` `inlineAttachments` (the same `{filename, contentBase64, mimeType?}` entries) or `blobKeys`. Every entry is validated before anything is uploaded.
+
+**Drafts don't hold attachments on OurFamilyWizard.** OFW drops files from a saved draft, and its own web app only attaches them when the message is sent. So `ofw_save_draft` *holds* a draft's files on this server: they show under `attachments.held`, are kept across edits (`removeFileIDs` drops one), change the draft's `revision`, and are attached when you send the draft with `ofw_send_message(draftId)`. You won't see them on the draft in the OFW web app. On send, every attachment goes out `SHARED`, as the web app does it. New files are uploaded `SHARED`, and files known to be `PRIVATE` are re-shared as `SHARED`, both only after you approve the send; the approval is bound to each new file's SHA-256. The response then checks the sent message and reports any file OFW left off.
 
 On a hosted connector, `ofw_download_attachment` with `inline:false` (or `link:true`) returns a private download link that expires after `linkMinutes` (default 60), instead of a path on the server's disk. Inline images over 10 MiB fall back to a link too.
 

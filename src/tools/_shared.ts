@@ -70,7 +70,7 @@ export function jsonErrorResponse(data: unknown): ReturnType<typeof textResult> 
 // call. Loose: unknown keys pass through (and survive into cached listData).
 export const ApiRecipientSchema = z.looseObject({
   // Live OFW payloads key the recipient's id as `userId` (verified against a
-  // real /pub/v3/messages record: `recipients[].user.userId === 3039201`). An
+  // real /pub/v3/messages record: `recipients[].user.userId === 2000001`). An
   // earlier guess read `id`, which is absent — so every normalized recipient
   // came out with `userId: 0`, breaking any "find my own recipient" match. Both
   // are accepted (userId first, id fallback) so a backend that ever returns `id`

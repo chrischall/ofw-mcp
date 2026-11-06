@@ -48,13 +48,13 @@ describe('mapRecipients', () => {
   });
 
   it('carries the real recipient id from the live `user.userId` field', () => {
-    // Live OFW payloads key the id as `userId` (e.g. 3039201), not `id` — an
+    // Live OFW payloads key the id as `userId` (e.g. 2000001), not `id` — an
     // earlier reader looked at `id`, which is absent, so every recipient came
     // out with `userId: 0` and no "find my own recipient" match could succeed.
     expect(mapRecipients([
-      { user: { userId: 3039201, name: 'Chris' }, viewed: { dateTime: '2026-07-17T08:37:57' } },
+      { user: { userId: 2000001, name: 'Chris' }, viewed: { dateTime: '2026-07-17T08:37:57' } },
     ])).toEqual([
-      { userId: 3039201, name: 'Chris', viewedAt: '2026-07-17T08:37:57' },
+      { userId: 2000001, name: 'Chris', viewedAt: '2026-07-17T08:37:57' },
     ]);
   });
 
@@ -157,7 +157,7 @@ describe('hasRealView', () => {
 });
 
 describe('deriveRead', () => {
-  const SELF = 3039201;
+  const SELF = 2000001;
 
   describe('inbox', () => {
     it('is true when a recipient has a viewedAt', () => {
@@ -261,7 +261,7 @@ describe('withReadState', () => {
     const row = sampleMessageRow({
       folder: 'inbox', fetchedBodyAt: '2026-07-17T12:37:57.957Z',
       listData: { read: false, showNeverViewed: true, other: 'kept' },
-      recipients: [{ userId: 3039201, name: 'Chris', viewedAt: '2026-07-17T08:37:57' }],
+      recipients: [{ userId: 2000001, name: 'Chris', viewedAt: '2026-07-17T08:37:57' }],
     });
     const out = withReadState(row);
     expect(out.read).toBe(true);
@@ -271,7 +271,7 @@ describe('withReadState', () => {
   it('reports unread and keeps the flags consistent (unread case)', () => {
     const row = sampleMessageRow({
       folder: 'inbox', fetchedBodyAt: null, listData: { other: 'kept' },
-      recipients: [{ userId: 3039201, name: 'Chris', viewedAt: null }],
+      recipients: [{ userId: 2000001, name: 'Chris', viewedAt: null }],
     });
     const out = withReadState(row);
     expect(out.read).toBe(false);

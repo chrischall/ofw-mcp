@@ -1,4 +1,5 @@
 import type { OFWClient } from '../client.js';
+import { getHeldFiles } from './held-attachments.js';
 import type { CacheStore, DraftRow, FolderName, MessageRow } from '../cache/store.js';
 import { resolveFolderIds } from '../sync.js';
 import { draftRevision, fetchMessageSnapshot } from './draft-freshness.js';
@@ -264,7 +265,7 @@ export async function probeIds(
       items.push({ id: p.id, skipped: true, reason: 'WOULD_MARK_READ', note: SKIP_NOTE });
       continue;
     }
-    const probe = await probeOne(client, p, map, keyById.get(p.id) ?? null);
+    const probe = await probeOne(client, p, map, keyById.get(p.id) ?? null, await getHeldFiles(store, p.id));
     requests += probe.requests;
     items.push(probe.item);
   }
@@ -281,6 +282,7 @@ async function probeOne(
   prepared: PreparedProbe,
   map: FolderIdMap,
   draftKey: string | null,
+  heldFiles: number[],
 ): Promise<{ item: LifecycleItem; requests: number }> {
   const { id, cachedDraft } = prepared;
 
@@ -301,8 +303,10 @@ async function probeOne(
   }
 
   const state = classifyState(snapshot, map);
-  const cacheRevision = cachedDraft === null ? null : draftRevision(cachedDraft);
-  const serverRevision = snapshot === null ? null : draftRevision(snapshot.content);
+  // Both sides carry the files held for this draft (held-attachments.ts), so
+  // the reported revisions match the one ofw_save_draft returned.
+  const cacheRevision = cachedDraft === null ? null : draftRevision(cachedDraft, heldFiles);
+  const serverRevision = snapshot === null ? null : draftRevision(snapshot.content, heldFiles);
   const viewedAt = snapshot?.content.recipients.find((r) => r.viewedAt !== null)?.viewedAt ?? null;
 
   // `inSync` compares the CACHED DRAFT against the server, and it is FALSE the
