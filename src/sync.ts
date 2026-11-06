@@ -1,4 +1,5 @@
 import type { OFWClient } from './client.js';
+import { clearHeldFiles, getHeldFiles, setHeldFiles } from './tools/held-attachments.js';
 import type {
   CacheStore,
   MessageRow, DraftRow, FolderName,
@@ -610,6 +611,40 @@ export async function markFolderVerified(
   await store.setMeta(folderVerifiedAtKey(folder), at);
 }
 
+/**
+ * A draft replaced OUTSIDE this cache — by another session or deployment
+ * (create-then-delete there), or in the web app — vanishes here while a new
+ * id appears, and the stable `draftKey` plus the attachments held for it would
+ * be lost with the old id. When EXACTLY ONE new draft carries the vanished
+ * draft's subject, body and reply target, it is the same message: move the
+ * key and the held files across, marked `draft_key_inferred:<id>`. Anything
+ * ambiguous (two candidates, changed content, a new draft that already has a
+ * lineage) is left unlinked — a wrong guess would hand one message's
+ * identity and attachments to another, which is worse than none.
+ */
+async function inferReplacedDraftLineage(store: CacheStore, vanishedIds: number[], newRows: DraftRow[]): Promise<void> {
+  if (vanishedIds.length === 0 || newRows.length === 0) return;
+  for (const goneId of vanishedIds) {
+    // A vanished id came from this cache's own draft list, so its row exists.
+    const gone = (await store.getDraft(goneId))!;
+    const key = (await store.getDraftLineageById(goneId))?.draftKey;
+    const held = await getHeldFiles(store, goneId);
+    if (!key && held.length === 0) continue;
+    const matches = newRows.filter((r) => r.subject === gone.subject && r.body === gone.body && r.replyToId === gone.replyToId);
+    if (matches.length !== 1) continue;
+    const target = matches[0]!;
+    if (await store.getDraftLineageById(target.id)) continue;
+    if (key) {
+      await store.recordDraftLineage({ id: target.id, draftKey: key, previousId: goneId, recordedAt: new Date().toISOString() });
+      await store.setMeta(`draft_key_inferred:${target.id}`, '1');
+    }
+    if (held.length > 0) {
+      await setHeldFiles(store, target.id, [...held, ...(await getHeldFiles(store, target.id))]);
+      await clearHeldFiles(store, goneId);
+    }
+  }
+}
+
 export async function syncDrafts(
   client: OFWClient,
   draftsFolderId: string,
@@ -707,9 +742,9 @@ export async function syncDrafts(
   }
 
   const seenIds = new Set(ids);
-  for (const id of await store.listDraftIds()) {
-    if (!seenIds.has(id)) await store.deleteDraft(id);
-  }
+  const vanished = (await store.listDraftIds()).filter((id) => !seenIds.has(id));
+  await inferReplacedDraftLineage(store, vanished, rows.filter((r) => !existingById.has(r.id)));
+  for (const id of vanished) await store.deleteDraft(id);
 
   // The complete walk fetched every draft's DETAIL and reconciled deletions, so
   // the cache is now known-equal to the server. Only here is `synced: 0`

@@ -42,8 +42,23 @@ import { displayTimeZone, formatInstant, normalizeTimestampsInValue, nowNaiveWal
 import { readingBlockedToday } from '../read-days.js';
 import type { ReadingBlocked } from '../read-days.js';
 
-/** A PRIVATE file re-uploaded as SHARED for a send (`reused` when an earlier attempt made the copy). */
-interface Reshared { from: number; to: number; fileName: string; reused?: true }
+/** Why a draft has no draftKey — said instead of a bare null. */
+export const DRAFT_KEY_NULL_REASON =
+  'No draftKey: this draft was not saved through this server\'s cache — it may have been created in the OurFamilyWizard web app or replaced from another session — so its lineage is unknown. The next ofw_save_draft on it starts a new key.';
+
+/** `{draftKey, draftKeyInferred?}` or `{draftKey: null, draftKeyReason}` for one draft. */
+async function describeDraftKey(cache: CacheStore, id: number): Promise<Record<string, unknown>> {
+  const row = await cache.getDraftLineageById(id);
+  if (!row) return { draftKey: null, draftKeyReason: DRAFT_KEY_NULL_REASON };
+  return { draftKey: row.draftKey, ...((await cache.getMeta(`draft_key_inferred:${id}`)) === '1' ? { draftKeyInferred: true } : {}) };
+}
+
+/** The ids whose draftKey was carried over by inference (see syncDrafts). */
+async function inferredDraftKeys(cache: CacheStore, ids: number[]): Promise<Set<number>> {
+  const out = new Set<number>();
+  for (const id of ids) if ((await cache.getMeta(`draft_key_inferred:${id}`)) === '1') out.add(id);
+  return out;
+}
 
 /** Held file ids → `{fileId, fileName, held: true}`, names from the attachment cache (null when unknown). */
 async function describeHeld(cache: CacheStore, ids: number[]): Promise<Array<{ fileId: number; fileName: string | null; held: true }>> {
@@ -732,7 +747,7 @@ export function registerMessageTools(
         // (create-then-delete), so callers should key off draftKey. Null when
         // this draft was never written through this tool (e.g. authored in
         // the web app).
-        draftKey: (await cache.getDraftLineageById(draftRow.id))?.draftKey ?? null,
+        ...(await describeDraftKey(cache, draftRow.id)),
         id: draftRow.id,
         folder: 'drafts',
         subject: draftRow.subject,
@@ -911,7 +926,7 @@ export function registerMessageTools(
 
   if (allowSend) server.registerTool('ofw_send_message', {
     _meta: familyMeta('send', { aliases: ['message', 'co-parent', 'reply', 'ofw'] }),
-    description: 'Send a message via OurFamilyWizard — the ONE irreversible operation here, so it carries the strongest guard. TO SEND AN EXISTING DRAFT (the safe default): pass draftId (or messageId — same thing). The tool re-reads the draft from OFW and sends the SERVER\'S version, so what goes out is what is on OurFamilyWizard, not what this session remembers — subject/body act only as explicit overrides. It is guarded exactly like ofw_save_draft: pass expectedRevision to assert which version you are sending; if the draft changed on OFW since you read it — or no longer exists (it may already have been SENT) — the send is REFUSED with the current server content echoed back, and nothing goes out. RECIPIENTS: OurFamilyWizard does not persist recipients on drafts, so recipientIds is usually still required at send time (ids from ofw_get_profile). After the send is CONFIRMED (OFW returned the new message id and the re-fetched sent record matches what was posted), the source draft is deleted automatically; pass deleteDraftOnSuccess:false to keep it. On ANY failure or ambiguity the draft is never deleted — the response carries draftRetained:true with the reason. If the send request times out or drops without a definitive answer, the result is SEND_UNCONFIRMED: the message may already have been delivered, so do NOT retry until a sent-folder sync (or ourfamilywizard.com) shows it did not go out. TO COMPOSE FROM SCRATCH: supply subject/body/recipientIds with no draftId. If replyToId is provided (or inherited from the draft), the cache may rewrite it to the latest reply in the same thread (a note is included when this happens). ATTACHMENTS: OurFamilyWizard keeps no files on drafts, so when sending by draftId the files ofw_save_draft HELD for it are attached automatically; myFileIDs (from ofw_upload_attachment) overrides them, or attaches files on a fresh compose; inlineAttachments/blobKeys upload new ones. Every attachment goes out SHARED, as the web app sends them: new files are uploaded SHARED and files known to be PRIVATE are re-shared as SHARED, both only after the send is approved. The response verifies them against the sent message (attachments.verified/missing). The response leads with sentMessageId and the stable draftKey, and reports threaded (whether OFW actually linked the reply) and draftDeleted. ' + CONFIRM_NOTE,
+    description: 'Send a message via OurFamilyWizard — the ONE irreversible operation here, so it carries the strongest guard. TO SEND AN EXISTING DRAFT (the safe default): pass draftId (or messageId — same thing). The tool re-reads the draft from OFW and sends the SERVER\'S version, so what goes out is what is on OurFamilyWizard, not what this session remembers — subject/body act only as explicit overrides. It is guarded exactly like ofw_save_draft: pass expectedRevision to assert which version you are sending; if the draft changed on OFW since you read it — or no longer exists (it may already have been SENT) — the send is REFUSED with the current server content echoed back, and nothing goes out. RECIPIENTS: OurFamilyWizard does not persist recipients on drafts, so recipientIds is usually still required at send time (ids from ofw_get_profile). After the send is CONFIRMED (OFW returned the new message id and the re-fetched sent record matches what was posted), the source draft is deleted automatically; pass deleteDraftOnSuccess:false to keep it. On ANY failure or ambiguity the draft is never deleted — the response carries draftRetained:true with the reason. If the send request times out or drops without a definitive answer, the result is SEND_UNCONFIRMED: the message may already have been delivered, so do NOT retry until a sent-folder sync (or ourfamilywizard.com) shows it did not go out. TO COMPOSE FROM SCRATCH: supply subject/body/recipientIds with no draftId. If replyToId is provided (or inherited from the draft), the cache may rewrite it to the latest reply in the same thread (a note is included when this happens). ATTACHMENTS: OurFamilyWizard keeps no files on drafts, so when sending by draftId the files ofw_save_draft HELD for it are attached automatically; myFileIDs (from ofw_upload_attachment) overrides them, or attaches files on a fresh compose; inlineAttachments/blobKeys upload new ones. Files are attached as they are (PRIVATE files attach fine); new files are uploaded PRIVATE, only after the send is approved. The response verifies them against the sent message (attachments.verified/missing). The response leads with sentMessageId and the stable draftKey, and reports threaded (whether OFW actually linked the reply) and draftDeleted. ' + CONFIRM_NOTE,
     annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
     inputSchema: z.object({
       subject: z.string().describe('Message subject. Required unless draftId/messageId is given (then it overrides the server draft\'s subject).').optional(),
@@ -1049,20 +1064,14 @@ export function registerMessageTools(
       serverDraft?.recipients, cachedDraft?.recipients, replyParent?.recipients,
     ]);
     const unresolved = to.filter((r) => r.name === null).map((r) => r.userId);
-    // The web app attaches every message file as SHARED, and a send with a
-    // PRIVATE one is not known to keep it — so a file the cache KNOWS is
-    // PRIVATE is re-uploaded as SHARED after approval. Unknown share class:
-    // passed through untouched, never guessed at.
+    // Files are attached as they are. A send keeps PRIVATE files (verified
+    // live: four PRIVATE fileIds all came back on the sent message), so no
+    // file is re-uploaded — a re-upload as SHARED would leave an extra,
+    // co-parent-visible copy in My Files for nothing.
     const attachments = await Promise.all(myFileIDs.map(async (fileId) => {
       const known = await cache.getAttachment(fileId);
-      const shareClass = (known?.metadata as { shareClass?: unknown } | undefined)?.shareClass;
-      return {
-        fileId,
-        fileName: known?.fileName ?? null,
-        ...(shareClass === 'PRIVATE' ? { reshare: true } : {}),
-      };
+      return { fileId, fileName: known?.fileName ?? null };
     }));
-    const reshare = attachments.filter((a) => a.reshare).map((a) => a.fileId);
     const preview: Record<string, unknown> = {
       action: 'Send OurFamilyWizard message',
       warning: 'Irreversible: once sent, the message is delivered to the recipient(s) and becomes part of the court-visible record. It cannot be recalled or edited.',
@@ -1076,9 +1085,6 @@ export function registerMessageTools(
         ? null
         : { messageId: resolvedReplyTo, subject: replyParent?.subject ?? null, from: replyParent?.fromUser || null },
       attachments,
-      ...(reshare.length > 0
-        ? { reshareNote: `${reshare.length} PRIVATE file(s) will be re-shared as SHARED on approval so OurFamilyWizard attaches them — the web app attaches every message file as SHARED.` }
-        : {}),
       ...(pending.length > 0 ? { newAttachments: describePending(pending) } : {}),
       source: draftRef !== undefined
         ? { draftId: draftRef, deleteDraftAfterSend: deleteOnSuccess }
@@ -1093,7 +1099,6 @@ export function registerMessageTools(
       ...(serverDraft != null ? { revision: draftRevision(serverDraft, heldForDraft) } : {}),
       payload: {
         subject, body, recipientIds, myFileIDs, replyToId: resolvedReplyTo, deleteDraftOnSuccess: deleteOnSuccess,
-        ...(reshare.length > 0 ? { reshare } : {}),
         ...(pending.length > 0
           ? { newAttachments: pending.map((p) => ({ fileName: p.fileName, sizeBytes: p.sizeBytes, sha256: p.sha256 })) }
           : {}),
@@ -1103,30 +1108,13 @@ export function registerMessageTools(
     });
     if (gate) return gate;
 
-    // Approved. Re-share the PRIVATE files and upload the new ones, both as
-    // SHARED; a failure stops here, before the send, naming whatever did upload.
-    const reshared = await reshareAsShared(reshare, 'sent');
-    // From here on, a failure must name the SHARED copies just made, or the
-    // caller cannot tell they exist (a retry reuses them — see reshareAsShared).
-    const resharedNote = reshared.length > 0
-      ? ` These files were already re-shared as SHARED: ${reshared.map((r) => `${r.fileName} (fileId ${r.from} → ${r.to})`).join(', ')}; a retry reuses them.`
-      : '';
-    const withReshared = (e: unknown): Error => {
-      const err = e as Error; // uploadPending and postMessageAndRefetch only throw Errors
-      if (resharedNote) err.message += resharedNote;
-      return err;
-    };
-    let uploadedNew: Awaited<ReturnType<typeof uploadPending>>;
-    try {
-      uploadedNew = await uploadPending(pending, {
-        client, cache, store: blobStore, nothingWas: 'sent', shareClass: 'SHARED',
-      });
-    } catch (e) {
-      throw withReshared(e);
-    }
-    const { uploaded: newFiles, warnings: uploadWarnings } = uploadedNew;
-    const swapped = new Map(reshared.map((r) => [r.from, r.to]));
-    myFileIDs = [...myFileIDs.map((id) => swapped.get(id) ?? id), ...newFiles.map((f) => f.fileId)];
+    // Approved. Upload the new files (PRIVATE — the send itself shares them
+    // with the recipient); a failure stops here, before the send, naming
+    // whatever did upload.
+    const { uploaded: newFiles, warnings: uploadWarnings } = await uploadPending(pending, {
+      client, cache, store: blobStore, nothingWas: 'sent', shareClass: 'PRIVATE',
+    });
+    myFileIDs = [...myFileIDs, ...newFiles.map((f) => f.fileId)];
 
     let posted: Awaited<ReturnType<typeof postMessageAndRefetch<z.infer<typeof SentDetailSchema>>>>;
     try {
@@ -1140,7 +1128,7 @@ export function registerMessageTools(
         replyToId: resolvedReplyTo,
       }, SentDetailSchema, 'ofw_send_message');
     } catch (e) {
-      if (!(e instanceof UnconfirmedWriteError)) throw withReshared(e);
+      if (!(e instanceof UnconfirmedWriteError)) throw e;
       // The one irreversible operation failed WITHOUT a definitive answer. A
       // plain error here reads as "nothing happened" and invites a retry —
       // which, if the first attempt landed, sends the co-parent a duplicate
@@ -1152,7 +1140,6 @@ export function registerMessageTools(
         result: 'SEND_UNCONFIRMED',
         mayHaveBeenDelivered: true,
         sentMessageId: e.postedId,
-        ...(reshared.length > 0 ? { reshared } : {}),
         reason,
         remedy: 'Do NOT retry the send blindly. First run ofw_sync_messages with folders:["sent"] and look for this subject/body among the newest sent messages (or check ourfamilywizard.com). Retry only once you have confirmed it did not go out.',
         ...(draftRef !== undefined
@@ -1176,7 +1163,6 @@ export function registerMessageTools(
         onMessage,
         verified: onMessage === null ? null : missing.length === 0,
         ...(missing.length > 0 ? { missing } : {}),
-        ...(reshared.length > 0 ? { reshared } : {}),
       };
       if (missing.length > 0) {
         attachmentNote = `WARNING: the message was SENT, but OurFamilyWizard did not attach fileId(s) ${missing.join(', ')}. It cannot be edited; send the missing file(s) in a follow-up message.`;
@@ -1508,11 +1494,13 @@ export function registerMessageTools(
         // stable identity across edits, and whether the last sync actually
         // compared this cache against OFW.
         const held = await heldFilesFor(cache, rows.map((d) => d.id));
+        const inferred = await inferredDraftKeys(cache, rows.map((d) => d.id));
         const drafts = rows.map((d) => ({
           ...d,
           revision: draftRevision(d, held.get(d.id)),
           ...(held.get(d.id)!.length > 0 ? { heldFiles: held.get(d.id) } : {}),
           draftKey: keyById.get(d.id) ?? null,
+          ...(inferred.has(d.id) ? { draftKeyInferred: true } : {}),
           cacheStatus,
           serverConfirmed,
           asOf: freshness.asOf,
@@ -1610,6 +1598,7 @@ export function registerMessageTools(
     let forceNote: string | null = null;
     let serverFiles: number[] | undefined;
     let priorHeld: number[] = [];
+    let serverRecipientIds: number[] | undefined;
     if (args.messageId !== undefined) {
       const guard = await guardDestructiveDraftOp({
         cache,
@@ -1622,6 +1611,10 @@ export function registerMessageTools(
       forceNote = guard.note;
       serverFiles = guard.server?.files;
       priorHeld = guard.heldFiles;
+      // OFW does keep recipients on a draft when they were posted (observed
+      // live), so a replace that names none must not post [] and drop them.
+      const kept = (guard.server?.recipients ?? []).map((r) => r.userId).filter((id) => id !== 0);
+      if (kept.length > 0) serverRecipientIds = [...new Set(kept)];
     }
     const requestedReplyTo = args.replyToId ?? null;
     let resolvedReplyTo = requestedReplyTo;
@@ -1638,7 +1631,7 @@ export function registerMessageTools(
     // attachments are the set HELD for it here: what was held before, anything
     // OFW did report, the caller's myFileIDs, and new uploads — de-duplicated,
     // minus removeFileIDs. New uploads happen after the guard, so a refused
-    // replace uploads nothing. They are PRIVATE until the send re-shares them.
+    // replace uploads nothing. They stay PRIVATE: a send attaches PRIVATE files as they are.
     const { uploaded: newFiles, warnings: uploadWarnings } = await uploadPending(pending, {
       client, cache, store: blobStore, nothingWas: 'saved', shareClass: 'PRIVATE',
     });
@@ -1656,7 +1649,7 @@ export function registerMessageTools(
     const payload: Record<string, unknown> = {
       subject: args.subject,
       body: args.body,
-      recipientIds: args.recipientIds ?? [],
+      recipientIds: args.recipientIds ?? serverRecipientIds ?? [],
       attachments: { myFileIDs },
       draft: true,
       includeOriginal: resolvedReplyTo !== null,
@@ -1959,43 +1952,6 @@ export function registerMessageTools(
   // "drafts" tier exists to keep a human between the model and anything the
   // co-parent can see.
   const allowShare = writeMode === 'all';
-  // Re-upload files the cache knows are PRIVATE as SHARED — the share class
-  // the web app gives every message attachment. The bytes come from the
-  // account's own My Files copy (no read state; not a message body). Throws
-  // before the send on any failure, naming what was already re-shared.
-  const reshareAsShared = async (ids: number[], nothingWas: string): Promise<Reshared[]> => {
-    const cache = cacheProvider();
-    const done: Reshared[] = [];
-    for (const from of ids) {
-      const known = await cache.getAttachment(from);
-      const fileName = known!.fileName;
-      // A file already re-shared by an earlier attempt (one that then failed
-      // before sending) is reused, not re-uploaded: every re-upload is another
-      // co-parent-visible copy in My Files.
-      const prior = Number(await cache.getMeta(`reshared_as:${from}`));
-      if (Number.isInteger(prior) && prior > 0) {
-        done.push({ from, to: prior, fileName, reused: true });
-        continue;
-      }
-      try {
-        const res = await client.requestBinary('GET', `/pub/v1/myfiles/${from}/data`);
-        const mimeType = resolveDownloadMime(res.body, res.contentType ?? known!.mimeType, fileName);
-        const up = await uploadToMyFiles(client, cache, {
-          blob: new Blob([new Uint8Array(res.body)], { type: mimeType }), fileName, mimeType, sizeBytes: res.body.length,
-        }, { shareClass: 'SHARED', label: known!.label });
-        await cache.setMeta(`reshared_as:${from}`, String(up.fileId));
-        done.push({ from, to: up.fileId, fileName });
-      } catch (e) {
-        const so = done.map((d) => `${d.fileName} (fileId ${d.from} → ${d.to})`);
-        throw new Error(
-          `Attachment ${fileName} (fileId ${from}) could not be re-shared as SHARED: ${(e as Error).message}. Nothing was ${nothingWas}.`
-          + (so.length > 0 ? ` Already re-shared: ${so.join(', ')} — pass the new fileIds in myFileIDs when you retry.` : ''),
-        );
-      }
-    }
-    return done;
-  };
-
   // One SHARED confirmation, whatever the source: the token binds a SHA-256
   // of the bytes, not just the name, so a file rewritten (or a blob re-PUT)
   // between preview and approval is refused, not shared unseen.
@@ -2589,9 +2545,11 @@ Up to ${MAX_FILES_PER_CALL} files per call; each must be non-empty and at most 2
         (await cache.getDraftLineageByIds(rows.map((d) => d.id))).map((l) => [l.id, l.draftKey]),
       );
       const held = await heldFilesFor(cache, rows.map((d) => d.id));
+        const inferred = await inferredDraftKeys(cache, rows.map((d) => d.id));
       drafts = rows.map((d) => ({
         id: d.id,
         draftKey: keyById.get(d.id) ?? null,
+        ...(inferred.has(d.id) ? { draftKeyInferred: true } : {}),
         subject: d.subject,
         revision: draftRevision(d, held.get(d.id)),
         ...(held.get(d.id)!.length > 0 ? { heldFiles: held.get(d.id) } : {}),

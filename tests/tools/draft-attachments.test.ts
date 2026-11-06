@@ -2,9 +2,10 @@
 // with PRIVATE or SHARED fileIds — by create OR by the web app's in-place
 // update — always comes back `files: []`, and the web app's compose screen
 // never loads files from a draft). So attachments are HELD against the draft
-// in the local cache and attached at send, uploaded/re-shared as SHARED the
-// way the web app attaches every message file. The fake OFW below reproduces
-// exactly that: drafts drop files; a send keeps only SHARED ones.
+// in the local cache and attached at send. A send keeps PRIVATE files as they
+// are (verified live: a send with four PRIVATE fileIds came back with all
+// four), so nothing is re-uploaded. The fake OFW below reproduces exactly
+// that: drafts drop files; a send keeps them.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -62,7 +63,7 @@ function fakeOfw(): Fake {
       const p = body as { subject: string; body: string; draft: boolean; recipientIds: number[]; replyToId: number | null; attachments: { myFileIDs: number[] } };
       const id = nextMsg++;
       // The live behaviour: drafts never keep files; a send keeps SHARED ones.
-      const kept = p.draft ? [] : p.attachments.myFileIDs.filter((fid) => f.files.get(fid)?.shareClass === 'SHARED' && !f.dropOnSend?.has(fid));
+      const kept = p.draft ? [] : p.attachments.myFileIDs.filter((fid) => !f.dropOnSend?.has(fid));
       f.messages.set(id, {
         id, subject: p.subject, body: p.body, files: kept, replyToId: p.replyToId,
         recipients: p.recipientIds.map((userId) => ({ user: { userId, name: 'Pat Doe' } })),
@@ -238,29 +239,25 @@ describe('ofw_save_draft holds attachments OFW will not keep on a draft', () => 
 });
 
 describe('ofw_send_message attaches held and new files as SHARED, and verifies them', () => {
-  it('sending a draft attaches its held files, re-sharing PRIVATE ones as SHARED only after approval', async () => {
+  it('sending a draft attaches its held PRIVATE files as they are — no re-upload, no extra copies', async () => {
     const f = fakeOfw();
-    await seedPrivateFile(f, 501, 'think-sheet.jpg');
+    await seedPrivateFile(f, 501, 'photo-1.jpg');
     setup(f.client);
     const draft = (await call('ofw_save_draft', { subject: 'Weekly', body: 'b', recipientIds: [COPARENT], myFileIDs: [501] })).body;
     const args = { draftId: draft.id, recipientIds: [COPARENT], expectedRevision: draft.revision };
     const preview = await callPreview(handlers.get('ofw_send_message')!, args);
-    expect(JSON.stringify(preview.preview)).toContain('think-sheet.jpg');
-    expect(JSON.stringify(preview.preview)).toMatch(/re-shared as SHARED/);
-    expect(f.calls.some((c) => c.path === '/pub/v3/myfiles/multipart')).toBe(false); // nothing re-shared by a preview
+    expect(JSON.stringify(preview.preview)).toContain('photo-1.jpg');
+    expect(JSON.stringify(preview.preview)).not.toMatch(/re-shar/);
     const res = await callConfirmed(handlers.get('ofw_send_message')!, args);
     const sent = parse(res.content[0].text);
-    const reshared = [...f.files.values()].find((x) => x.shareClass === 'SHARED')!;
-    expect(reshared).toMatchObject({ fileName: 'think-sheet.jpg' });
-    expect(reshared.bytes).toEqual(JPEG);
-    const sendPost = messagePosts(f).find((p) => !p.draft)!;
-    expect(sendPost.attachments.myFileIDs).toEqual([reshared.fileId]);
-    expect(sent.attachments).toMatchObject({ verified: true, onMessage: [reshared.fileId] });
-    expect(sent.attachments.reshared).toEqual([{ from: 501, to: reshared.fileId, fileName: 'think-sheet.jpg' }]);
+    expect(f.calls.some((c) => c.path === '/pub/v3/myfiles/multipart')).toBe(false);
+    expect(f.client.requestBinary).not.toHaveBeenCalled();
+    expect(messagePosts(f).find((p) => !p.draft)!.attachments.myFileIDs).toEqual([501]);
+    expect(sent.attachments).toEqual({ onMessage: [501], verified: true });
     expect(await getHeldFiles(cache, draft.id)).toEqual([]);
   });
 
-  it('composing with myFileIDs and inlineAttachments: new files upload SHARED, existing SHARED ones pass through', async () => {
+  it('composing with myFileIDs and inlineAttachments: new files upload PRIVATE, existing ones pass through', async () => {
     const f = fakeOfw();
     f.files.set(500, { fileId: 500, fileName: 'shared.pdf', shareClass: 'SHARED', bytes: JPEG });
     await cache.upsertAttachmentForMessage({ fileId: 500, fileName: 'shared.pdf', label: 'shared.pdf', mimeType: 'application/pdf', sizeBytes: 8, metadata: { shareClass: 'SHARED' }, messageId: 0 });
@@ -271,7 +268,7 @@ describe('ofw_send_message attaches held and new files as SHARED, and verifies t
     });
     const sent = parse(res.content[0].text);
     const uploaded = [...f.files.values()].find((x) => x.fileName === 'new.jpg')!;
-    expect(uploaded.shareClass).toBe('SHARED');
+    expect(uploaded.shareClass).toBe('PRIVATE');
     expect(messagePosts(f)[0]!.attachments.myFileIDs).toEqual([500, uploaded.fileId]);
     expect(sent.attachments).toMatchObject({ verified: true, onMessage: [500, uploaded.fileId] });
   });
@@ -325,106 +322,45 @@ describe('held files — edges', () => {
     expect(status.drafts.find((x: { id: number }) => x.id !== d.id).heldFiles).toBeUndefined();
   });
 
-  it('a re-share that fails part-way sends nothing and names what was already re-shared', async () => {
-    const f = fakeOfw();
-    await seedPrivateFile(f, 1, 'a.jpg');
-    await seedPrivateFile(f, 2, 'b.jpg');
-    setup(f.client);
-    const binary = vi.spyOn(f.client, 'requestBinary');
-    binary.mockResolvedValueOnce({ body: JPEG } as never); // no content type: falls back to the cached one
-    binary.mockRejectedValueOnce(new Error('OFW API error: 500'));
-    const handler = handlers.get('ofw_send_message')!;
-    const args = { subject: 's', body: 'b', recipientIds: [COPARENT], myFileIDs: [1, 2] };
-    const { confirmToken } = await callPreview(handler, args);
-    const err = await handler({ ...args, confirmToken }, NO_ELICIT_CTX).catch((e: Error) => e);
-    expect((err as Error).message).toMatch(/b\.jpg \(fileId 2\) could not be re-shared as SHARED: OFW API error: 500\. Nothing was sent\./);
-    expect((err as Error).message).toMatch(/Already re-shared: a\.jpg \(fileId 1 → \d+\)/);
-    expect(messagePosts(f).some((p) => !p.draft)).toBe(false);
-    expect([...f.files.values()].find((x) => x.shareClass === 'SHARED')!.fileName).toBe('a.jpg');
-  });
-
-  it('a first re-share failure says so without an "already re-shared" list', async () => {
-    const f = fakeOfw();
-    await seedPrivateFile(f, 1, 'a.jpg');
-    setup(f.client);
-    vi.spyOn(f.client, 'requestBinary').mockRejectedValueOnce(new Error('boom'));
-    const handler = handlers.get('ofw_send_message')!;
-    const args = { subject: 's', body: 'b', recipientIds: [COPARENT], myFileIDs: [1] };
-    const { confirmToken } = await callPreview(handler, args);
-    const err = await handler({ ...args, confirmToken }, NO_ELICIT_CTX).catch((e: Error) => e);
-    expect((err as Error).message).toMatch(/could not be re-shared as SHARED: boom\. Nothing was sent\.$/);
-  });
 });
 
-describe('auto-review #421 follow-ups', () => {
-  it('a re-share followed by a failed upload names the SHARED copies, and a retry reuses them instead of duplicating', async () => {
+describe('recipients and draft identity', () => {
+  it('a replace that passes no recipientIds keeps the draft\'s own recipients', async () => {
     const f = fakeOfw();
-    await seedPrivateFile(f, 1, 'a.jpg');
     setup(f.client);
-    const handler = handlers.get('ofw_send_message')!;
-    const args = {
-      subject: 's', body: 'b', recipientIds: [COPARENT], myFileIDs: [1],
-      inlineAttachments: [{ filename: 'bad.jpg', contentBase64: b64(JPEG) }],
-    };
-    const multipart = () => f.calls.filter((c) => c.path === '/pub/v3/myfiles/multipart').length;
-    // Fail the NEW upload (the second multipart POST), after the re-share succeeded.
-    const real = (f.client.request as unknown as { getMockImplementation: () => (...a: unknown[]) => Promise<unknown> }).getMockImplementation();
-    let posts = 0;
-    vi.mocked(f.client.request).mockImplementation(async (method: string, path: string, body?: unknown) => {
-      if (path === '/pub/v3/myfiles/multipart' && ++posts === 2) {
-        f.calls.push({ method, path, body });
-        throw new Error('OFW API error: 500');
-      }
-      return real(method, path, body);
-    });
-    const { confirmToken } = await callPreview(handler, args);
-    const err = await handler({ ...args, confirmToken }, NO_ELICIT_CTX).catch((e: Error) => e);
-    const shared = [...f.files.values()].find((x) => x.shareClass === 'SHARED')!;
-    expect((err as Error).message).toMatch(/Nothing was sent/);
-    expect((err as Error).message).toMatch(new RegExp(`re-shared as SHARED: a\\.jpg \\(fileId 1 → ${shared.fileId}\\)`));
-    expect((err as Error).message).toMatch(/Already uploaded to My Files \(SHARED\)|could not be uploaded/);
-    expect(multipart()).toBe(2);
-
-    // Retry with the same ids: the existing SHARED copy is reused, not re-uploaded.
-    vi.mocked(f.client.request).mockImplementation(real as never);
-    const retry = { subject: 's', body: 'b', recipientIds: [COPARENT], myFileIDs: [1] };
-    const res = await callConfirmed(handler, retry);
-    const sent = parse(res.content[0].text);
-    expect(multipart()).toBe(2);
-    expect(messagePosts(f).find((p) => !p.draft)!.attachments.myFileIDs).toEqual([shared.fileId]);
-    expect(sent.attachments.reshared).toEqual([{ from: 1, to: shared.fileId, fileName: 'a.jpg', reused: true }]);
+    const first = (await call('ofw_save_draft', { subject: 's', body: 'v1', recipientIds: [COPARENT] })).body;
+    // The fake echoes no recipients on drafts; seed what OFW kept, as observed live.
+    f.messages.get(first.id)!.recipients = [{ user: { userId: COPARENT, name: 'Pat Doe' } }];
+    await call('ofw_save_draft', { subject: 's', body: 'v2', messageId: first.id, expectedRevision: draftRevision({ subject: 's', body: 'v1', recipients: [{ userId: COPARENT, name: 'Pat Doe', viewedAt: null }], replyToId: null }) });
+    const posts = messagePosts(f) as Array<{ recipientIds: number[] }>;
+    expect(posts[1]!.recipientIds).toEqual([COPARENT]);
   });
 
-  it('a send that fails without a definitive answer reports the re-shared copies', async () => {
+  it('explicit recipientIds on a replace still win', async () => {
     const f = fakeOfw();
-    await seedPrivateFile(f, 1, 'a.jpg');
     setup(f.client);
-    const real = (f.client.request as unknown as { getMockImplementation: () => (...a: unknown[]) => Promise<unknown> }).getMockImplementation();
-    vi.mocked(f.client.request).mockImplementation(async (method: string, path: string, body?: unknown) => {
-      if (method === 'POST' && path === '/pub/v3/messages') throw new Error('socket hang up');
-      return real(method, path, body);
-    });
-    const res = await callConfirmed(handlers.get('ofw_send_message')!, { subject: 's', body: 'b', recipientIds: [COPARENT], myFileIDs: [1] });
-    const out = parse(res.content[0].text);
-    const shared = [...f.files.values()].find((x) => x.shareClass === 'SHARED')!;
-    expect(out.result).toBe('SEND_UNCONFIRMED');
-    expect(out.reshared).toEqual([{ from: 1, to: shared.fileId, fileName: 'a.jpg' }]);
+    const first = (await call('ofw_save_draft', { subject: 's', body: 'v1' })).body;
+    f.messages.get(first.id)!.recipients = [{ user: { userId: COPARENT, name: 'Pat Doe' } }];
+    await call('ofw_save_draft', { subject: 's', body: 'v2', messageId: first.id, recipientIds: [], force: true });
+    expect((messagePosts(f) as Array<{ recipientIds: number[] }>)[1]!.recipientIds).toEqual([]);
   });
 
-  it('a send rejected outright names the re-shared copies in its error', async () => {
+  it('a draft with no known lineage says why its draftKey is null; an inferred one says so', async () => {
     const f = fakeOfw();
-    await seedPrivateFile(f, 1, 'a.jpg');
     setup(f.client);
-    const real = (f.client.request as unknown as { getMockImplementation: () => (...a: unknown[]) => Promise<unknown> }).getMockImplementation();
-    vi.mocked(f.client.request).mockImplementation(async (method: string, path: string, body?: unknown) => {
-      if (method === 'POST' && path === '/pub/v3/messages') throw new Error('OFW API error: 400 Bad Request');
-      return real(method, path, body);
-    });
-    const handler = handlers.get('ofw_send_message')!;
-    const args = { subject: 's', body: 'b', recipientIds: [COPARENT], myFileIDs: [1] };
-    const { confirmToken } = await callPreview(handler, args);
-    const err = await handler({ ...args, confirmToken }, NO_ELICIT_CTX).catch((e: Error) => e);
-    expect((err as Error).message).toMatch(/OFW API error: 400/);
-    expect((err as Error).message).toMatch(/re-shared as SHARED: a\.jpg \(fileId 1 → \d+\)/);
+    await cache.upsertDraft({ id: 77, subject: 's', body: 'b', recipients: [], replyToId: null, modifiedAt: '2026-11-06T09:00:00', listData: {} });
+    const plain = parse((await handlers.get('ofw_get_message')!({ messageId: '77' })).content[0].text);
+    expect(plain.draftKey).toBeNull();
+    expect(plain.draftKeyReason).toMatch(/not saved through this server|another session|web app/);
+    await cache.recordDraftLineage({ id: 77, draftKey: 'dk_x', previousId: 70, recordedAt: '2026-11-06T09:00:00' });
+    await cache.setMeta('draft_key_inferred:77', '1');
+    const inferred = parse((await handlers.get('ofw_get_message')!({ messageId: '77' })).content[0].text);
+    expect(inferred).toMatchObject({ draftKey: 'dk_x', draftKeyInferred: true });
+    expect(inferred.draftKeyReason).toBeUndefined();
+    const list = (await call('ofw_list_drafts', { verify: false })).body;
+    expect(list.drafts.find((d: { id: number }) => d.id === 77)).toMatchObject({ draftKey: 'dk_x', draftKeyInferred: true });
+    vi.spyOn(syncModule, 'syncAll').mockResolvedValue({ refreshed: ['drafts'], notRefreshed: [], syncComplete: true } as never);
+    const status = (await call('ofw_status', {})).body;
+    expect(status.drafts.find((d: { id: number }) => d.id === 77)).toMatchObject({ draftKey: 'dk_x', draftKeyInferred: true });
   });
 });

@@ -513,8 +513,9 @@ describe('ofw_send_message — attachments in one step', () => {
     expect(JSON.stringify(preview.preview)).toContain('Sam.jpg');
     await callConfirmed(handlers.get('ofw_send_message')!, args);
     expect(ofw.uploads).toHaveLength(1);
-    // Message attachments are SHARED, as the web app uploads them.
-    expect(ofw.uploads[0]!.shareClass).toBe('SHARED');
+    // Uploaded PRIVATE: a send keeps PRIVATE files (verified live), so no
+    // co-parent-visible copy is made before the message itself goes out.
+    expect(ofw.uploads[0]!.shareClass).toBe('PRIVATE');
     const post = ofw.calls.find((c) => c.method === 'POST' && c.path === '/pub/v3/messages')!;
     expect((post.body as { draft: boolean; attachments: { myFileIDs: number[] } })).toMatchObject({ draft: false, attachments: { myFileIDs: [7000] } });
   });
