@@ -159,21 +159,21 @@ describe('ofw_upload_attachment — inline bytes', () => {
     const ofw = fakeOfw();
     setup(ofw.client);
     const { body } = await call('ofw_upload_attachment', {
-      inline: { filename: 'Finn_Think_Sheet_2026-11-03.jpg', contentBase64: b64(JPEG) },
-      label: 'Finn Think Sheet 11-3-26',
+      inline: { filename: 'Sam_Think_Sheet_2026-11-03.jpg', contentBase64: b64(JPEG) },
+      label: 'Sam Think Sheet 11-3-26',
     });
     expect(ofw.uploads).toHaveLength(1);
-    expect(ofw.uploads[0]).toMatchObject({ fileName: 'Finn_Think_Sheet_2026-11-03.jpg', type: 'image/jpeg', shareClass: 'PRIVATE' });
+    expect(ofw.uploads[0]).toMatchObject({ fileName: 'Sam_Think_Sheet_2026-11-03.jpg', type: 'image/jpeg', shareClass: 'PRIVATE' });
     expect(ofw.uploads[0]!.bytes).toEqual(JPEG);
     const form = ofw.calls[0]!.body as FormData;
-    expect(form.get('label')).toBe('Finn Think Sheet 11-3-26');
+    expect(form.get('label')).toBe('Sam Think Sheet 11-3-26');
     expect(form.get('source')).toBe('message');
     expect(body).toMatchObject({
-      fileId: 7000, fileName: 'Finn_Think_Sheet_2026-11-03.jpg', mimeType: 'image/jpeg',
+      fileId: 7000, fileName: 'Sam_Think_Sheet_2026-11-03.jpg', mimeType: 'image/jpeg',
       bytes: JPEG.length, shareClass: 'PRIVATE',
     });
     // Cached like a path upload, so a later download can short-circuit.
-    expect((await cache.getAttachment(7000))?.fileName).toBe('Finn_Think_Sheet_2026-11-03.jpg');
+    expect((await cache.getAttachment(7000))?.fileName).toBe('Sam_Think_Sheet_2026-11-03.jpg');
   });
 
   it('uploads a PDF, honouring an explicit mimeType', async () => {
@@ -301,13 +301,13 @@ describe('ofw_upload_attachment — blob upload slots', () => {
     const ofw = fakeOfw();
     const blobs = fakeBlobs();
     setup(ofw.client);
-    const { body: slots } = await call('ofw_upload_attachment', { uploadSlots: [{ filename: 'Finn Think Sheet.jpg' }] });
+    const { body: slots } = await call('ofw_upload_attachment', { uploadSlots: [{ filename: 'Sam Think Sheet.jpg' }] });
     const slot = slots.slots[0];
     putIntoSlot(blobs, slot, JPEG);
     const { body } = await call('ofw_upload_attachment', { blobKeys: [slot.blobKey], label: 'Think sheet' });
-    expect(ofw.uploads[0]).toMatchObject({ fileName: 'Finn Think Sheet.jpg', type: 'image/jpeg', shareClass: 'PRIVATE' });
+    expect(ofw.uploads[0]).toMatchObject({ fileName: 'Sam Think Sheet.jpg', type: 'image/jpeg', shareClass: 'PRIVATE' });
     expect(ofw.uploads[0]!.bytes).toEqual(JPEG);
-    expect(body.results[0]).toMatchObject({ ok: true, fileId: 7000, fileName: 'Finn Think Sheet.jpg', bytes: JPEG.length, blobDeleted: true });
+    expect(body.results[0]).toMatchObject({ ok: true, fileId: 7000, fileName: 'Sam Think Sheet.jpg', bytes: JPEG.length, blobDeleted: true });
     expect(blobs.calls.map((c) => c.method)).toEqual(['GET', 'DELETE']);
     expect(blobs.objects.has(slot.blobKey)).toBe(false);
   });
@@ -406,7 +406,7 @@ describe('ofw_upload_attachment — path mode', () => {
     vi.stubEnv('MCP_DATA_DIR', join(tmpDir, 'state'));
     const ofw = fakeOfw();
     setup(ofw.client);
-    const err = await handlers.get('ofw_upload_attachment')!({ path: 'Finn_Think_Sheet_2026-11-03.jpg' }).catch((e: Error) => e);
+    const err = await handlers.get('ofw_upload_attachment')!({ path: 'Sam_Think_Sheet_2026-11-03.jpg' }).catch((e: Error) => e);
     expect((err as Error).message).toMatch(/remote and can't read files on your machine/);
     expect((err as Error).message).toMatch(/inline/);
     expect((err as Error).message).not.toMatch(/ENOENT|lstat/);
@@ -442,7 +442,7 @@ describe('ofw_save_draft — attachments in one step', () => {
     const second = await call('ofw_save_draft', { subject: 'Think sheet', body: 'v2', messageId: first.id });
     const posts = ofw.calls.filter((c) => c.method === 'POST' && c.path === '/pub/v3/messages');
     expect((posts[1]!.body as { attachments: { myFileIDs: number[] } }).attachments.myFileIDs).toEqual([7000]);
-    expect(second.res.content[0].text).toMatch(/attachments \(1\)/);
+    expect(second.res.content[0].text).toMatch(/attachments: 1 on the draft, 0 held for send/);
     // Edit again, adding a photo: both are kept.
     await call('ofw_save_draft', {
       subject: 'Think sheet', body: 'v3', messageId: second.body.id,
@@ -452,15 +452,15 @@ describe('ofw_save_draft — attachments in one step', () => {
     expect((third.body as { attachments: { myFileIDs: number[] } }).attachments.myFileIDs).toEqual([7000, 7001]);
   });
 
-  it('an explicit myFileIDs on edit still replaces the carried-over set', async () => {
+  it('an explicit myFileIDs on edit adds to the held set rather than replacing it', async () => {
     const ofw = fakeOfw();
     setup(ofw.client);
     const first = (await call('ofw_save_draft', {
       subject: 's', body: 'v1', inlineAttachments: [{ filename: 'a.jpg', contentBase64: b64(JPEG) }],
     })).body;
-    await call('ofw_save_draft', { subject: 's', body: 'v2', messageId: first.id, myFileIDs: [] });
+    await call('ofw_save_draft', { subject: 's', body: 'v2', messageId: first.id, myFileIDs: [55] });
     const posts = ofw.calls.filter((c) => c.method === 'POST' && c.path === '/pub/v3/messages');
-    expect((posts[1]!.body as { attachments: { myFileIDs: number[] } }).attachments.myFileIDs).toEqual([]);
+    expect((posts[1]!.body as { attachments: { myFileIDs: number[] } }).attachments.myFileIDs).toEqual([7000, 55]);
   });
 
   it('an invalid attachment fails the call before anything is uploaded or saved', async () => {
@@ -505,15 +505,16 @@ describe('ofw_send_message — attachments in one step', () => {
     const ofw = fakeOfw();
     setup(ofw.client);
     const args = {
-      subject: 'Think sheet', body: 'Attached.', recipientIds: [3039201],
-      inlineAttachments: [{ filename: 'Finn.jpg', contentBase64: b64(JPEG) }],
+      subject: 'Think sheet', body: 'Attached.', recipientIds: [2000001],
+      inlineAttachments: [{ filename: 'Sam.jpg', contentBase64: b64(JPEG) }],
     };
     const preview = await callPreview(handlers.get('ofw_send_message')!, args);
     expect(ofw.calls).toHaveLength(0);
-    expect(JSON.stringify(preview.preview)).toContain('Finn.jpg');
+    expect(JSON.stringify(preview.preview)).toContain('Sam.jpg');
     await callConfirmed(handlers.get('ofw_send_message')!, args);
     expect(ofw.uploads).toHaveLength(1);
-    expect(ofw.uploads[0]!.shareClass).toBe('PRIVATE');
+    // Message attachments are SHARED, as the web app uploads them.
+    expect(ofw.uploads[0]!.shareClass).toBe('SHARED');
     const post = ofw.calls.find((c) => c.method === 'POST' && c.path === '/pub/v3/messages')!;
     expect((post.body as { draft: boolean; attachments: { myFileIDs: number[] } })).toMatchObject({ draft: false, attachments: { myFileIDs: [7000] } });
   });

@@ -23,13 +23,11 @@ export interface DraftContent {
   recipients: Recipient[];
   replyToId: number | null;
   /**
-   * Attachment fileIds, when the server detail reported them. Carried so
-   * ofw_send_message(draftId) sends the server draft WITH its attachments —
-   * without this the send silently dropped them, while claiming to send the
-   * server's version. Deliberately NOT part of the revision hash or the
-   * freshness diff: the concurrency token has always covered
-   * subject/body/recipients/replyToId, and widening it would invalidate every
-   * token already in callers' hands.
+   * Attachment fileIds, when the server detail reported them. In practice
+   * always empty for a draft — OFW does not keep files on drafts (see
+   * held-attachments.ts) — but read and honoured in case it ever does. Not
+   * part of the freshness diff; the files a caller is editing enter the
+   * revision through `draftRevision`'s `heldFiles` instead.
    */
   files?: number[];
 }
@@ -64,9 +62,15 @@ export function fnv1a64(s: string): string {
  * STALE. Fields are length-prefixed so content cannot shift across a field
  * boundary without changing the hash.
  */
-export function draftRevision(d: DraftContent): string {
+export function draftRevision(d: DraftContent, heldFiles: readonly number[] = []): string {
   const ids = [...new Set(d.recipients.map((r) => r.userId))].sort((a, b) => a - b);
   const parts = [d.subject, d.body, String(d.replyToId ?? ''), ids.join(',')];
+  // Files OFW will not keep on a draft are HELD by this server (see
+  // held-attachments.ts) and are part of what the caller is editing, so they
+  // move the revision. Only when there are some: a draft with none hashes
+  // exactly as it always has, so tokens already in callers' hands stay valid.
+  const held = [...new Set(heldFiles)].sort((a, b) => a - b);
+  if (held.length > 0) parts.push(`files:${held.join(',')}`);
   return `r1:${fnv1a64(parts.map((p) => `${p.length}:${p}`).join('|'))}`;
 }
 
@@ -258,8 +262,11 @@ export function checkDraftFreshness(input: {
   server: DraftContent | null;
   cached: DraftContent | null;
   expectedRevision?: string;
+  /** Files held for this draft by this server; part of its revision. */
+  heldFiles?: readonly number[];
 }): FreshnessResult {
   const { server, cached, expectedRevision } = input;
+  const held = input.heldFiles ?? [];
 
   if (server === null) {
     return {
@@ -270,14 +277,18 @@ export function checkDraftFreshness(input: {
   }
 
   if (expectedRevision !== undefined) {
-    const actual = draftRevision(server);
-    if (expectedRevision === actual) {
+    const actual = draftRevision(server, held);
+    // A token with or without the held files both name this server state:
+    // the guard protects what is ON OurFamilyWizard, and the held set is this
+    // server's own bookkeeping — a token minted before a file was held must
+    // not read as a conflict.
+    if (expectedRevision === actual || expectedRevision === draftRevision(server)) {
       return { verdict: 'FRESH', reason: 'expectedRevision matches the live server draft.', changedFields: [] };
     }
     // Token mismatch. When the caller's token is the one WE cached, we can name
     // exactly what drifted — and if that is metadata alone, it is our own
     // post-save normalization, not a conflict.
-    if (cached !== null && draftRevision(cached) === expectedRevision) {
+    if (cached !== null && (draftRevision(cached, held) === expectedRevision || draftRevision(cached) === expectedRevision)) {
       const changedFields = diffFields(server, cached);
       if (substantiveChanges(changedFields).length === 0) {
         return {
@@ -346,6 +357,7 @@ export function staleDraftPayload(input: {
   verdict: FreshnessResult;
   server: DraftContent | null;
   cached: DraftContent | null;
+  heldFiles?: readonly number[];
 }): StaleDraftPayload {
   const { error, draftId, verdict, server, cached } = input;
   return {
@@ -355,7 +367,7 @@ export function staleDraftPayload(input: {
     reason: verdict.reason,
     ...(verdict.changedFields.length > 0 ? { changedFields: verdict.changedFields } : {}),
     ...(server !== null
-      ? { serverBody: server.body, serverSubject: server.subject, serverRevision: draftRevision(server) }
+      ? { serverBody: server.body, serverSubject: server.subject, serverRevision: draftRevision(server, input.heldFiles ?? []) }
       : {}),
     ...(cached !== null ? { cachedBody: cached.body } : {}),
     recovery: server === null

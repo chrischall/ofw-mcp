@@ -24,104 +24,56 @@
 // resolves to, so everything after this point — the My Files POST, the
 // SHARED confirmation, the attachment cache — is one code path.
 
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { parseLenient } from '@chrischall/mcp-utils';
-import type { BlobObject, BlobStore } from '@chrischall/mcp-utils/export';
+import {
+  checkUploadSize as sharedCheckUploadSize,
+  decodeBase64Strict,
+  inlineFileSchema,
+  MAX_UPLOAD_FILES,
+  mintUploadSlot as sharedMintUploadSlot,
+  resolveUploadMime,
+  sanitizeUploadFilename,
+  UPLOAD_KEY_PREFIX,
+  UPLOAD_SLOT_DEFAULT_TTL_MS,
+  uploadFileNameFromKey,
+  uploadSlotRequestSchema,
+} from '@chrischall/mcp-utils/export';
+import type {
+  BlobObject, BlobStore, InlineFile, UploadSlot as SharedUploadSlot, UploadSlotRequest,
+} from '@chrischall/mcp-utils/export';
 import type { OFWClient } from '../client.js';
 import type { CacheStore } from '../cache/store.js';
 import { MAX_UPLOAD_BYTES, mimeFromName, normalizeMimeType, type ResolvedUpload } from './attachments.js';
 import { formatInstant } from '../timestamps.js';
 
-/** Most files one call may upload (inline array, blobKeys, uploadSlots). */
-export const MAX_FILES_PER_CALL = 10;
+// The filename / MIME / base64 / slot rules are the fleet's, from
+// @chrischall/mcp-utils/export (3.6), which was lifted out of this file. The
+// names below keep this module's API so callers and tests did not move; the
+// only local policy is the 25 MiB cap and the offset-bearing expiresAt.
 
-/**
- * How long an upload slot's PUT URL works. Long enough to find the file and
- * run a curl; short, because the URL is a credential to write this key.
- */
-export const UPLOAD_SLOT_TTL_MS = 30 * 60 * 1000;
+/** Most files one call may upload (inline array, blobKeys, uploadSlots). */
+export const MAX_FILES_PER_CALL = MAX_UPLOAD_FILES;
+
+/** How long an upload slot's PUT URL works. */
+export const UPLOAD_SLOT_TTL_MS = UPLOAD_SLOT_DEFAULT_TTL_MS;
 
 /** Object-key prefix for caller uploads — the only keys `blobKeys` accepts. */
-export const UPLOAD_BLOB_PREFIX = 'uploads';
+export const UPLOAD_BLOB_PREFIX = UPLOAD_KEY_PREFIX;
 
-const MIB = 1024 * 1024;
-const LIMIT_TEXT = `${MAX_UPLOAD_BYTES / MIB} MiB (${MAX_UPLOAD_BYTES} bytes)`;
+export { inlineFileSchema, resolveUploadMime, sanitizeUploadFilename, uploadSlotRequestSchema };
+export type { InlineFile, UploadSlotRequest };
 
-export const inlineFileSchema = z.object({
-  filename: z.string().describe('Filename OFW will show, e.g. "Finn_Think_Sheet_2026-11-03.jpg" — a bare name, no path, not starting with a dot. Its extension sets the MIME type when mimeType is omitted.'),
-  contentBase64: z.string().describe('The file\'s bytes, standard base64 (line breaks and a "data:<type>;base64," prefix are tolerated).'),
-  mimeType: z.string().describe('MIME type, e.g. "image/jpeg". Default: inferred from the filename extension (jpg/jpeg, png, heic, pdf, docx, …).').optional(),
-});
-export type InlineFile = z.infer<typeof inlineFileSchema>;
-
-export const uploadSlotRequestSchema = z.object({
-  filename: z.string().describe('Filename OFW will show — a bare name, no path, not starting with a dot.'),
-  mimeType: z.string().describe('MIME type. Default: inferred from the filename extension. The PUT must send exactly this Content-Type.').optional(),
-});
-export type UploadSlotRequest = z.infer<typeof uploadSlotRequestSchema>;
-
-/**
- * A caller-supplied filename, as the name OFW will show. It must be ONE
- * plain segment: it names the file in the co-parent's view, so a path or a
- * hidden-file name has no legitimate use and is refused rather than repaired.
- */
-export function sanitizeUploadFilename(raw: string): string {
-  const name = raw.trim();
-  if (name.length === 0) throw new Error('filename is empty.');
-  if (/[/\\]/.test(name)) {
-    throw new Error(`filename ${JSON.stringify(name)} must be a bare filename, not a path — pass just the name OFW should show, e.g. "photo.jpg".`);
-  }
-  // eslint-disable-next-line no-control-regex
-  if (/[\x00-\x1f\x7f]/.test(name)) throw new Error(`filename ${JSON.stringify(name)} contains control characters.`);
-  if (name.startsWith('.')) {
-    throw new Error(`filename ${JSON.stringify(name)} must not start with a dot (hidden files are never uploaded).`);
-  }
-  if (name.length > 200) throw new Error('filename is longer than 200 characters.');
-  return name;
-}
-
-const MEDIA_TYPE = /^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/;
-
-/** The MIME type to upload under: an explicit one (bare, validated), else the extension's. */
-export function resolveUploadMime(fileName: string, mimeType?: string): string {
-  if (mimeType === undefined) return mimeFromName(fileName);
-  const bare = normalizeMimeType(mimeType);
-  if (!MEDIA_TYPE.test(bare)) {
-    throw new Error(`mimeType ${JSON.stringify(mimeType)} is not a type/subtype media type such as "image/jpeg".`);
-  }
-  return bare;
-}
-
-/** Refuse an empty file or one over the upload cap, naming the limit. */
+/** Refuse an empty file or one over the 25 MiB upload cap, naming the limit. */
 export function checkUploadSize(fileName: string, size: number): void {
-  if (size === 0) throw new Error(`${fileName} is empty (0 bytes); nothing to upload.`);
-  if (size > MAX_UPLOAD_BYTES) {
-    throw new Error(`${fileName} is too large (${size} bytes); the upload limit is ${LIMIT_TEXT}.`);
-  }
+  sharedCheckUploadSize(fileName, size, MAX_UPLOAD_BYTES);
 }
 
-const BASE64 = /^[A-Za-z0-9+/]*={0,2}$/;
-
-/**
- * Decode caller base64 STRICTLY. `Buffer.from(s, 'base64')` never throws — it
- * silently drops what it does not recognise — so a truncated or mangled
- * payload would otherwise be uploaded as a corrupt file and only discovered
- * by the co-parent. The size is checked from the encoded length before any
- * allocation, so an oversized payload costs nothing to refuse.
- */
+/** Strict base64 → bytes, capped at the upload limit (see `decodeBase64Strict`). */
 export function decodeBase64Content(content: string, fileName: string): Buffer {
-  const compact = content.replace(/^data:[^,]*;base64,/i, '').replace(/\s+/g, '');
-  if (compact.length === 0) throw new Error(`${fileName} is empty (0 bytes); nothing to upload.`);
-  const invalid = () => new Error(`${fileName}: contentBase64 is not valid base64 (standard alphabet A-Z a-z 0-9 + /, padded with = to a multiple of 4 characters). It may have been truncated.`);
-  if (compact.length % 4 !== 0 || !BASE64.test(compact)) throw invalid();
-  const padding = compact.endsWith('==') ? 2 : compact.endsWith('=') ? 1 : 0;
-  checkUploadSize(fileName, (compact.length / 4) * 3 - padding);
-  const bytes = Buffer.from(compact, 'base64');
-  // Non-canonical trailing bits decode to the same bytes as a different
-  // string; the round trip refuses them rather than guessing intent.
-  if (bytes.toString('base64') !== compact) throw invalid();
-  return bytes;
+  const bytes = decodeBase64Strict(content, { fileName, maxBytes: MAX_UPLOAD_BYTES });
+  return Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
 }
 
 /** An `inline` entry → the upload it describes, validated end to end. */
@@ -132,60 +84,30 @@ export function resolveInlineUpload(file: InlineFile): ResolvedUpload {
   return { blob: new Blob([new Uint8Array(bytes)], { type: mimeType }), fileName, mimeType, sizeBytes: bytes.length };
 }
 
-// ── Blob upload slots ────────────────────────────────────────────────────
-
-// The filename rides in the key, base64url-encoded: the blob store only
-// accepts [A-Za-z0-9._~-] segments, and a photo name routinely has spaces.
-// A random UUID segment makes the key unguessable and per-slot unique.
-const UPLOAD_KEY = new RegExp(
-  `^${UPLOAD_BLOB_PREFIX}/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/([A-Za-z0-9_-]+)$`,
-);
-
 /**
- * The filename an upload key was minted for. Only keys of the shape
- * {@link mintUploadSlot} produces are accepted, so `blobKeys` can never be
- * pointed at another object in this registration's store (a calendar export,
- * an export zip) and pass it off as an upload.
+ * The filename an upload key was minted for. Only the exact
+ * `uploads/<uuid>/<base64url(name)>` shape is accepted, so `blobKeys` can
+ * never be pointed at another object in this registration's store (a
+ * calendar export, an export zip) and pass it off as an upload.
  */
 export function fileNameFromBlobKey(key: string): string {
-  const match = UPLOAD_KEY.exec(key);
-  if (!match) {
+  try {
+    return uploadFileNameFromKey(key, { prefix: UPLOAD_BLOB_PREFIX });
+  } catch (e) {
+    // The shared message is tool-agnostic; name the tool that mints keys here.
+    const message = (e as Error).message;
+    if (!message.includes('is not an upload key')) throw e;
     throw new Error(`blobKey ${JSON.stringify(key)} is not an upload key. Pass the blobKey exactly as ofw_upload_attachment's uploadSlots returned it.`);
   }
-  return sanitizeUploadFilename(Buffer.from(match[1]!, 'base64url').toString('utf8'));
 }
 
-export interface UploadSlot {
-  filename: string;
-  mimeType: string;
-  /** Pass back as `blobKeys` once the PUT has succeeded. */
-  blobKey: string;
-  method: 'PUT';
-  /** Signed PUT URL — a credential for this one key until `expiresAt`. */
-  uploadUrl: string;
-  expiresAt: string;
-  /** A ready-to-run upload command; replace the @'<path…>' with the file. */
-  curl: string;
-}
+/** One upload slot, as this server reports it (expiresAt with the display offset). */
+export type UploadSlot = Omit<SharedUploadSlot, 'expiresAtMs'>;
 
 /** Mint one signed PUT slot for a caller upload. */
 export function mintUploadSlot(store: BlobStore, req: UploadSlotRequest): UploadSlot {
-  const filename = sanitizeUploadFilename(req.filename);
-  const mimeType = resolveUploadMime(filename, req.mimeType);
-  const blobKey = `${UPLOAD_BLOB_PREFIX}/${randomUUID()}/${Buffer.from(filename, 'utf8').toString('base64url')}`;
-  const { url, expiresAtMs } = store.signPutUrl(blobKey, mimeType, { ttlMs: UPLOAD_SLOT_TTL_MS });
-  const shellName = filename.replace(/'/g, `'\\''`);
-  return {
-    filename,
-    mimeType,
-    blobKey,
-    method: 'PUT',
-    uploadUrl: url,
-    expiresAt: formatInstant(new Date(expiresAtMs)).iso,
-    // The signature commits to the Content-Type, so the header must match it
-    // byte for byte; --fail turns a refused PUT into a non-zero exit.
-    curl: `curl -sS --fail -X PUT -H 'Content-Type: ${mimeType}' --data-binary @'<path to ${shellName}>' '${url}'`,
-  };
+  const { expiresAtMs, ...slot } = sharedMintUploadSlot(store, req, { prefix: UPLOAD_BLOB_PREFIX, ttlMs: UPLOAD_SLOT_TTL_MS });
+  return { ...slot, expiresAt: formatInstant(new Date(expiresAtMs)).iso };
 }
 
 /** A consumed blob object → the upload it holds. */
@@ -298,14 +220,14 @@ export function requireBlobStore(store: BlobStore | undefined, what: string): Bl
 // ── Attaching in one step (ofw_save_draft / ofw_send_message) ────────────
 
 export const inlineAttachmentsParam = z.array(inlineFileSchema).max(MAX_FILES_PER_CALL).describe(
-  'Files to attach, supplied as base64 BYTES ({filename, contentBase64, mimeType?}). Each is uploaded to My Files as PRIVATE, '
-  + 'then attached alongside any myFileIDs. Use for small files; on a hosted deployment, larger files (phone photos) go faster '
+  'Files to attach, supplied as base64 BYTES ({filename, contentBase64, mimeType?}). Each is uploaded to My Files '
+  + '(PRIVATE when a draft holds it; SHARED when sent, as the web app attaches files) and attached alongside any myFileIDs. Use for small files; on a hosted deployment, larger files (phone photos) go faster '
   + 'through ofw_upload_attachment uploadSlots + blobKeys here. Every entry is validated before anything is uploaded.',
 ).optional();
 
 export const blobKeysParam = z.array(z.string()).max(MAX_FILES_PER_CALL).describe(
   'Hosted deployments: blobKeys from ofw_upload_attachment uploadSlots whose files you have already PUT. Each is uploaded to '
-  + 'My Files as PRIVATE, attached alongside any myFileIDs, and deleted from the upload store.',
+  + 'My Files (PRIVATE when a draft holds it; SHARED when sent), attached alongside any myFileIDs, and deleted from the upload store.',
 ).optional();
 
 /** One new attachment, validated, not yet uploaded. */
@@ -357,21 +279,22 @@ export function describePending(pending: PendingAttachment[]): Array<Record<stri
 }
 
 /**
- * Upload the planned attachments PRIVATE, in order. A blob is consumed —
+ * Upload the planned attachments, in order, under `ctx.shareClass` (PRIVATE
+ * when a draft holds them; SHARED at send, as the web app attaches files). A blob is consumed —
  * deleted once OFW has it; a failed delete is a warning, never a failure. Any
  * upload failure stops the batch and throws, naming what DID upload, so the
  * caller can retry with those fileIds instead of uploading them twice.
  */
 export async function uploadPending(
   pending: PendingAttachment[],
-  ctx: { client: OFWClient; cache: CacheStore; store: BlobStore | undefined; nothingWas: string },
+  ctx: { client: OFWClient; cache: CacheStore; store: BlobStore | undefined; nothingWas: string; shareClass: 'PRIVATE' | 'SHARED' },
 ): Promise<{ uploaded: UploadedFile[]; warnings: string[] }> {
   const uploaded: UploadedFile[] = [];
   const warnings: string[] = [];
   for (const p of pending) {
     try {
       if (p.inline) {
-        uploaded.push(await uploadToMyFiles(ctx.client, ctx.cache, p.inline, { shareClass: 'PRIVATE' }));
+        uploaded.push(await uploadToMyFiles(ctx.client, ctx.cache, p.inline, { shareClass: ctx.shareClass }));
         continue;
       }
       const out = await ctx.store!.consume(p.blobKey!, async (object) => {
@@ -379,7 +302,7 @@ export async function uploadPending(
         if (p.sha256 !== null && (await sha256Hex(upload.blob)) !== p.sha256) {
           throw new Error(`${p.fileName} changed in the upload store after it was previewed`);
         }
-        return uploadToMyFiles(ctx.client, ctx.cache, upload, { shareClass: 'PRIVATE' });
+        return uploadToMyFiles(ctx.client, ctx.cache, upload, { shareClass: ctx.shareClass });
       }, { maxBytes: MAX_UPLOAD_BYTES });
       uploaded.push(out.result);
       if (!out.deleted) {
@@ -390,7 +313,7 @@ export async function uploadPending(
       throw new Error(
         `Attachment ${p.fileName} could not be uploaded: ${(e as Error).message}. Nothing was ${ctx.nothingWas}.`
         + (done.length > 0
-          ? ` Already uploaded to My Files (PRIVATE): ${done.join(', ')} — pass those fileIds in myFileIDs when you retry instead of uploading them again.`
+          ? ` Already uploaded to My Files (${ctx.shareClass}): ${done.join(', ')} — pass those fileIds in myFileIDs when you retry instead of uploading them again.`
           : ''),
       );
     }

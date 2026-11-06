@@ -360,7 +360,7 @@ describe('read-state reconciliation (bug: stale read flag vs viewedAt)', () => {
   const staleReadRow = (): MessageRow => ({
     id: 534973630, folder: 'inbox', subject: 'Re: Off-week message: 7/3 - 7/17',
     fromUser: 'Co-parent', sentAt: '2026-07-17T08:00:00',
-    recipients: [{ userId: 3039201, name: 'Chris', viewedAt: '2026-07-17T08:37:57' }],
+    recipients: [{ userId: 2000001, name: 'Chris', viewedAt: '2026-07-17T08:37:57' }],
     body: 'body', fetchedBodyAt: '2026-07-17T12:37:57.957Z',
     replyToId: null, chainRootId: null,
     listData: { id: 534973630, read: false, showNeverViewed: true },
@@ -381,7 +381,7 @@ describe('read-state reconciliation (bug: stale read flag vs viewedAt)', () => {
     expect(msg.listData.showNeverViewed).toBe(false);
     expect(msg.recipients[0].viewedAt).toBe('2026-07-17T08:37:57-04:00');
     // the real account-holder id survived normalization (was 0 before the fix)
-    expect(msg.recipients[0].userId).toBe(3039201);
+    expect(msg.recipients[0].userId).toBe(2000001);
   });
 
   it('the default view carries the derived read flag and no echo to contradict it', async () => {
@@ -412,7 +412,7 @@ describe('read-state reconciliation (bug: stale read flag vs viewedAt)', () => {
     upsertMessage({
       id: 42, folder: 'inbox', subject: 'Unread', fromUser: 'Co-parent',
       sentAt: '2026-07-17T08:00:00',
-      recipients: [{ userId: 3039201, name: 'Chris', viewedAt: null }],
+      recipients: [{ userId: 2000001, name: 'Chris', viewedAt: null }],
       body: null, fetchedBodyAt: null, replyToId: null, chainRootId: null,
       listData: { id: 42, read: false, showNeverViewed: true },
     });
@@ -610,7 +610,7 @@ describe('ofw_get_message (cache-first)', () => {
     const client = new OFWClient();
     vi.spyOn(client, 'request').mockResolvedValueOnce({
       id: 700, subject: 'From co-parent', body: 'hi', date: { dateTime: '2026-02-25T00:00:00Z' },
-      from: { name: 'Alison Hall' }, recipients: [], folder: { id: 111, name: 'Inbox' },
+      from: { name: 'Pat Doe' }, recipients: [], folder: { id: 111, name: 'Inbox' },
     });
     setup(client);
 
@@ -1056,8 +1056,8 @@ describe('ofw_send_message with messageId (send-existing-draft)', () => {
     upsertDraft({
       id: 519117394,
       subject: 'Re: Weekly of 5/15 - 5/22',
-      body: 'Hi Alison,\n\nI adjusted some account settings on my end.',
-      recipients: [{ userId: 3039202, name: 'Alison', viewedAt: null }],
+      body: 'Hi Pat,\n\nI adjusted some account settings on my end.',
+      recipients: [{ userId: 2000002, name: 'Pat', viewedAt: null }],
       replyToId: null,
       modifiedAt: '2026-05-27T12:00:00Z',
       listData: {},
@@ -1068,16 +1068,16 @@ describe('ofw_send_message with messageId (send-existing-draft)', () => {
       // Guard pre-read: the server copy matches the cached base → FRESH.
       .mockResolvedValueOnce({
         subject: 'Re: Weekly of 5/15 - 5/22',
-        body: 'Hi Alison,\n\nI adjusted some account settings on my end.',
-        recipients: [{ user: { userId: 3039202, name: 'Alison' }, viewed: null }],
+        body: 'Hi Pat,\n\nI adjusted some account settings on my end.',
+        recipients: [{ user: { userId: 2000002, name: 'Pat' }, viewed: null }],
         replyToId: null,
         folder: { id: '3', name: 'Drafts' },
       })
       // (again: the confirmation gate's phase-2 call re-reads the draft too)
       .mockResolvedValueOnce({
         subject: 'Re: Weekly of 5/15 - 5/22',
-        body: 'Hi Alison,\n\nI adjusted some account settings on my end.',
-        recipients: [{ user: { userId: 3039202, name: 'Alison' }, viewed: null }],
+        body: 'Hi Pat,\n\nI adjusted some account settings on my end.',
+        recipients: [{ user: { userId: 2000002, name: 'Pat' }, viewed: null }],
         replyToId: null,
         folder: { id: '3', name: 'Drafts' },
       })
@@ -1085,10 +1085,10 @@ describe('ofw_send_message with messageId (send-existing-draft)', () => {
       .mockResolvedValueOnce({
         id: 519117514,
         subject: 'Re: Weekly of 5/15 - 5/22',
-        body: 'Hi Alison,\n\nI adjusted some account settings on my end.',
+        body: 'Hi Pat,\n\nI adjusted some account settings on my end.',
         date: { dateTime: '2026-05-28T09:03:28Z' },
         from: { name: 'Me' },
-        recipients: [{ user: { userId: 3039202, name: 'Alison' }, viewed: null }],
+        recipients: [{ user: { userId: 2000002, name: 'Pat' }, viewed: null }],
       })
       .mockResolvedValueOnce({});
     setup(client);
@@ -1100,8 +1100,8 @@ describe('ofw_send_message with messageId (send-existing-draft)', () => {
     const postCall = spy.mock.calls.find((c) => c[0] === 'POST');
     expect(postCall![2]).toEqual({
       subject: 'Re: Weekly of 5/15 - 5/22',
-      body: 'Hi Alison,\n\nI adjusted some account settings on my end.',
-      recipientIds: [3039202],
+      body: 'Hi Pat,\n\nI adjusted some account settings on my end.',
+      recipientIds: [2000002],
       attachments: { myFileIDs: [] },
       draft: false,
       includeOriginal: false,
@@ -1430,7 +1430,7 @@ describe('ofw_save_draft', () => {
     const result = await handlers.get('ofw_save_draft')!({
       subject: 'Updated subject',
       body: 'Updated body',
-      recipientIds: [3039202],
+      recipientIds: [2000002],
       messageId: 99,
       replyToId: 55,
     });
@@ -1440,7 +1440,7 @@ describe('ofw_save_draft', () => {
     expect(postCall![2]).toEqual({
       subject: 'Updated subject',
       body: 'Updated body',
-      recipientIds: [3039202],
+      recipientIds: [2000002],
       attachments: { myFileIDs: [] },
       draft: true,
       includeOriginal: true,
@@ -1985,14 +1985,17 @@ describe('ofw_save_draft — threading & field preservation (Defects 1 & 3)', ()
     expect(parsed.warnings).toEqual(expect.arrayContaining([expect.stringMatching(/recipientIds were requested as \[1, 2\]/)]));
   });
 
-  it('warns when a requested attachment did not attach to the saved draft', async () => {
+  it('holds a requested attachment OFW did not keep on the draft, instead of warning it was lost', async () => {
+    // OFW keeps no files on drafts (verified live 2026-11-06). A file it does
+    // report is "on the draft"; the rest are HELD for the send — never a
+    // "missing" warning, which read as data loss while the NOTE claimed success.
     const client = new OFWClient();
     vi.spyOn(client, 'request')
       .mockResolvedValueOnce({ entityId: 820 })
       .mockResolvedValueOnce({
         id: 820, subject: 'S', body: 'B',
         date: { dateTime: '2026-07-20T00:00:00Z' },
-        files: [5],                                              // 6 was requested but missing
+        files: [5],                                              // 6 not kept by OFW
       });
     setup(client);
 
@@ -2000,9 +2003,10 @@ describe('ofw_save_draft — threading & field preservation (Defects 1 & 3)', ()
       subject: 'S', body: 'B', myFileIDs: [5, 6],
     });
 
-    expect(result.content[0].text).toMatch(/WARNING/);
+    expect(result.content[0].text).not.toMatch(/WARNING/);
     const parsed = trailingJson(result.content[0].text);
-    expect(parsed.warnings).toEqual(expect.arrayContaining([expect.stringMatching(/fileId\(s\) 6 .*not attached/)]));
+    expect(parsed.attachments.onDraft).toEqual([5]);
+    expect(parsed.attachments.held).toEqual([{ fileId: 6, fileName: null, held: true }]);
   });
 
   it('names the rewritten thread tip in the warning when a rewritten replyToId is then dropped', async () => {
@@ -6749,7 +6753,7 @@ describe('ofw_save_draft — draft recipients are a documented NOTE, not a warni
     setup(client);
 
     const text = (await handlers.get('ofw_save_draft')!({
-      subject: 'S', body: 'B', recipientIds: [3039201],
+      subject: 'S', body: 'B', recipientIds: [2000001],
     })).content[0].text;
 
     expect(text).not.toContain('WARNING');
@@ -6989,7 +6993,7 @@ describe('auto-review follow-ups for the consolidated fixes (issue #207)', () =>
 describe('ofw_send_message — confirmation gate (SEC-1)', () => {
   const draftOnServer = {
     subject: 'Re: pickup', body: 'I will be there at 3pm',
-    recipients: [{ user: { userId: 123, name: 'Alison' }, viewed: null }],
+    recipients: [{ user: { userId: 123, name: 'Pat' }, viewed: null }],
     replyToId: null, folder: { id: '3', name: 'Drafts' },
   };
 
@@ -7012,7 +7016,7 @@ describe('ofw_send_message — confirmation gate (SEC-1)', () => {
     // Recipient 123 is known to the cache from an earlier sent message, so
     // the preview can name the person — a numeric id alone is not a preview
     // a human can approve.
-    upsertMessage(sampleMessageRow({ id: 900, folder: 'sent', recipients: [{ userId: 123, name: 'Alison', viewedAt: null }] }));
+    upsertMessage(sampleMessageRow({ id: 900, folder: 'sent', recipients: [{ userId: 123, name: 'Pat', viewedAt: null }] }));
     upsertAttachmentForMessage({
       fileId: 5551, fileName: 'may-invoice.pdf', label: 'May invoice', mimeType: 'application/pdf',
       sizeBytes: 10, metadata: {}, messageId: 0,
@@ -7030,7 +7034,7 @@ describe('ofw_send_message — confirmation gate (SEC-1)', () => {
     expect(preview.preview).toMatchObject({
       subject: 'Re: pickup',
       body: 'I will be there at 3pm',
-      to: [{ userId: 123, name: 'Alison' }],
+      to: [{ userId: 123, name: 'Pat' }],
       attachments: [{ fileId: 5551, fileName: 'may-invoice.pdf' }],
     });
     expect(JSON.stringify(preview.preview)).toMatch(/irreversible|cannot be recalled/i);

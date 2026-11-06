@@ -25,7 +25,7 @@ const STORE = createBlobStore({ baseUrl: 'https://host.example/b/reg_0123456789a
 
 describe('sanitizeUploadFilename', () => {
   it('keeps an ordinary filename, spaces and unicode included, trimmed', () => {
-    expect(sanitizeUploadFilename('  Finn Think Sheet 11-3.jpg ')).toBe('Finn Think Sheet 11-3.jpg');
+    expect(sanitizeUploadFilename('  Sam Think Sheet 11-3.jpg ')).toBe('Sam Think Sheet 11-3.jpg');
     expect(sanitizeUploadFilename('reçu.pdf')).toBe('reçu.pdf');
   });
 
@@ -109,8 +109,8 @@ describe('decodeBase64Content', () => {
 
 describe('resolveInlineUpload', () => {
   it('returns a typed Blob, the sanitized name, mime and size', async () => {
-    const up = resolveInlineUpload({ filename: ' Finn.jpg ', contentBase64: b64(JPEG) });
-    expect(up).toMatchObject({ fileName: 'Finn.jpg', mimeType: 'image/jpeg', sizeBytes: JPEG.length });
+    const up = resolveInlineUpload({ filename: ' Sam.jpg ', contentBase64: b64(JPEG) });
+    expect(up).toMatchObject({ fileName: 'Sam.jpg', mimeType: 'image/jpeg', sizeBytes: JPEG.length });
     expect(up.blob.type).toBe('image/jpeg');
     expect(Buffer.from(await up.blob.arrayBuffer())).toEqual(JPEG);
   });
@@ -124,13 +124,13 @@ describe('resolveInlineUpload', () => {
 describe('upload slots and blob keys', () => {
   it('mints a PUT slot whose key round-trips to the original filename', () => {
     const now = Date.now();
-    const slot = mintUploadSlot(STORE, { filename: 'Finn Think Sheet 11-3.jpg' });
-    expect(slot.filename).toBe('Finn Think Sheet 11-3.jpg');
+    const slot = mintUploadSlot(STORE, { filename: 'Sam Think Sheet 11-3.jpg' });
+    expect(slot.filename).toBe('Sam Think Sheet 11-3.jpg');
     expect(slot.mimeType).toBe('image/jpeg');
     expect(slot.method).toBe('PUT');
     expect(slot.blobKey).toMatch(/^uploads\/[0-9a-f-]{36}\/[A-Za-z0-9_-]+$/);
     expect(slot.uploadUrl.startsWith('https://host.example/b/reg_0123456789abcdef01234567/uploads/')).toBe(true);
-    expect(fileNameFromBlobKey(slot.blobKey)).toBe('Finn Think Sheet 11-3.jpg');
+    expect(fileNameFromBlobKey(slot.blobKey)).toBe('Sam Think Sheet 11-3.jpg');
     expect(Date.parse(slot.expiresAt) - now).toBeLessThanOrEqual(UPLOAD_SLOT_TTL_MS + 1000);
     // The curl line must send the SAME content type the URL was signed for.
     expect(slot.curl).toContain("-H 'Content-Type: image/jpeg'");
@@ -164,11 +164,11 @@ describe('upload slots and blob keys', () => {
 });
 
 describe('blobObjectToUpload', () => {
-  const key = mintUploadSlot(STORE, { filename: 'Finn.jpg' }).blobKey;
+  const key = mintUploadSlot(STORE, { filename: 'Sam.jpg' }).blobKey;
 
   it('builds an upload from the stored bytes and the signed content type', () => {
     const up = blobObjectToUpload(key, { key, bytes: new Uint8Array(JPEG), contentType: 'image/jpeg' });
-    expect(up).toMatchObject({ fileName: 'Finn.jpg', mimeType: 'image/jpeg', sizeBytes: JPEG.length });
+    expect(up).toMatchObject({ fileName: 'Sam.jpg', mimeType: 'image/jpeg', sizeBytes: JPEG.length });
   });
 
   it('falls back to the extension when the store reports no content type', () => {
@@ -244,5 +244,23 @@ describe('uploadPending', () => {
     );
     expect(out.uploaded.map((u) => u.fileId)).toEqual([100]);
     expect(out.warnings[0]).toMatch(/a\.jpg was uploaded \(fileId 100\).*could not be deleted.*HTTP 500/);
+  });
+});
+
+describe('uploadPending — failure label follows the share class', () => {
+  it('names SHARED when the batch was uploading SHARED', async () => {
+    const client = new OFWClient();
+    let n = 0;
+    vi.spyOn(client, 'request').mockImplementation(async () => {
+      if (++n === 2) throw new Error('boom');
+      return { fileId: 100, fileName: 'a.jpg', shareClass: 'SHARED' };
+    });
+    const cache = OFWCache.open(':memory:');
+    const p = (name: string): PendingAttachment => ({
+      fileName: name, mimeType: 'image/jpeg', sizeBytes: 6, sha256: null,
+      inline: { blob: new Blob([new Uint8Array(JPEG)]), fileName: name, mimeType: 'image/jpeg', sizeBytes: 6 },
+    });
+    await expect(uploadPending([p('a.jpg'), p('b.jpg')], { client, cache, store: undefined, nothingWas: 'sent', shareClass: 'SHARED' }))
+      .rejects.toThrow(/Already uploaded to My Files \(SHARED\): a\.jpg \(fileId 100\)/);
   });
 });
