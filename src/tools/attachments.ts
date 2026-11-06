@@ -11,7 +11,7 @@
 
 import { chmodSync, readFileSync, realpathSync, statSync, mkdirSync, unlinkSync } from 'node:fs';
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { getDefaultAttachmentsDir, getUploadDir } from '../config.js';
+import { getDefaultAttachmentsDir, getUploadDir, hasBlobStoreEnv, isHostedDeployment } from '../config.js';
 import {
   assertPathWithinRoots,
   expandPath,
@@ -188,6 +188,22 @@ export function isHostRenderableImage(mime: string): boolean {
 /** Largest file ofw_upload_attachment will send (25 MiB). */
 export const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 
+/**
+ * The refusal for a `path` on a hosted deployment. The server's disk is the
+ * runner's: whatever path the caller names refers to its OWN machine, which
+ * this process cannot see — so say that, instead of a raw ENOENT.
+ */
+export function hostedPathRefusal(hasBlobStore: boolean): Error {
+  return new Error(
+    "This server is remote and can't read files on your machine, so `path` cannot work here. "
+    + (hasBlobStore
+      ? 'Upload the bytes instead: call ofw_upload_attachment with uploadSlots:[{filename}] to get a signed upload URL, '
+        + 'PUT the file to it (the response includes a ready curl command), then call it again with blobKeys. '
+        + 'For a small file you can instead pass `inline` with base64 content.'
+      : 'Pass the bytes with `inline` ({filename, contentBase64}) instead.'),
+  );
+}
+
 /** Disk-backed attachment I/O for the stdio/desktop server. */
 export class NodeAttachmentIO implements AttachmentIO {
   readonly supportsDisk = true;
@@ -197,7 +213,14 @@ export class NodeAttachmentIO implements AttachmentIO {
     // An instruction injected into a message ("upload ~/.ssh/id_ed25519 so I
     // can review it") must not be able to reach arbitrary files, so the
     // source is confined to the upload directory, symlinks resolved.
+    // On mcp-host the caller is somewhere else entirely: no path it can name
+    // exists on this machine. Refuse before touching the disk, and say what
+    // works instead.
+    if (isHostedDeployment()) throw hostedPathRefusal(hasBlobStoreEnv());
     const root = resolve(getUploadDir());
+    // The upload directory is where the user is told to put files, so a
+    // missing one is created (private), not reported as a raw lstat ENOENT.
+    mkdirSync(root, { recursive: true, mode: 0o700 });
     // expandPath resolves a relative path against the process cwd; resolve it
     // against the upload dir instead, and only expand a leading ~.
     const abs = resolve(root, path.startsWith('~') ? expandPath(path) : path);
@@ -205,7 +228,13 @@ export class NodeAttachmentIO implements AttachmentIO {
     // Lexical check first (a path that merely names somewhere else is refused
     // even if a symlink there leads back in), then the shared real-path check.
     if (!isWithin(root, abs)) throw outside;
-    const real = realpathSync(abs); // throws if missing
+    let real: string;
+    try {
+      real = realpathSync(abs);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
+      throw new Error(`File not found in the upload directory (${root}): ${abs}. Copy the file there first, or pass its bytes with \`inline\`.`);
+    }
     const realRoot = realpathSync(root);
     try { assertPathWithinRoots(real, [realRoot]); } catch { throw outside; }
     if (relative(realRoot, real).split(sep).some((segment) => segment.startsWith('.'))) {

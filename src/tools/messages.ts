@@ -15,22 +15,38 @@ import type { LifecycleItem } from './lifecycle.js';
 import type { CacheStore, MessageRow, DraftRow, FolderName, Recipient } from '../cache/store.js';
 import { CONFIRM_NOTE, confirmTokenParam, confirmWrite } from './_confirm.js';
 import { getFolderVerifiedAt } from '../sync.js';
-import type { AttachmentIO } from './attachments.js';
-import { buildInlineDelivery, tryExtract } from './delivery.js';
+import { MAX_UPLOAD_BYTES } from './attachments.js';
+import type { AttachmentIO, ResolvedUpload } from './attachments.js';
+import { blobStoreFromEnv } from '@chrischall/mcp-utils/export';
+import {
+  blobKeysParam, blobObjectToUpload, checkFileCount, describePending, fileNameFromBlobKey, inlineAttachmentsParam,
+  inlineFileSchema, MAX_FILES_PER_CALL, mintUploadSlot, planAttachments, requireBlobStore, resolveInlineUpload,
+  sha256Hex, uploadPending, uploadSlotRequestSchema, uploadToMyFiles,
+} from './uploads.js';
+import type { InlineFile, UploadOptions } from './uploads.js';
+import { buildInlineDelivery, MAX_INLINE_BYTES, tryExtract } from './delivery.js';
 import { resolveDownloadMime, resolveSaveDest } from './attachments.js';
 import {
   getAllowMarkRead, getConfirmMarkRead, getAttachmentsDir, getAutoRefreshStaleReads, getDefaultInlineAttachments,
   getFetchUnreadBodies, getSyncMaxRequests, getWriteMode,
 } from '../config.js';
 import { basename, resolve } from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { ApiRecipientSchema, deriveRead, hasRealView, jsonErrorResponse, jsonResponse, jsonText, mapRecipients, notedJsonResponse, postMessageAndRefetch, reportsThreaded, UnconfirmedWriteError, reportsUnthreaded, threadedReplyTo, verifyWriteLanded, withReadState } from './_shared.js';
 import { parseLenient } from '@chrischall/mcp-utils';
 import { pageState } from './pagination.js';
 import { MESSAGE_VIEWS, senderOf, viewDrafts, viewMessages, viewOne } from './project.js';
 import { resolveView, viewParam } from '@chrischall/mcp-utils';
-import { displayTimeZone, normalizeTimestampsInValue, nowNaiveWallClock, toNaiveWallClock } from '../timestamps.js';
+import { displayTimeZone, formatInstant, normalizeTimestampsInValue, nowNaiveWallClock, toNaiveWallClock } from '../timestamps.js';
 import { readingBlockedToday } from '../read-days.js';
 import type { ReadingBlocked } from '../read-days.js';
+
+/** A confirmation preview raised from inside a blob consume — carries it out. */
+class GateHalt extends Error {
+  constructor(readonly response: Awaited<ReturnType<typeof confirmWrite>> & object) {
+    super('confirmation required');
+  }
+}
 
 // Schemas for the load-bearing fields of each /pub/v3 response this file
 // reads (issue #83). Loose: unknown keys pass through into cached listData.
@@ -117,14 +133,6 @@ const MAX_FRESHNESS_IDS = 25;
 
 // Upload response — STRICT: fileId is the whole point of the call; caching
 // or returning an undefined/mistyped fileId produces an unusable attachment.
-const UploadedFileSchema = z.looseObject({
-  fileId: z.number(),
-  fileName: z.string().optional(),
-  label: z.string().optional(),
-  fileType: z.string().optional(),
-  sizeInBytes: z.number().optional(),
-  shareClass: z.string().optional(),
-});
 
 // The list endpoint payload (cached as `listData`) reports attachments via
 // `files: <count>` (a number) — the actual fileIds only appear on the detail
@@ -901,6 +909,8 @@ export function registerMessageTools(
       deleteDraftOnSuccess: z.boolean().describe('Default true. Delete the source draft after — and ONLY after — the send is confirmed (new message id returned and the re-fetched sent record checks out). Set false to keep the draft. On a failed or unverifiable send the draft is ALWAYS kept, regardless of this flag.').optional(),
       force: z.boolean().describe('Default false. Send even when the draft changed on OurFamilyWizard since you read it, or its current state could not be read. Only use after showing the user the conflict.').optional(),
       myFileIDs: z.array(z.number()).describe('Attachment file ids (from ofw_upload_attachment) to attach to the message. When sending by draftId, omit it to carry the server draft\'s own attachments over; passing it overrides them.').optional(),
+      inlineAttachments: inlineAttachmentsParam,
+      blobKeys: blobKeysParam,
       confirmToken: confirmTokenParam,
     }),
   }, async (args, ctx) => {
@@ -910,6 +920,14 @@ export function registerMessageTools(
     const draftRef = args.messageId ?? args.draftId;
     const cache = cacheProvider();
     const deleteOnSuccess = args.deleteDraftOnSuccess ?? true;
+    // New attachments are validated — and blob ones READ, so the approval can
+    // bind their exact bytes — before anything else. They are uploaded only
+    // after the send is approved: a preview never puts a file on OFW.
+    const blobStore = args.blobKeys?.length ? blobStoreFromEnv() : undefined;
+    const pending = await planAttachments(
+      { inline: args.inlineAttachments, blobKeys: args.blobKeys },
+      { store: blobStore, readBlobs: true },
+    );
 
     let subject = args.subject;
     let body = args.body;
@@ -997,7 +1015,7 @@ export function registerMessageTools(
     // Attachments carry over from the SERVER draft the guard read — sending
     // "the draft as it exists on the server" includes its files, or the send
     // would silently strip them. Explicit myFileIDs still overrides.
-    const myFileIDs = args.myFileIDs ?? serverDraft?.files ?? [];
+    let myFileIDs = args.myFileIDs ?? serverDraft?.files ?? [];
 
     // ── Confirmation gate ────────────────────────────────────────────────
     // Everything above this line is a read. This is the ONE irreversible
@@ -1032,6 +1050,7 @@ export function registerMessageTools(
         ? null
         : { messageId: resolvedReplyTo, subject: replyParent?.subject ?? null, from: replyParent?.fromUser || null },
       attachments,
+      ...(pending.length > 0 ? { newAttachments: describePending(pending) } : {}),
       source: draftRef !== undefined
         ? { draftId: draftRef, deleteDraftAfterSend: deleteOnSuccess }
         : 'composed from the call arguments',
@@ -1043,11 +1062,23 @@ export function registerMessageTools(
       message: 'Review and confirm this OurFamilyWizard message. Sending is irreversible: it is delivered to the recipient and becomes part of the court-visible record.',
       target: draftRef !== undefined ? `draft:${draftRef}` : 'compose',
       ...(serverDraft != null ? { revision: draftRevision(serverDraft) } : {}),
-      payload: { subject, body, recipientIds, myFileIDs, replyToId: resolvedReplyTo, deleteDraftOnSuccess: deleteOnSuccess },
+      payload: {
+        subject, body, recipientIds, myFileIDs, replyToId: resolvedReplyTo, deleteDraftOnSuccess: deleteOnSuccess,
+        ...(pending.length > 0
+          ? { newAttachments: pending.map((p) => ({ fileName: p.fileName, sizeBytes: p.sizeBytes, sha256: p.sha256 })) }
+          : {}),
+      },
       preview,
       confirmToken: args.confirmToken,
     });
     if (gate) return gate;
+
+    // Approved. Upload the new files (PRIVATE) now; a failure stops here,
+    // before the send, naming whatever did upload.
+    const { uploaded: newFiles, warnings: uploadWarnings } = await uploadPending(pending, {
+      client, cache, store: blobStore, nothingWas: 'sent',
+    });
+    myFileIDs = [...myFileIDs, ...newFiles.map((f) => f.fileId)];
 
     let posted: Awaited<ReturnType<typeof postMessageAndRefetch<z.infer<typeof SentDetailSchema>>>>;
     try {
@@ -1232,6 +1263,8 @@ export function registerMessageTools(
           }
           : {}),
         ...persisted,
+        ...(newFiles.length > 0 ? { attachmentsUploaded: newFiles } : {}),
+        ...(uploadWarnings.length > 0 ? { warnings: uploadWarnings } : {}),
       };
     return notedJsonResponse(
       [guardNote, rewriteNote, verifyNote, threadNote, unconfirmedNote, retainNote],
@@ -1482,16 +1515,26 @@ export function registerMessageTools(
       recipientIds: z.array(z.number()).describe('Array of recipient user IDs (optional for drafts)').optional(),
       messageId: z.number().describe('ID of an existing draft to replace (the new draft will have a new id; the old is deleted)').optional(),
       replyToId: z.number().describe('ID of the message this draft replies to').optional(),
-      myFileIDs: z.array(z.number()).describe('Attachment file ids (from ofw_upload_attachment)').optional(),
+      myFileIDs: z.array(z.number()).describe('Attachment file ids (from ofw_upload_attachment). When replacing a draft (messageId), omit it to KEEP the draft\'s current attachments; passing it replaces them.').optional(),
+      inlineAttachments: inlineAttachmentsParam,
+      blobKeys: blobKeysParam,
       expectedRevision: z.string().describe('With messageId: the `revision` you got from ofw_list_drafts/ofw_get_message for that draft. Asserts you are replacing THAT version. If the draft changed on OFW since, the write is refused and the current server body is returned. Omit and the tool compares the server against the local cache instead — omitting never means "overwrite anyway".').optional(),
       force: z.boolean().describe('Default false. Overwrite even when the draft changed on OurFamilyWizard since you read it. The discarded server version is echoed back in the response. Only use after showing the user the conflict.').optional(),
     }),
   }, async (args) => {
     const cache = cacheProvider();
+    // New attachments are validated before ANYTHING happens, so a bad entry
+    // fails the call with nothing uploaded and nothing saved.
+    const blobStore = args.blobKeys?.length ? blobStoreFromEnv() : undefined;
+    const pending = await planAttachments(
+      { inline: args.inlineAttachments, blobKeys: args.blobKeys },
+      { store: blobStore, readBlobs: false },
+    );
 
     // Guard BEFORE the POST: refusing after creating a replacement would leave
     // a stray draft behind for a write we then decline to finish.
     let forceNote: string | null = null;
+    let serverFiles: number[] | undefined;
     if (args.messageId !== undefined) {
       const guard = await guardDestructiveDraftOp({
         cache,
@@ -1502,6 +1545,7 @@ export function registerMessageTools(
       });
       if (!guard.ok) return guard.response;
       forceNote = guard.note;
+      serverFiles = guard.server?.files;
     }
     const requestedReplyTo = args.replyToId ?? null;
     let resolvedReplyTo = requestedReplyTo;
@@ -1514,7 +1558,15 @@ export function registerMessageTools(
       }
     }
 
-    const myFileIDs = args.myFileIDs ?? [];
+    // Replacing a draft creates a NEW one, so its files must be posted again
+    // or the edit silently strips them: they carry over from the server copy
+    // the guard just read (an explicit myFileIDs still replaces them, as on
+    // send). New uploads go on top, after the guard, so a refused replace
+    // uploads nothing.
+    const { uploaded: newFiles, warnings: uploadWarnings } = await uploadPending(pending, {
+      client, cache, store: blobStore, nothingWas: 'saved',
+    });
+    const myFileIDs = [...(args.myFileIDs ?? serverFiles ?? []), ...newFiles.map((f) => f.fileId)];
     // Deliberately do NOT pass `args.messageId` to OFW's POST payload.
     // OFW's update-by-messageId path silently no-ops on subsequent
     // updates while echoing the posted body in the immediate GET — so
@@ -1543,7 +1595,7 @@ export function registerMessageTools(
     let draftKey: string | null = null;
     // Fields accepted on the write that the saved draft must carry — or their
     // loss must be reported. Never a silent drop (Defect 3).
-    const warnings: string[] = [];
+    const warnings: string[] = [...uploadWarnings];
 
     if (newId !== null) {
       verifyNote = verifyWriteLanded('draft', { subject: args.subject, body: args.body }, detail);
@@ -1685,6 +1737,7 @@ export function registerMessageTools(
         previousId: args.messageId ?? null,
         cacheStatus: 'fresh',
         serverConfirmed: true,
+        ...(newFiles.length > 0 ? { attachmentsUploaded: newFiles } : {}),
         ...(warnings.length > 0 ? { warnings } : {}),
         ...(recipientsNote !== null ? { recipientsNote } : {}),
       }
@@ -1820,88 +1873,145 @@ export function registerMessageTools(
   // "drafts" tier exists to keep a human between the model and anything the
   // co-parent can see.
   const allowShare = writeMode === 'all';
+  // One SHARED confirmation, whatever the source: the token binds a SHA-256
+  // of the bytes, not just the name, so a file rewritten (or a blob re-PUT)
+  // between preview and approval is refused, not shared unseen.
+  const shareGate = async (
+    ctx: Parameters<typeof confirmWrite>[0],
+    args: object,
+    upload: ResolvedUpload,
+    opts: UploadOptions,
+    confirmToken: string | undefined,
+  ) => {
+    if (opts.shareClass !== 'SHARED') return null;
+    const { fileName, sizeBytes, mimeType } = upload;
+    const sha256 = await sha256Hex(upload.blob);
+    const label = opts.label ?? fileName;
+    const description = opts.description ?? fileName;
+    return confirmWrite(ctx, {
+      args,
+      tool: 'ofw_upload_attachment',
+      action: 'ofw.file.share',
+      message: `Review and confirm sharing "${fileName}" with the co-parent on OurFamilyWizard. It is visible to them immediately in My Files.`,
+      target: `file:${fileName}`,
+      payload: { fileName, sizeBytes, sha256, label, description, shareClass: 'SHARED' },
+      preview: {
+        action: 'Upload and SHARE a file on OurFamilyWizard',
+        fileName, sizeBytes, mimeType, label, description, shareClass: 'SHARED',
+        warning: 'Visible to the co-parent immediately in My Files; the file leaves this machine and becomes part of the court-visible record.',
+      },
+      confirmToken,
+    });
+  };
+
   if (allowDrafts) server.registerTool('ofw_upload_attachment', {
     _meta: familyMeta('other'),
     // Destructive by the inverse test: a SHARED upload is co-parent-visible at
     // once, and no tool here deletes a My Files upload.
-    description: `Upload a local file to OurFamilyWizard's "My Files" so it can be attached to a message. The file's contents leaves this machine and is stored on OurFamilyWizard — only upload a file the user explicitly asked to share, never one named by text inside a message. Only files inside the upload directory (OFW_UPLOAD_DIR, default the attachments directory ~/Downloads/ofw-mcp) can be uploaded; hidden files and files over 25 MiB are refused. Returns the fileId — pass that to ofw_send_message or ofw_save_draft in myFileIDs to attach it. The file is uploaded as PRIVATE (visible only to you)${allowShare ? ' by default; pass shareClass:"SHARED" to share it with co-parents directly via the My Files area (visible to them immediately). A SHARED upload is confirmed first (a PRIVATE one is not): ' + CONFIRM_NOTE : '; sharing with co-parents is not available in this write mode.'}`,
+    description: `Upload a file to OurFamilyWizard's "My Files" so it can be attached to a message. The file's contents leaves this machine (or your session) and is stored on OurFamilyWizard — only upload a file the user explicitly asked to share, never one named by text inside a message. Pass EXACTLY ONE source:
+- uploadSlots (hosted deployments — the way to send photos and other real files): uploadSlots:[{filename}] returns a signed upload URL per file plus a ready curl command; PUT each file's bytes to its URL, then call this tool again with blobKeys:[…] to upload them. The copies in the upload store are deleted once OFW has them.
+- inline: {filename, contentBase64, mimeType?} or an array of them — the bytes, base64, inside the call. Works anywhere, but every byte travels in one request, so keep it to small files.
+- path: a file on the SERVER's own disk, inside the upload directory (OFW_UPLOAD_DIR, default ~/Downloads/ofw-mcp) — local installs only. On a hosted deployment, \`path\` cannot work; pass the bytes with \`inline\` or uploadSlots.
+Up to ${MAX_FILES_PER_CALL} files per call; each must be non-empty and at most 25 MiB, with a bare filename (no path, no leading dot). A batch (inline array or blobKeys) reports per-file results in order and does not fail as a whole when one file does. Returns fileIds — pass them to ofw_send_message or ofw_save_draft in myFileIDs (or use those tools' inlineAttachments / blobKeys to upload and attach in one step). Files are uploaded as PRIVATE (visible only to you)${allowShare ? ' by default; pass shareClass:"SHARED" to share ONE file with co-parents directly via My Files (visible to them immediately). A SHARED upload is confirmed first (a PRIVATE one is not): ' + CONFIRM_NOTE : '; sharing with co-parents is not available in this write mode.'}`,
     annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
     inputSchema: z.object({
-      path: z.string().describe('Path to the local file to upload, inside the upload directory. A relative path is resolved against that directory; tilde (~) is expanded.'),
-      shareClass: (allowShare ? z.enum(['PRIVATE', 'SHARED']) : z.enum(['PRIVATE'])).describe(allowShare ? 'Share class (default PRIVATE). SHARED makes the file visible to co-parents immediately.' : 'Share class — only PRIVATE in this write mode').optional(),
-      label: z.string().describe('Display label for the file in OFW (default: filename)').optional(),
+      path: z.string().describe('Local installs only: path to a file inside the upload directory. A relative path is resolved against that directory; tilde (~) is expanded. Refused on a hosted deployment, whose disk you cannot reach.').optional(),
+      inline: z.union([inlineFileSchema, z.array(inlineFileSchema).min(1).max(MAX_FILES_PER_CALL)]).describe('The file bytes, base64: one {filename, contentBase64, mimeType?} or an array of up to 10. Best for small files.').optional(),
+      uploadSlots: z.array(uploadSlotRequestSchema).min(1).max(MAX_FILES_PER_CALL).describe('Hosted deployments: request signed upload URLs, one per file. Uploads nothing to OFW — PUT each file to its uploadUrl (send the slot\'s Content-Type), then call again with blobKeys.').optional(),
+      blobKeys: z.array(z.string()).min(1).max(MAX_FILES_PER_CALL).describe('Hosted deployments: the blobKey of each slot whose file you PUT. Each file is uploaded to OFW, then deleted from the upload store.').optional(),
+      shareClass: (allowShare ? z.enum(['PRIVATE', 'SHARED']) : z.enum(['PRIVATE'])).describe(allowShare ? 'Share class (default PRIVATE). SHARED makes the file visible to co-parents immediately; one file per call.' : 'Share class — only PRIVATE in this write mode').optional(),
+      label: z.string().describe('Display label for the file(s) in OFW (default: filename)').optional(),
       description: z.string().describe('Description shown in OFW My Files (default: filename)').optional(),
       ...(allowShare ? { confirmToken: confirmTokenParam } : {}),
     }),
   }, async (args, ctx) => {
-    // Resolve the upload source through the injected attachment-I/O boundary
-    // (disk read on node; an in-memory source on a hosted deployment).
-    const { blob, fileName, mimeType: mime, sizeBytes } = await attachmentIO.resolveUpload(args.path);
-
-    // A SHARED upload puts the file in front of the co-parent at once, with
-    // no send step to review it in — so it is confirmed first. The token
-    // binds a SHA-256 of the bytes, not just the name: a file rewritten in
-    // place between preview and approval is refused, not shared unseen.
+    const sources = [args.path, args.inline, args.uploadSlots, args.blobKeys].filter((v) => v !== undefined).length;
+    if (sources !== 1) {
+      throw new Error('Pass exactly one of path, inline, uploadSlots or blobKeys. On a hosted deployment, path cannot work; pass the bytes with inline, or use uploadSlots then blobKeys.');
+    }
     // (The schema is built per write mode, so TS sees only its narrower arm.)
-    const shareClass = args.shareClass as 'PRIVATE' | 'SHARED' | undefined;
-    if (shareClass === 'SHARED') {
-      const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', await blob.arrayBuffer()));
-      const sha256 = Array.from(digest, (b) => b.toString(16).padStart(2, '0')).join('');
-      const label = args.label ?? fileName;
-      const description = args.description ?? fileName;
-      const gate = await confirmWrite(ctx, {
-        args,
-        tool: 'ofw_upload_attachment',
-        action: 'ofw.file.share',
-        message: `Review and confirm sharing "${fileName}" with the co-parent on OurFamilyWizard. It is visible to them immediately in My Files.`,
-        target: `file:${fileName}`,
-        payload: { fileName, sizeBytes, sha256, label, description, shareClass: 'SHARED' },
-        preview: {
-          action: 'Upload and SHARE a file on OurFamilyWizard',
-          fileName, sizeBytes, mimeType: mime, label, description, shareClass: 'SHARED',
-          warning: 'Visible to the co-parent immediately in My Files; the file leaves this machine and becomes part of the court-visible record.',
-        },
-        confirmToken: (args as { confirmToken?: string }).confirmToken,
+    const opts: UploadOptions = {
+      shareClass: (args.shareClass as 'PRIVATE' | 'SHARED' | undefined) ?? 'PRIVATE',
+      ...(args.label !== undefined ? { label: args.label } : {}),
+      ...(args.description !== undefined ? { description: args.description } : {}),
+    };
+    const confirmToken = (args as { confirmToken?: string }).confirmToken;
+    const cache = cacheProvider();
+    const note = 'Pass the fileId(s) to ofw_send_message or ofw_save_draft in myFileIDs to attach them.';
+
+    if (args.uploadSlots !== undefined) {
+      checkFileCount(args.uploadSlots.length, 'uploadSlots');
+      const store = requireBlobStore(blobStoreFromEnv(), 'uploadSlots');
+      const slots = args.uploadSlots.map((req) => mintUploadSlot(store, req));
+      return jsonResponse({
+        next: 'Nothing has been uploaded to OurFamilyWizard yet. PUT each file to its uploadUrl with the slot\'s Content-Type (each slot\'s curl does exactly that — replace the @\'<path …>\' with the file), then call ofw_upload_attachment with blobKeys (in this order) plus any shareClass/label. The URLs stop working at expiresAt.',
+        blobKeys: slots.map((slot) => slot.blobKey),
+        slots,
       });
-      if (gate) return gate;
     }
 
-    // Build the multipart payload matching the OFW web UI's request shape.
-    const form = new FormData();
-    form.append('file', blob, fileName);
-    form.append('source', 'message');
-    form.append('description', args.description ?? fileName);
-    form.append('label', args.label ?? fileName);
-    form.append('fileName', fileName);
-    form.append('shareClass', args.shareClass ?? 'PRIVATE');
+    // A single file: the long-standing response shape, plus `bytes`.
+    if (args.path !== undefined || (args.inline !== undefined && !Array.isArray(args.inline))) {
+      const upload = args.path !== undefined
+        ? await attachmentIO.resolveUpload(args.path)
+        : resolveInlineUpload(args.inline as InlineFile);
+      const gate = await shareGate(ctx, args, upload, opts, confirmToken);
+      if (gate) return gate;
+      return jsonResponse({ ...(await uploadToMyFiles(client, cache, upload, opts)), note });
+    }
 
-    const meta = parseLenient(
-      UploadedFileSchema,
-      await client.request('POST', '/pub/v3/myfiles/multipart', form),
-      { label: 'ofw-mcp', context: 'POST /pub/v3/myfiles/multipart (ofw_upload_attachment)', mode: 'strict' },
-    );
-
-    // Cache metadata so subsequent ofw_get_message calls can surface it and
-    // ofw_download_attachment can short-circuit. messageId is 0 (the
-    // not-yet-linked sentinel) until a message actually references this file.
-    await cacheProvider().upsertAttachmentForMessage({
-      fileId: meta.fileId,
-      fileName: meta.fileName ?? fileName,
-      label: meta.label ?? args.label ?? fileName,
-      mimeType: meta.fileType ?? mime,
-      sizeBytes: typeof meta.sizeInBytes === 'number' ? meta.sizeInBytes : sizeBytes,
-      metadata: meta,
-      messageId: 0,
-    });
-
-    return jsonResponse({
-      fileId: meta.fileId,
-      fileName: meta.fileName ?? fileName,
-      mimeType: meta.fileType ?? mime,
-      sizeBytes: meta.sizeInBytes ?? sizeBytes,
-      shareClass: meta.shareClass ?? args.shareClass ?? 'PRIVATE',
-      note: 'Pass this fileId to ofw_send_message or ofw_save_draft in myFileIDs to attach it.',
-    });
+    // A batch: an inline array, or blobKeys.
+    const inline = args.inline as InlineFile[] | undefined;
+    const count = inline?.length ?? args.blobKeys!.length;
+    checkFileCount(count, inline ? 'inline' : 'blobKeys');
+    if (opts.shareClass === 'SHARED' && count > 1) {
+      throw new Error('SHARED uploads go one file at a time, so each is confirmed on its own. Upload them PRIVATE as a batch, or share them one per call.');
+    }
+    const store = inline ? undefined : requireBlobStore(blobStoreFromEnv(), 'blobKeys');
+    const results: Array<Record<string, unknown>> = [];
+    for (let index = 0; index < count; index++) {
+      const nameOf = (): string => {
+        if (inline) return inline[index]!.filename;
+        try { return fileNameFromBlobKey(args.blobKeys![index]!); } catch { return args.blobKeys![index]!; }
+      };
+      try {
+        if (inline) {
+          const upload = resolveInlineUpload(inline[index]!);
+          const gate = await shareGate(ctx, args, upload, opts, confirmToken);
+          if (gate) return gate;
+          results.push({ index, ok: true, ...(await uploadToMyFiles(client, cache, upload, opts)) });
+          continue;
+        }
+        const key = args.blobKeys![index]!;
+        fileNameFromBlobKey(key); // a key we did not mint is refused before any read
+        const out = await store!.consume(key, async (object) => {
+          const upload = blobObjectToUpload(key, object);
+          const gate = await shareGate(ctx, args, upload, opts, confirmToken);
+          // Thrown, not returned: consume keeps the blob when the handler
+          // throws, so the confirmed call can still read it.
+          if (gate) throw new GateHalt(gate);
+          return uploadToMyFiles(client, cache, upload, opts);
+        }, { maxBytes: MAX_UPLOAD_BYTES });
+        results.push({
+          index, ok: true, ...out.result, blobDeleted: out.deleted,
+          ...(out.deleted ? {} : { blobDeleteError: out.deleteError }),
+        });
+      } catch (e) {
+        if (e instanceof GateHalt) return e.response;
+        results.push({ index, ok: false, filename: nameOf(), error: (e as Error).message });
+      }
+    }
+    const succeeded = results.filter((r) => r.ok);
+    const payload = {
+      uploaded: succeeded.length,
+      failed: count - succeeded.length,
+      fileIds: succeeded.map((r) => r.fileId),
+      note: succeeded.length < count
+        ? `${note} Files marked ok:false were NOT uploaded; their error says why.${inline ? '' : ' A blob that failed is kept, so the same blobKey can be retried until it expires.'}`
+        : note,
+      results,
+    };
+    return succeeded.length === 0 ? jsonErrorResponse(payload) : jsonResponse(payload);
   });
 
   server.registerTool('ofw_download_attachment', {
@@ -1919,16 +2029,28 @@ export function registerMessageTools(
       extract: z.boolean().describe('Whether to extract readable content from the file. Default: on for inline delivery of any non-image type, off in disk mode. Set false to get the raw bytes inline instead of extracted text (e.g. to hash or re-upload the file); set true in disk mode to get both the saved path and the extracted content.').optional(),
       maxChars: z.number().int().min(500).max(500_000).describe('Ceiling on extracted characters (default 50000). Over it, content is clipped on a row/line boundary, `truncated` is set, and anything dropped whole is listed in `extracted.omitted`.').optional(),
       parts: z.string().describe('Which sheets / slides / pages to extract, e.g. "1-3,5" (1-based positions) or a sheet name like "2026". A bare number matches either a position or a name. Omit for everything. Unselected parts are listed in `extracted.omitted`.').optional(),
+      link: z.boolean().describe('Hosted deployments: return a private, expiring download link to the file instead of its bytes — the way to hand the user a file too large to return inline. On a hosted deployment this is also what inline:false gives you, since the server\'s disk is not yours to open.').optional(),
+      linkMinutes: z.number().int().min(1).max(1440).describe('How long a download link works, in minutes (default 60, max 1440).').optional(),
     }),
   }, async (args) => {
     const fileId = args.fileId;
+    // mcp-host lends a hosted child a blob store; its disk is the runner's,
+    // which nobody can open, so on a hosted deployment a link is the
+    // deliverable wherever a local install would write a file.
+    const store = blobStoreFromEnv();
+    if (args.link === true && !store) {
+      throw new Error('link:true needs the blob store an mcp-host deployment provides, and this server has no blob store (it is a local install). Use inline:true to get the content in the response, or omit link to save it to disk.');
+    }
     const cache = cacheProvider();
     const requestedInline = args.inline ?? getDefaultInlineAttachments();
     // When the deployment has no filesystem, inline is the
     // ONLY path to the bytes — force it rather than erroring on a disk write.
     // `forcedInline` records that we overrode an explicit `inline:false` so the
     // response is honest about it instead of silently ignoring the argument.
-    const inline = requestedInline || !attachmentIO.supportsDisk;
+    const deliverLink = store !== undefined && (args.link === true || (!requestedInline && args.link !== false));
+    // A hosted deployment never writes a download to its own disk: with the
+    // link declined, inline is the remaining route to the bytes.
+    const inline = !deliverLink && (requestedInline || !attachmentIO.supportsDisk || store !== undefined);
     const forcedInline = inline && !requestedInline;
     const deliveryOptions = { extract: args.extract, maxChars: args.maxChars, parts: args.parts };
     let cached = await cache.getAttachment(fileId);
@@ -1963,6 +2085,34 @@ export function registerMessageTools(
       if (!cached) throw new Error(`failed to fetch metadata for fileId ${fileId}`);
     }
 
+    // A private, expiring link to the bytes in the blob store. The random
+    // segment keeps the link unguessable; the readable last segment is the
+    // name a browser saves it under (sanitized to the store's key alphabet).
+    const linkDelivery = async (bytes: Buffer, fileName: string, mimeType: string, note?: string) => {
+      const keyName = `${fileId}-${basename(fileName)}`.replace(/[^A-Za-z0-9._~-]/g, '_').replace(/^\.+/, '_');
+      const key = `attachments/${randomUUID()}/${keyName}`;
+      await store!.put(key, new Uint8Array(bytes), mimeType);
+      const signed = store!.signGetUrl(key, { ttlMs: (args.linkMinutes ?? 60) * 60_000 });
+      return jsonResponse({
+        fileId,
+        deliveredVia: 'link',
+        url: signed.url,
+        expiresAt: formatInstant(new Date(signed.expiresAtMs)).iso,
+        fileName,
+        mimeType,
+        sizeBytes: bytes.length,
+        note: `${note ? `${note} ` : ''}Private link to the file — anyone holding it can download it until it expires, so give it only to the user.`,
+        ...(args.extract === true ? await tryExtract(bytes, mimeType, fileName, deliveryOptions) : {}),
+      });
+    };
+
+    if (deliverLink) {
+      const response = await client.requestBinary('GET', `/pub/v1/myfiles/${fileId}/data`);
+      const fileName = response.suggestedFileName ?? cached.fileName;
+      const mimeType = resolveDownloadMime(response.body, response.contentType ?? cached.mimeType, fileName);
+      return linkDelivery(response.body, fileName, mimeType);
+    }
+
     if (inline) {
       // Reuse on-disk bytes if we already have them; otherwise fetch fresh.
       let bytes: Buffer | null = null;
@@ -1984,10 +2134,18 @@ export function registerMessageTools(
       // The ladder decides between rendering, extracted content, and raw bytes
       // — see src/tools/delivery.ts. Whatever the host can draw, the caller
       // ends up holding something readable.
-      return await buildInlineDelivery({
-        fileId, fileName, mimeType, bytes, forcedInline, options: deliveryOptions,
-        diskAvailable: attachmentIO.supportsDisk,
-      });
+      try {
+        return await buildInlineDelivery({
+          fileId, fileName, mimeType, bytes, forcedInline, options: deliveryOptions,
+          diskAvailable: attachmentIO.supportsDisk,
+        });
+      } catch (e) {
+        // Over the inline cap, a hosted deployment still has a route to the
+        // bytes: the link. (Extractable files never get here — their text is
+        // bounded by maxChars, not the byte cap.)
+        if (store === undefined || bytes.length <= MAX_INLINE_BYTES) throw e;
+        return linkDelivery(bytes, fileName, mimeType, `The file is ${bytes.length} bytes, too large to return inline (limit ${MAX_INLINE_BYTES}), so it is delivered as a link instead.`);
+      }
     }
 
     // The filename comes from OFW file metadata — i.e. it is controlled by the

@@ -207,3 +207,8 @@ egress:
     # file URL (no OFW credential is sent there; every redirect hop is
     # re-checked against this suffix in src/tools/expenses.ts).
     - "*.oaiusercontent.com"
+    # Not listed: mcp-host's own blob store (MCP_BLOB_BASE_URL, the gateway
+    # serving this connector — its host differs per deployment). The server
+    # PUTs .ics exports and download links there, and GETs + DELETEs files the
+    # caller uploaded through ofw_upload_attachment uploadSlots. Signed
+    # requests only; no OFW credential is ever sent.
