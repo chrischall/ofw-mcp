@@ -1,5 +1,16 @@
 # Changelog
 
+## [2.27.2](https://github.com/chrischall/ofw-mcp/compare/v2.27.1...v2.27.2) (2026-11-06)
+
+
+### Bug Fixes
+
+* **drafts:** attach PRIVATE files as they are and keep draft identity across outside replaces ([#423](https://github.com/chrischall/ofw-mcp/issues/423)) ([b85a6d9](https://github.com/chrischall/ofw-mcp/commit/b85a6d98d9b8dc03177e936592333df711564840))
+
+### Notes
+
+* `ofw_send_message` no longer re-uploads PRIVATE attachments as SHARED (a send attaches PRIVATE files as they are), so the informational `reshare` / `reshareNote` (preview) and `reshared` (result) fields that 2.27.1 added are gone. Nothing else in the send contract changed. Any SHARED copies a 2.27.1 send created remain in My Files and can be deleted in the OurFamilyWizard web app.
+
 ## [2.27.1](https://github.com/chrischall/ofw-mcp/compare/v2.27.0...v2.27.1) (2026-11-06)
 
 
