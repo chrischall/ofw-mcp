@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.27.0](https://github.com/chrischall/ofw-mcp/compare/v2.26.1...v2.27.0) (2026-11-06)
+
+
+### Features
+
+* **attachments:** upload files from hosted sessions and keep attachments when editing drafts ([#418](https://github.com/chrischall/ofw-mcp/issues/418)) ([8f25cef](https://github.com/chrischall/ofw-mcp/commit/8f25cef5615f1b1dd2b7604efb237251a1434079))
+
 ## [2.26.1](https://github.com/chrischall/ofw-mcp/compare/v2.26.0...v2.26.1) (2026-11-04)
 
 
