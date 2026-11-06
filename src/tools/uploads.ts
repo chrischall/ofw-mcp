@@ -221,13 +221,13 @@ export function requireBlobStore(store: BlobStore | undefined, what: string): Bl
 
 export const inlineAttachmentsParam = z.array(inlineFileSchema).max(MAX_FILES_PER_CALL).describe(
   'Files to attach, supplied as base64 BYTES ({filename, contentBase64, mimeType?}). Each is uploaded to My Files '
-  + '(PRIVATE when a draft holds it; SHARED when sent, as the web app attaches files) and attached alongside any myFileIDs. Use for small files; on a hosted deployment, larger files (phone photos) go faster '
+  + 'as PRIVATE and attached alongside any myFileIDs (a send attaches PRIVATE files as they are). Use for small files; on a hosted deployment, larger files (phone photos) go faster '
   + 'through ofw_upload_attachment uploadSlots + blobKeys here. Every entry is validated before anything is uploaded.',
 ).optional();
 
 export const blobKeysParam = z.array(z.string()).max(MAX_FILES_PER_CALL).describe(
   'Hosted deployments: blobKeys from ofw_upload_attachment uploadSlots whose files you have already PUT. Each is uploaded to '
-  + 'My Files (PRIVATE when a draft holds it; SHARED when sent), attached alongside any myFileIDs, and deleted from the upload store.',
+  + 'My Files as PRIVATE, attached alongside any myFileIDs, and deleted from the upload store.',
 ).optional();
 
 /** One new attachment, validated, not yet uploaded. */

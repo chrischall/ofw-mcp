@@ -1564,3 +1564,103 @@ describe('sync on a no-read day (OFW_READ_DAYS / OFW_NO_READ_DAYS)', () => {
     expect(getMessage(10)?.body).toBeNull();
   });
 });
+
+describe('syncDrafts — lineage across a replace made outside this cache', () => {
+  // A draft replaced by another session/deployment (create-then-delete there)
+  // vanishes here and a new id appears. When exactly one new draft carries the
+  // vanished one's subject + body + reply target, it is the same message: the
+  // draftKey and the attachments held for it move across, marked inferred.
+  const old = { id: 10, subject: 'Weekly', body: 'same text', recipients: [], replyToId: null, modifiedAt: '2026-05-01T00:00:00Z', listData: {} };
+
+  async function seedOld(): Promise<void> {
+    upsertDraft(old);
+    await cache.recordDraftLineage({ id: 10, draftKey: 'dk_weekly', previousId: null, recordedAt: '2026-05-01T00:00:00Z' });
+    await cache.setMeta('draft_held_files:10', '[501,502]');
+  }
+
+  it('carries the draftKey and held files to the one identical new draft', async () => {
+    await seedOld();
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce(draftListResponse([{ id: 11, subject: 'Weekly' }]))
+      .mockResolvedValueOnce({ body: 'same text', subject: 'Weekly' });
+    await syncDrafts(client, '333', store());
+    expect(getDraft(10)).toBeNull();
+    expect((await cache.getDraftLineageById(11))?.draftKey).toBe('dk_weekly');
+    expect(getMeta('draft_key_inferred:11')).toBe('1');
+    expect(getMeta('draft_held_files:11')).toBe('[501,502]');
+    expect(getMeta('draft_held_files:10')).toBe('[]');
+  });
+
+  it('does not guess when two new drafts match, or when the content changed', async () => {
+    await seedOld();
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce(draftListResponse([{ id: 11, subject: 'Weekly' }, { id: 12, subject: 'Weekly' }]))
+      .mockResolvedValueOnce({ body: 'same text', subject: 'Weekly' })
+      .mockResolvedValueOnce({ body: 'same text', subject: 'Weekly' });
+    await syncDrafts(client, '333', store());
+    expect(await cache.getDraftLineageById(11)).toBeNull();
+    expect(await cache.getDraftLineageById(12)).toBeNull();
+
+    await seedOld();
+    const c2 = new OFWClient();
+    vi.spyOn(c2, 'request')
+      .mockResolvedValueOnce(draftListResponse([{ id: 13, subject: 'Weekly' }]))
+      .mockResolvedValueOnce({ body: 'edited in the web app', subject: 'Weekly' });
+    await syncDrafts(c2, '333', store());
+    expect(await cache.getDraftLineageById(13)).toBeNull();
+  });
+
+  it('never re-keys a draft that already has a lineage', async () => {
+    await seedOld();
+    // A lineage row for an id the drafts table does not hold yet (e.g. saved
+    // through this server while the drafts cache was being rebuilt).
+    await cache.recordDraftLineage({ id: 11, draftKey: 'dk_other', previousId: null, recordedAt: '2026-05-01T00:00:00Z' });
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce(draftListResponse([{ id: 11, subject: 'Weekly' }]))
+      .mockResolvedValueOnce({ body: 'same text', subject: 'Weekly' });
+    await syncDrafts(client, '333', store());
+    expect((await cache.getDraftLineageById(11))?.draftKey).toBe('dk_other');
+  });
+
+  it('a vanished draft with no key and nothing held is simply evicted', async () => {
+    upsertDraft(old);
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce(draftListResponse([{ id: 11, subject: 'Weekly' }]))
+      .mockResolvedValueOnce({ body: 'same text', subject: 'Weekly' });
+    await syncDrafts(client, '333', store());
+    expect(await cache.getDraftLineageById(11)).toBeNull();
+    expect(getDraft(10)).toBeNull();
+  });
+});
+
+describe('syncDrafts — lineage inference, partial carry-over', () => {
+  const base = { subject: 'Weekly', body: 'same text', recipients: [], replyToId: null, modifiedAt: '2026-05-01T00:00:00Z', listData: {} };
+  const sync = async () => {
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce(draftListResponse([{ id: 21, subject: 'Weekly' }]))
+      .mockResolvedValueOnce({ body: 'same text', subject: 'Weekly' });
+    await syncDrafts(client, '333', store());
+  };
+
+  it('carries a key with nothing held', async () => {
+    upsertDraft({ ...base, id: 20 });
+    await cache.recordDraftLineage({ id: 20, draftKey: 'dk_k', previousId: null, recordedAt: '2026-05-01T00:00:00Z' });
+    await sync();
+    expect((await cache.getDraftLineageById(21))?.draftKey).toBe('dk_k');
+    expect(getMeta('draft_held_files:21')).toBeNull();
+  });
+
+  it('carries held files with no key, and does not invent one', async () => {
+    upsertDraft({ ...base, id: 20 });
+    await cache.setMeta('draft_held_files:20', '[7]');
+    await sync();
+    expect(await cache.getDraftLineageById(21)).toBeNull();
+    expect(getMeta('draft_key_inferred:21')).toBeNull();
+    expect(getMeta('draft_held_files:21')).toBe('[7]');
+  });
+});
