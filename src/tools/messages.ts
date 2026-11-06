@@ -42,6 +42,9 @@ import { displayTimeZone, formatInstant, normalizeTimestampsInValue, nowNaiveWal
 import { readingBlockedToday } from '../read-days.js';
 import type { ReadingBlocked } from '../read-days.js';
 
+/** A PRIVATE file re-uploaded as SHARED for a send (`reused` when an earlier attempt made the copy). */
+interface Reshared { from: number; to: number; fileName: string; reused?: true }
+
 /** Held file ids → `{fileId, fileName, held: true}`, names from the attachment cache (null when unknown). */
 async function describeHeld(cache: CacheStore, ids: number[]): Promise<Array<{ fileId: number; fileName: string | null; held: true }>> {
   return Promise.all(ids.map(async (fileId) => ({ fileId, fileName: (await cache.getAttachment(fileId))?.fileName ?? null, held: true as const })));
@@ -1103,9 +1106,25 @@ export function registerMessageTools(
     // Approved. Re-share the PRIVATE files and upload the new ones, both as
     // SHARED; a failure stops here, before the send, naming whatever did upload.
     const reshared = await reshareAsShared(reshare, 'sent');
-    const { uploaded: newFiles, warnings: uploadWarnings } = await uploadPending(pending, {
-      client, cache, store: blobStore, nothingWas: 'sent', shareClass: 'SHARED',
-    });
+    // From here on, a failure must name the SHARED copies just made, or the
+    // caller cannot tell they exist (a retry reuses them — see reshareAsShared).
+    const resharedNote = reshared.length > 0
+      ? ` These files were already re-shared as SHARED: ${reshared.map((r) => `${r.fileName} (fileId ${r.from} → ${r.to})`).join(', ')}; a retry reuses them.`
+      : '';
+    const withReshared = (e: unknown): Error => {
+      const err = e as Error; // uploadPending and postMessageAndRefetch only throw Errors
+      if (resharedNote) err.message += resharedNote;
+      return err;
+    };
+    let uploadedNew: Awaited<ReturnType<typeof uploadPending>>;
+    try {
+      uploadedNew = await uploadPending(pending, {
+        client, cache, store: blobStore, nothingWas: 'sent', shareClass: 'SHARED',
+      });
+    } catch (e) {
+      throw withReshared(e);
+    }
+    const { uploaded: newFiles, warnings: uploadWarnings } = uploadedNew;
     const swapped = new Map(reshared.map((r) => [r.from, r.to]));
     myFileIDs = [...myFileIDs.map((id) => swapped.get(id) ?? id), ...newFiles.map((f) => f.fileId)];
 
@@ -1121,7 +1140,7 @@ export function registerMessageTools(
         replyToId: resolvedReplyTo,
       }, SentDetailSchema, 'ofw_send_message');
     } catch (e) {
-      if (!(e instanceof UnconfirmedWriteError)) throw e;
+      if (!(e instanceof UnconfirmedWriteError)) throw withReshared(e);
       // The one irreversible operation failed WITHOUT a definitive answer. A
       // plain error here reads as "nothing happened" and invites a retry —
       // which, if the first attempt landed, sends the co-parent a duplicate
@@ -1133,6 +1152,7 @@ export function registerMessageTools(
         result: 'SEND_UNCONFIRMED',
         mayHaveBeenDelivered: true,
         sentMessageId: e.postedId,
+        ...(reshared.length > 0 ? { reshared } : {}),
         reason,
         remedy: 'Do NOT retry the send blindly. First run ofw_sync_messages with folders:["sent"] and look for this subject/body among the newest sent messages (or check ourfamilywizard.com). Retry only once you have confirmed it did not go out.',
         ...(draftRef !== undefined
@@ -1943,18 +1963,27 @@ export function registerMessageTools(
   // the web app gives every message attachment. The bytes come from the
   // account's own My Files copy (no read state; not a message body). Throws
   // before the send on any failure, naming what was already re-shared.
-  const reshareAsShared = async (ids: number[], nothingWas: string): Promise<Array<{ from: number; to: number; fileName: string }>> => {
+  const reshareAsShared = async (ids: number[], nothingWas: string): Promise<Reshared[]> => {
     const cache = cacheProvider();
-    const done: Array<{ from: number; to: number; fileName: string }> = [];
+    const done: Reshared[] = [];
     for (const from of ids) {
       const known = await cache.getAttachment(from);
       const fileName = known!.fileName;
+      // A file already re-shared by an earlier attempt (one that then failed
+      // before sending) is reused, not re-uploaded: every re-upload is another
+      // co-parent-visible copy in My Files.
+      const prior = Number(await cache.getMeta(`reshared_as:${from}`));
+      if (Number.isInteger(prior) && prior > 0) {
+        done.push({ from, to: prior, fileName, reused: true });
+        continue;
+      }
       try {
         const res = await client.requestBinary('GET', `/pub/v1/myfiles/${from}/data`);
         const mimeType = resolveDownloadMime(res.body, res.contentType ?? known!.mimeType, fileName);
         const up = await uploadToMyFiles(client, cache, {
           blob: new Blob([new Uint8Array(res.body)], { type: mimeType }), fileName, mimeType, sizeBytes: res.body.length,
         }, { shareClass: 'SHARED', label: known!.label });
+        await cache.setMeta(`reshared_as:${from}`, String(up.fileId));
         done.push({ from, to: up.fileId, fileName });
       } catch (e) {
         const so = done.map((d) => `${d.fileName} (fileId ${d.from} → ${d.to})`);

@@ -355,3 +355,76 @@ describe('held files — edges', () => {
     expect((err as Error).message).toMatch(/could not be re-shared as SHARED: boom\. Nothing was sent\.$/);
   });
 });
+
+describe('auto-review #421 follow-ups', () => {
+  it('a re-share followed by a failed upload names the SHARED copies, and a retry reuses them instead of duplicating', async () => {
+    const f = fakeOfw();
+    await seedPrivateFile(f, 1, 'a.jpg');
+    setup(f.client);
+    const handler = handlers.get('ofw_send_message')!;
+    const args = {
+      subject: 's', body: 'b', recipientIds: [COPARENT], myFileIDs: [1],
+      inlineAttachments: [{ filename: 'bad.jpg', contentBase64: b64(JPEG) }],
+    };
+    const multipart = () => f.calls.filter((c) => c.path === '/pub/v3/myfiles/multipart').length;
+    // Fail the NEW upload (the second multipart POST), after the re-share succeeded.
+    const real = (f.client.request as unknown as { getMockImplementation: () => (...a: unknown[]) => Promise<unknown> }).getMockImplementation();
+    let posts = 0;
+    vi.mocked(f.client.request).mockImplementation(async (method: string, path: string, body?: unknown) => {
+      if (path === '/pub/v3/myfiles/multipart' && ++posts === 2) {
+        f.calls.push({ method, path, body });
+        throw new Error('OFW API error: 500');
+      }
+      return real(method, path, body);
+    });
+    const { confirmToken } = await callPreview(handler, args);
+    const err = await handler({ ...args, confirmToken }, NO_ELICIT_CTX).catch((e: Error) => e);
+    const shared = [...f.files.values()].find((x) => x.shareClass === 'SHARED')!;
+    expect((err as Error).message).toMatch(/Nothing was sent/);
+    expect((err as Error).message).toMatch(new RegExp(`re-shared as SHARED: a\\.jpg \\(fileId 1 → ${shared.fileId}\\)`));
+    expect((err as Error).message).toMatch(/Already uploaded to My Files \(SHARED\)|could not be uploaded/);
+    expect(multipart()).toBe(2);
+
+    // Retry with the same ids: the existing SHARED copy is reused, not re-uploaded.
+    vi.mocked(f.client.request).mockImplementation(real as never);
+    const retry = { subject: 's', body: 'b', recipientIds: [COPARENT], myFileIDs: [1] };
+    const res = await callConfirmed(handler, retry);
+    const sent = parse(res.content[0].text);
+    expect(multipart()).toBe(2);
+    expect(messagePosts(f).find((p) => !p.draft)!.attachments.myFileIDs).toEqual([shared.fileId]);
+    expect(sent.attachments.reshared).toEqual([{ from: 1, to: shared.fileId, fileName: 'a.jpg', reused: true }]);
+  });
+
+  it('a send that fails without a definitive answer reports the re-shared copies', async () => {
+    const f = fakeOfw();
+    await seedPrivateFile(f, 1, 'a.jpg');
+    setup(f.client);
+    const real = (f.client.request as unknown as { getMockImplementation: () => (...a: unknown[]) => Promise<unknown> }).getMockImplementation();
+    vi.mocked(f.client.request).mockImplementation(async (method: string, path: string, body?: unknown) => {
+      if (method === 'POST' && path === '/pub/v3/messages') throw new Error('socket hang up');
+      return real(method, path, body);
+    });
+    const res = await callConfirmed(handlers.get('ofw_send_message')!, { subject: 's', body: 'b', recipientIds: [COPARENT], myFileIDs: [1] });
+    const out = parse(res.content[0].text);
+    const shared = [...f.files.values()].find((x) => x.shareClass === 'SHARED')!;
+    expect(out.result).toBe('SEND_UNCONFIRMED');
+    expect(out.reshared).toEqual([{ from: 1, to: shared.fileId, fileName: 'a.jpg' }]);
+  });
+
+  it('a send rejected outright names the re-shared copies in its error', async () => {
+    const f = fakeOfw();
+    await seedPrivateFile(f, 1, 'a.jpg');
+    setup(f.client);
+    const real = (f.client.request as unknown as { getMockImplementation: () => (...a: unknown[]) => Promise<unknown> }).getMockImplementation();
+    vi.mocked(f.client.request).mockImplementation(async (method: string, path: string, body?: unknown) => {
+      if (method === 'POST' && path === '/pub/v3/messages') throw new Error('OFW API error: 400 Bad Request');
+      return real(method, path, body);
+    });
+    const handler = handlers.get('ofw_send_message')!;
+    const args = { subject: 's', body: 'b', recipientIds: [COPARENT], myFileIDs: [1] };
+    const { confirmToken } = await callPreview(handler, args);
+    const err = await handler({ ...args, confirmToken }, NO_ELICIT_CTX).catch((e: Error) => e);
+    expect((err as Error).message).toMatch(/OFW API error: 400/);
+    expect((err as Error).message).toMatch(/re-shared as SHARED: a\.jpg \(fileId 1 → \d+\)/);
+  });
+});

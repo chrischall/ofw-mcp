@@ -313,7 +313,7 @@ export async function uploadPending(
       throw new Error(
         `Attachment ${p.fileName} could not be uploaded: ${(e as Error).message}. Nothing was ${ctx.nothingWas}.`
         + (done.length > 0
-          ? ` Already uploaded to My Files (PRIVATE): ${done.join(', ')} — pass those fileIds in myFileIDs when you retry instead of uploading them again.`
+          ? ` Already uploaded to My Files (${ctx.shareClass}): ${done.join(', ')} — pass those fileIds in myFileIDs when you retry instead of uploading them again.`
           : ''),
       );
     }

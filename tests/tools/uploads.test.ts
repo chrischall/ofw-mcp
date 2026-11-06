@@ -246,3 +246,21 @@ describe('uploadPending', () => {
     expect(out.warnings[0]).toMatch(/a\.jpg was uploaded \(fileId 100\).*could not be deleted.*HTTP 500/);
   });
 });
+
+describe('uploadPending — failure label follows the share class', () => {
+  it('names SHARED when the batch was uploading SHARED', async () => {
+    const client = new OFWClient();
+    let n = 0;
+    vi.spyOn(client, 'request').mockImplementation(async () => {
+      if (++n === 2) throw new Error('boom');
+      return { fileId: 100, fileName: 'a.jpg', shareClass: 'SHARED' };
+    });
+    const cache = OFWCache.open(':memory:');
+    const p = (name: string): PendingAttachment => ({
+      fileName: name, mimeType: 'image/jpeg', sizeBytes: 6, sha256: null,
+      inline: { blob: new Blob([new Uint8Array(JPEG)]), fileName: name, mimeType: 'image/jpeg', sizeBytes: 6 },
+    });
+    await expect(uploadPending([p('a.jpg'), p('b.jpg')], { client, cache, store: undefined, nothingWas: 'sent', shareClass: 'SHARED' }))
+      .rejects.toThrow(/Already uploaded to My Files \(SHARED\): a\.jpg \(fileId 100\)/);
+  });
+});
