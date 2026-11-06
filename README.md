@@ -139,12 +139,12 @@ Read-only tools run automatically. Writes that reach your co-parent or the court
 | `ofw_get_unread_sent` | Sent messages a recipient hasn't read yet (from local cache) | Auto | any |
 | `ofw_check_freshness` | Cheap live check that the cache still matches OFW — per id, whether it is still a `draft` or was `sent`/`deleted`, without a full sync | Auto | any |
 | `ofw_status` | **One live call for "where does everything stand?"** — the full verified draft inventory, and the current state of any ids or draft keys | Auto | any |
-| `ofw_download_attachment` | Download a message attachment to disk, or inline as extracted content / bytes | Auto | any |
+| `ofw_download_attachment` | Download a message attachment to disk, inline as extracted content / bytes, or (hosted) as a private expiring link | Auto | any |
 | `ofw_send_message` | Send a message | Confirm (server) | `all` |
 | `ofw_list_drafts` | Draft messages | Auto | any |
 | `ofw_save_draft` | Create or update a draft | Confirm | `drafts` |
 | `ofw_delete_draft` | Delete a draft | Confirm | `drafts` |
-| `ofw_upload_attachment` | Upload a local file from the upload directory (`OFW_UPLOAD_DIR`, default `~/Downloads/ofw-mcp`) to My Files; returns a fileId to attach via `ofw_send_message`/`ofw_save_draft`. Sharing (`shareClass: SHARED`) needs mode `all` | Auto (PRIVATE) / Confirm (server) (SHARED) | `drafts` |
+| `ofw_upload_attachment` | Upload files to My Files — from a hosted session via signed upload slots (`uploadSlots` → PUT → `blobKeys`) or base64 `inline`; locally from the upload directory (`path`). Returns fileIds to attach via `ofw_send_message`/`ofw_save_draft` (which can also take `inlineAttachments`/`blobKeys` directly). Sharing (`shareClass: SHARED`) needs mode `all` | Auto (PRIVATE) / Confirm (server) (SHARED) | `drafts` |
 | `ofw_list_events` | Calendar events and custody handoffs in a date range; filter with `types`, read in a per-call `timeZone`, or get iCalendar text with `format: "ics"` | Auto | any |
 | `ofw_save_calendar_ics` | Save a date range as an `.ics` file — custody schedule included, which OFW's own export leaves out. A private, expiring download link on a hosted connector; a file in the attachments directory locally | Auto | any |
 | `ofw_create_event` | Create a calendar event | Confirm (server) unless private | `all` (or `drafts` + `OFW_CALENDAR_WRITES`) |
@@ -159,6 +159,47 @@ Read-only tools run automatically. Writes that reach your co-parent or the court
 | `ofw_update_expense` | Change an expense, e.g. publish a private one. Pass only the fields to change; it reads the expense first so the rest are kept | Confirm (server) | `all` |
 | `ofw_list_journal_entries` | Journal entries | Auto | any |
 | `ofw_create_journal_entry` | Create a journal entry | Confirm | `all` |
+
+### Uploading attachments
+
+There are three ways to get a file to OurFamilyWizard, and which one works depends on where the server runs.
+
+**Hosted (claude.ai connector, mcp-host): signed upload slots.** The server cannot see your machine, so `path` is refused there, with an explanation. Ask for a slot, PUT the file to it, then hand back its key:
+
+```jsonc
+// 1. ofw_upload_attachment
+{ "uploadSlots": [{ "filename": "Finn_Think_Sheet_2026-11-03.jpg" }] }
+// → { "blobKeys": ["uploads/…"], "slots": [{ "uploadUrl": "https://…", "mimeType": "image/jpeg",
+//      "curl": "curl -sS --fail -X PUT -H 'Content-Type: image/jpeg' --data-binary @'<path to …>' '…'", "expiresAt": "…" }] }
+
+// 2. run the slot's curl with the real file path
+
+// 3. ofw_upload_attachment — or pass blobKeys straight to ofw_save_draft / ofw_send_message
+{ "blobKeys": ["uploads/…"], "label": "Finn Think Sheet 11-3-26" }
+// → { "uploaded": 1, "failed": 0, "fileIds": [12345], "results": [{ "ok": true, "fileId": 12345, "blobDeleted": true, … }] }
+```
+
+The PUT must send the slot's `Content-Type` (the URL is signed for it), and the URL works for 30 minutes. The server deletes each file from the upload store as soon as OurFamilyWizard has it. If the OFW upload fails, the file is kept, so the same key can be retried.
+
+**Any deployment, small files: `inline` base64.** Every byte travels inside the tool call, and a hosted connector caps one request at about 10 MB of JSON (about 7 MB of files once base64-encoded). Use it for a document or a couple of small images, not a batch of phone photos:
+
+```jsonc
+{ "inline": { "filename": "form.pdf", "contentBase64": "JVBERi0xLjcK…" } }
+// or an array of up to 10, with per-file results:
+{ "inline": [{ "filename": "a.jpg", "contentBase64": "…" }, { "filename": "b.heic", "contentBase64": "…", "mimeType": "image/heic" }] }
+```
+
+**Local installs: `path`.** A file inside the upload directory (`OFW_UPLOAD_DIR`, default `~/Downloads/ofw-mcp`, created `0700` on first use). Paths outside it after resolving symlinks, hidden files, and files over 25 MiB are refused:
+
+```jsonc
+{ "path": "Finn_Think_Sheet_2026-11-03.jpg" }
+```
+
+Every source has the same limits: up to 10 files per call, each non-empty and at most 25 MiB, with a bare filename. The MIME type comes from the extension unless you pass `mimeType`. Uploads are `PRIVATE` unless you pass `shareClass: "SHARED"`, which goes one file at a time and is confirmed first.
+
+To upload and attach in one step, give `ofw_save_draft` or `ofw_send_message` `inlineAttachments` (the same `{filename, contentBase64, mimeType?}` entries) or `blobKeys`. Every entry is validated before anything is uploaded. `ofw_send_message` uploads only after the send is approved, and its approval is bound to each file's SHA-256. Editing a draft (`ofw_save_draft` with `messageId`) keeps the draft's existing attachments unless you pass `myFileIDs`.
+
+On a hosted connector, `ofw_download_attachment` with `inline:false` (or `link:true`) returns a private download link that expires after `linkMinutes` (default 60), instead of a path on the server's disk. Inline images over 10 MiB fall back to a link too.
 
 ### Data freshness (`OFW_FRESHNESS_TTL_SECONDS`)
 
@@ -357,6 +398,8 @@ Calendar events sit between the two message tiers: they have no draft stage (a c
 Every request that carries your OFW token or login passes its constructed URL through a host check before `fetch` — the server refuses to send them to any host other than `ofw.ourfamilywizard.com`. Today it always passes, and that is the point: it makes "the credential only ever goes to OFW" a structural invariant rather than a code-review promise, so a later refactor or a compromised dependency that pointed a request elsewhere throws instead of carrying your bearer token or messages off-host. It is a pre-flight check on the URL we build, not a redirect-following egress filter.
 
 The one other host the server contacts is `*.oaiusercontent.com`, and only for `ofw_upload_expense_pdf`'s `url` mode: it downloads the receipt PDF from that signed file URL with no OFW credential attached, re-checking every redirect hop against the same suffix, capping the size and requiring a real PDF. The hosted registration's egress allowlist (`mint.yaml`) names exactly these two hosts.
+
+On a hosted connector the server also reaches mcp-host's own blob store (`MCP_BLOB_BASE_URL`, the gateway that serves the connector) with signed requests and no OFW credential. It stores `.ics` exports and download links, and reads (then deletes) files you upload through `uploadSlots`.
 
 ## Troubleshooting
 

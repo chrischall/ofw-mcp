@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { parseBoolEnv, readEnvVar } from '@chrischall/mcp-utils';
+import { parseBoolEnv, readEnvVar, type EnvSource } from '@chrischall/mcp-utils';
 
 // Cache identity drives the per-user SQLite DB filename. Order of preference:
 //   1. OFW_CACHE_IDENTITY — explicit override for users who want to label the
@@ -41,6 +41,20 @@ export function getAttachmentsDir(): string {
 /** The dedicated default attachments directory, `~/Downloads/ofw-mcp`. */
 export function getDefaultAttachmentsDir(): string {
   return join(homedir(), 'Downloads', 'ofw-mcp');
+}
+
+/**
+ * True on mcp-host: it injects `MCP_DATA_DIR` (the per-registration state
+ * dir) and, with a blob store, `MCP_BLOB_BASE_URL`. A local stdio install has
+ * neither. Read through `readEnvVar`, so an unexpanded placeholder is unset.
+ */
+export function isHostedDeployment(env: EnvSource = process.env): boolean {
+  return readEnvVar('MCP_DATA_DIR', { env }) !== undefined || readEnvVar('MCP_BLOB_BASE_URL', { env }) !== undefined;
+}
+
+/** True when mcp-host lent this process a blob store (without validating it). */
+export function hasBlobStoreEnv(env: EnvSource = process.env): boolean {
+  return readEnvVar('MCP_BLOB_BASE_URL', { env }) !== undefined && readEnvVar('MCP_BLOB_SIGNING_KEY', { env }) !== undefined;
 }
 
 /**
