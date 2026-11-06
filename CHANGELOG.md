@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.27.1](https://github.com/chrischall/ofw-mcp/compare/v2.27.0...v2.27.1) (2026-11-06)
+
+
+### Bug Fixes
+
+* **drafts:** hold attachments until send and attach them as SHARED ([#420](https://github.com/chrischall/ofw-mcp/issues/420)) ([f7f9730](https://github.com/chrischall/ofw-mcp/commit/f7f9730e3ba0d0bbcbe61e489ec608b536272221))
+
 ## [2.27.0](https://github.com/chrischall/ofw-mcp/compare/v2.26.1...v2.27.0) (2026-11-06)
 
 
