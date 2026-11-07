@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.27.3](https://github.com/chrischall/ofw-mcp/compare/v2.27.2...v2.27.3) (2026-11-07)
+
+
+### Bug Fixes
+
+* **deps:** upgrade @chrischall/mcp-utils to 3.7.2 so uploads carry only the file's bytes ([#426](https://github.com/chrischall/ofw-mcp/issues/426)) ([a556316](https://github.com/chrischall/ofw-mcp/commit/a55631685ce86abf4066e8ecb0ad216b265784ca))
+
 ## [2.27.2](https://github.com/chrischall/ofw-mcp/compare/v2.27.1...v2.27.2) (2026-11-06)
 
 
