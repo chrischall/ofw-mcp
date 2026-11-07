@@ -105,6 +105,14 @@ describe('probeWouldStamp', () => {
     }))).toBe(true);
   });
 
+  it('is TRUE for a bodyless inbox row whose list said read:false, showNeverViewed:false', () => {
+    // showNeverViewed is not our read state on the inbox list — only `read` is.
+    expect(probeWouldStamp(null, sampleMessageRow({
+      folder: 'inbox', fetchedBodyAt: null, body: null, recipients: [],
+      listData: { read: false, showNeverViewed: false },
+    }))).toBe(true);
+  });
+
   it('is TRUE for an id with no cached row — unknowable without making the request', () => {
     expect(probeWouldStamp(null, null)).toBe(true);
   });

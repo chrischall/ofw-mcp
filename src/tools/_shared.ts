@@ -92,7 +92,8 @@ export type ApiRecipient = z.infer<typeof ApiRecipientSchema>;
 // viewed. Only the DETAIL endpoint (/pub/v3/messages/{id}) carries a real
 // timestamp; the LIST endpoint returns an epoch-zero PLACEHOLDER
 // ("1970-01-01T00:00:00") in the SAME field even for read messages (on the
-// list, read status lives in `showNeverViewed`, not the timestamp). So treat
+// list, read status lives in the flags — `read` for inbox, `showNeverViewed`
+// for sent; see scrapeSaysRead — not the timestamp). So treat
 // the epoch placeholder as "no real view time" — otherwise a list-sourced row
 // reports a bogus 1970 read time. A detail re-fetch is what fills in the truth.
 export function mapRecipients(items: ApiRecipient[] | undefined | null): Recipient[] {
@@ -161,14 +162,29 @@ export function reportsUnthreaded(detail: ThreadingEcho): boolean {
 // be unit-tested and called without constructing a whole row.
 type ReadStateInput = Pick<MessageRow, 'folder' | 'recipients' | 'fetchedBodyAt' | 'listData'>;
 
-// True when the once-scraped list flags themselves say the message is read.
-// `showNeverViewed === false` is OFW's reliable "has been viewed" signal (per
-// CLAUDE.md); `read === true` is the inbox list's own flag. Both are only ever
-// captured at first sight, so they can go stale — they raise `read` but never
-// lower it (see deriveRead).
-function scrapeSaysRead(listData: unknown): boolean {
+/**
+ * True when the once-scraped LIST flags themselves say the message is read.
+ * Both are only ever captured at first sight, so they can go stale — they
+ * raise `read` but never lower it (see deriveRead).
+ *
+ *  - INBOX: only the inbox list's own `read === true` counts. Anything else —
+ *    `read: false`, a missing `read`, a non-boolean — is UNREAD. On the inbox
+ *    list `showNeverViewed` is NOT our read state: it is the sender-side
+ *    "recipient never viewed" badge flag, and it comes back `false` on a
+ *    brand-new message we have never opened. Treating it as read evidence
+ *    once let a routine sync fetch an unread body, which stamped a
+ *    co-parent-visible "First Viewed" time. Unknown must fail closed: a false
+ *    "unread" costs a confirmation, a false "read" stamps the record.
+ *  - SENT: `showNeverViewed === false` is the reliable "a recipient has viewed
+ *    it" signal (or `read === true`) — unchanged.
+ *
+ * Exported for sync.ts, which applies the same rule to a list item before
+ * deciding whether a body fetch could stamp it.
+ */
+export function scrapeSaysRead(folder: MessageRow['folder'], listData: unknown): boolean {
   if (typeof listData !== 'object' || listData === null) return false;
   const ld = listData as { read?: unknown; showNeverViewed?: unknown };
+  if (folder === 'inbox') return ld.read === true;
   return ld.read === true || ld.showNeverViewed === false;
 }
 
@@ -189,7 +205,10 @@ function scrapeSaysRead(listData: unknown): boolean {
  *    counts. OFW co-parent threads are 1:1 — the sole inbox recipient is us —
  *    so this is exact, not an approximation. Fetching the body marks the message
  *    read on OFW, so a non-null `fetchedBodyAt` is also read=true. The stale
- *    scrape flag is only a last-resort fallback.
+ *    scrape flag is only a last-resort fallback, and for inbox it is the list's
+ *    `read === true` ONLY — never `showNeverViewed`, which on the inbox list is
+ *    the sender-side badge and reads `false` on a message we never opened
+ *    (see scrapeSaysRead).
  *  - SENT: "read" means a *recipient* has opened it — tracked via their
  *    `viewedAt` (the detail endpoint's real timestamp) — never our own body
  *    fetch, which is always set for sent messages.
@@ -211,9 +230,9 @@ function scrapeSaysRead(listData: unknown): boolean {
 export function deriveRead(row: ReadStateInput): boolean {
   const viewedByAnyone = row.recipients.some((r) => r.viewedAt !== null);
   if (row.folder === 'inbox') {
-    return viewedByAnyone || row.fetchedBodyAt !== null || scrapeSaysRead(row.listData);
+    return viewedByAnyone || row.fetchedBodyAt !== null || scrapeSaysRead('inbox', row.listData);
   }
-  return viewedByAnyone || scrapeSaysRead(row.listData);
+  return viewedByAnyone || scrapeSaysRead(row.folder, row.listData);
 }
 
 /**

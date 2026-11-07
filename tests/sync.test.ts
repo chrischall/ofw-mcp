@@ -6,7 +6,10 @@ import type {
 } from '../src/cache/store.js';
 import {
   resolveFolderIds, syncMessageFolder, syncDrafts, syncAll, makeBudget, getDraftsCacheStatus,
+  stampedByFetch, STAMP_TOLERANCE_MS, NEW_MESSAGES_CAP, unreadInboxNote, markedReadNote, markedReadWarning,
 } from '../src/sync.js';
+import type { MarkedReadHint } from '../src/sync.js';
+import { nowNaiveWallClock } from '../src/timestamps.js';
 
 // The sync functions now take an injected async CacheStore. Tests back it with
 // an in-memory `:memory:` OFWCache passed as `store`, and seed/assert through
@@ -79,14 +82,23 @@ describe('resolveFolderIds', () => {
   });
 });
 
-function listResponse(items: Array<{ id: number; subject?: string; from?: string; sentAt?: string; unread?: boolean }>): unknown {
+// `read` mirrors the inbox list's own flag (the ONLY inbox read evidence —
+// see scrapeSaysRead); it defaults to !unread, and `read: null` omits it.
+// `showNeverViewed` defaults to `unread`, the sent-side meaning, and can be
+// overridden to reproduce the live inbox shape (read:false beside
+// showNeverViewed:false on a message we have never opened).
+function listResponse(items: Array<{
+  id: number; subject?: string; from?: string; sentAt?: string; unread?: boolean;
+  read?: boolean | null; showNeverViewed?: boolean;
+}>): unknown {
   return {
     data: items.map((it) => ({
       id: it.id,
       subject: it.subject ?? `Subject ${it.id}`,
       from: { name: it.from ?? 'Alice' },
       date: { dateTime: it.sentAt ?? '2026-05-04T12:00:00Z' },
-      showNeverViewed: it.unread ?? false,
+      showNeverViewed: it.showNeverViewed ?? it.unread ?? false,
+      ...(it.read === null ? {} : { read: it.read ?? !(it.unread ?? false) }),
       recipients: [{ user: { id: 1, name: 'Bob' }, viewed: it.unread ? null : { dateTime: '2026-05-04T13:00:00Z' } }],
     })),
   };
@@ -138,7 +150,7 @@ describe('syncMessageFolder', () => {
 
     expect(result.synced).toBe(2);
     expect(result.unread).toEqual([
-      { id: 2, subject: 'Subject 2', from: 'Alice', sentAt: '2026-05-04T12:00:00Z' },
+      { id: 2, subject: 'Subject 2', from: 'Alice', sentAt: '2026-05-04T12:00:00Z', bodyFetched: false },
     ]);
     expect(getMessage(1)?.body).toBe('body-1');
     expect(getMessage(2)?.body).toBeNull();
@@ -157,7 +169,10 @@ describe('syncMessageFolder', () => {
 
     const result = await syncMessageFolder(client, 'inbox', '111', { fetchUnreadBodies: true }, store());
 
-    expect(result.unread).toEqual([]);
+    // Still listed — unread is the state BEFORE this sync — but marked opened,
+    // and every opening is reported in markedRead.
+    expect(result.unread.map((u) => [u.id, u.bodyFetched])).toEqual([[1, true], [2, true]]);
+    expect(result.markedRead.map((m) => [m.id, m.reason])).toEqual([[1, 'fetchUnreadBodies'], [2, 'fetchUnreadBodies']]);
     expect(getMessage(1)?.body).toBe('body-1');
     expect(getMessage(2)?.body).toBe('body-2');
   });
@@ -269,7 +284,7 @@ describe('syncMessageFolder', () => {
         data: [{
           id: 100, subject: 'with attachment',
           from: { name: 'Alice' }, date: { dateTime: '2026-05-13T12:00:00Z' },
-          showNeverViewed: false, recipients: [],
+          read: true, showNeverViewed: false, recipients: [],
         }],
       })
       // body fetch — includes files array
@@ -588,7 +603,7 @@ describe('syncAll', () => {
     const result = await syncAll(client, {}, store());
 
     expect(result.unreadInbox).toEqual([
-      { id: 10, subject: 'Subject 10', from: 'Alice', sentAt: '2026-05-04T12:00:00Z' },
+      { id: 10, subject: 'Subject 10', from: 'Alice', sentAt: '2026-05-04T12:00:00Z', bodyFetched: false },
     ]);
     expect(result.note).toMatch(/unread inbox/);
   });
@@ -643,7 +658,7 @@ describe('sync — missing-optional-field fallbacks', () => {
     const client = new OFWClient();
     vi.spyOn(client, 'request')
       .mockResolvedValueOnce({ data: [
-        { id: 10, showNeverViewed: false, recipients: [] },                                    // read, no subject/from/date
+        { id: 10, read: true, showNeverViewed: false, recipients: [] },                        // read, no subject/from/date
         { id: 11, showNeverViewed: true, date: { dateTime: '2026-05-04T12:00:00Z' }, recipients: [] }, // unread, no from
       ] })
       .mockResolvedValueOnce({ files: [777] })  // detail for 10: no body, has a file attachment
@@ -655,7 +670,7 @@ describe('sync — missing-optional-field fallbacks', () => {
     expect(getMessage(10)?.subject).toBe('(no subject)');
     expect(getMessage(10)?.fromUser).toBe('');
     expect(getMessage(10)?.body).toBe('');
-    expect(result.unread).toEqual([{ id: 11, subject: undefined, from: '', sentAt: '2026-05-04T12:00:00Z' }]);
+    expect(result.unread).toEqual([{ id: 11, subject: undefined, from: '', sentAt: '2026-05-04T12:00:00Z', bodyFetched: false }]);
     const atts = listAttachmentsForMessage(10);
     expect(atts[0]?.fileName).toBe('file-777');
   });
@@ -699,6 +714,7 @@ describe('sync — response validation (issue #83)', () => {
       .mockResolvedValueOnce({ data: [{
         id: 90, subject: 'S', date: { dateTime: '2026-05-01T00:00:00Z' },
         showNeverViewed: 'nope', // mistyped: boolean expected
+        read: true,
         recipients: [],
       }] })
       .mockResolvedValueOnce({ body: 'B' })     // detail
@@ -948,7 +964,7 @@ describe('syncMessageFolder — bounded + resumable (budget)', () => {
     vi.spyOn(client, 'request')
       .mockResolvedValueOnce({ data: [{
         id: 100, subject: 'two files', from: { name: 'Alice' },
-        date: { dateTime: '2026-05-13T12:00:00Z' }, showNeverViewed: false, recipients: [],
+        date: { dateTime: '2026-05-13T12:00:00Z' }, read: true, showNeverViewed: false, recipients: [],
       }] })
       .mockResolvedValueOnce({ body: 'see attached', files: [55, 66] })
       .mockResolvedValueOnce({ fileId: 55, fileName: 'a.pdf', label: 'a', fileType: 'application/pdf', fileSize: 1 });
@@ -971,7 +987,7 @@ describe('syncMessageFolder — bounded + resumable (budget)', () => {
     vi.spyOn(client, 'request')
       .mockResolvedValueOnce({ data: [{
         id: 100, subject: 'a file', from: { name: 'Alice' },
-        date: { dateTime: '2026-05-13T12:00:00Z' }, showNeverViewed: false, recipients: [],
+        date: { dateTime: '2026-05-13T12:00:00Z' }, read: true, showNeverViewed: false, recipients: [],
       }] })
       .mockResolvedValueOnce({ body: 'see attached', files: [55] });
 
@@ -1662,5 +1678,292 @@ describe('syncDrafts — lineage inference, partial carry-over', () => {
     expect(await cache.getDraftLineageById(21)).toBeNull();
     expect(getMeta('draft_key_inferred:21')).toBeNull();
     expect(getMeta('draft_held_files:21')).toBe('[7]');
+  });
+});
+
+// The incident this guards: a routine ofw_sync_messages() (fetchUnreadBodies
+// off) met a brand-new UNREAD inbox message whose list item said read:false
+// AND showNeverViewed:false. The old rule read showNeverViewed as our unread
+// state, fetched the body, stamped "First Viewed", and reported the message
+// nowhere a caller would look. Placeholders only — no real data.
+describe('sync never marks an inbox message read unless asked', () => {
+  const NEW_ID = 100001;
+  const detailPaths = (spy: { mock: { calls: unknown[][] } }): string[] =>
+    spy.mock.calls.map((c) => c[1] as string).filter((p) => /^\/pub\/v3\/messages\/\d+$/.test(p));
+
+  /** syncAll over the inbox only, serving `items` on page 1 and `detail` for any detail GET. */
+  const inboxOnly = (items: Parameters<typeof listResponse>[0], detail: (id: number) => unknown = () => ({ body: 'body' })) => {
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request').mockImplementation(async (_m: string, path: string) => {
+      if (path.startsWith('/pub/v1/messageFolders')) return foldersResponse();
+      if (path.includes('page=1&')) return listResponse(items);
+      if (path.includes('page=')) return listResponse([]);
+      return detail(Number(path.split('/').pop()));
+    });
+    return { client, spy };
+  };
+
+  it('a new unread message (read:false, showNeverViewed:false) is listed, reported new, and NOT fetched', async () => {
+    const { client, spy } = inboxOnly([{ id: NEW_ID, subject: 'Pickup time', from: 'Parent B', sentAt: '2026-05-04T12:00:00', read: false, showNeverViewed: false }]);
+
+    const result = await syncAll(client, { folders: ['inbox'] }, store());
+
+    expect(detailPaths(spy)).toEqual([]);
+    expect(getMessage(NEW_ID)).toMatchObject({ body: null, fetchedBodyAt: null });
+    expect(result.newMessages).toEqual([
+      { id: NEW_ID, folder: 'inbox', from: 'Parent B', subject: 'Pickup time', sentAt: '2026-05-04T12:00:00', read: false, bodyFetched: false },
+    ]);
+    expect(result.newMessagesTotal).toBe(1);
+    expect(result.newMessagesTruncated).toBe(false);
+    expect(result.unreadInbox).toEqual([
+      { id: NEW_ID, subject: 'Pickup time', from: 'Parent B', sentAt: '2026-05-04T12:00:00', bodyFetched: false },
+    ]);
+    expect(result.markedReadCount).toBe(0);
+    expect(result).not.toHaveProperty('markedRead');
+    expect(result).not.toHaveProperty('warning');
+    expect(result.note).toContain(unreadInboxNote(1));
+  });
+
+  it('treats an inbox item with no `read` flag as unread', async () => {
+    const { client, spy } = inboxOnly([{ id: NEW_ID, read: null, showNeverViewed: false }]);
+
+    const result = await syncAll(client, { folders: ['inbox'] }, store());
+
+    expect(detailPaths(spy)).toEqual([]);
+    expect(result.newMessages[0]).toMatchObject({ id: NEW_ID, read: false, bodyFetched: false });
+    expect(result.unreadInbox.map((u) => u.id)).toEqual([NEW_ID]);
+  });
+
+  it('still fetches the body of a READ inbox item, and reports it new with read:true', async () => {
+    const { client, spy } = inboxOnly(
+      [{ id: NEW_ID, read: true }],
+      // A view time well before this sync: the stamp predates us.
+      () => ({ body: 'hello', recipients: [{ user: { userId: 1, name: 'Parent A' }, viewed: { dateTime: '2026-05-04T13:00:00' } }] }),
+    );
+
+    const result = await syncAll(client, { folders: ['inbox'] }, store());
+
+    expect(detailPaths(spy)).toEqual([`/pub/v3/messages/${NEW_ID}`]);
+    expect(getMessage(NEW_ID)?.body).toBe('hello');
+    expect(result.newMessages[0]).toMatchObject({ id: NEW_ID, folder: 'inbox', read: true, bodyFetched: true });
+    expect(result.unreadInbox).toEqual([]);
+    expect(result.markedReadCount).toBe(0);
+    expect(result).not.toHaveProperty('markedRead');
+  });
+
+  it('fetchUnreadBodies:true opens it, lists it in unreadInbox (pre-sync state) AND in markedRead, and warns', async () => {
+    const { client, spy } = inboxOnly(
+      [{ id: NEW_ID, subject: 'Pickup time', from: 'Parent B', sentAt: '2026-05-04T12:00:00', read: false, showNeverViewed: false }],
+      () => ({ body: 'hello', recipients: [{ user: { userId: 1, name: 'Parent A' }, viewed: { dateTime: nowNaiveWallClock() } }] }),
+    );
+
+    const result = await syncAll(client, { folders: ['inbox'], fetchUnreadBodies: true }, store());
+
+    expect(detailPaths(spy)).toEqual([`/pub/v3/messages/${NEW_ID}`]);
+    expect(result.unreadInbox).toEqual([
+      { id: NEW_ID, subject: 'Pickup time', from: 'Parent B', sentAt: '2026-05-04T12:00:00', bodyFetched: true },
+    ]);
+    expect(result.newMessages[0]).toMatchObject({ id: NEW_ID, read: false, bodyFetched: true });
+    expect(result.markedRead).toEqual([
+      expect.objectContaining({ id: NEW_ID, subject: 'Pickup time', from: 'Parent B', sentAt: '2026-05-04T12:00:00', reason: 'fetchUnreadBodies' }),
+    ]);
+    expect(result.markedRead![0].viewedAt).toEqual(expect.any(String));
+    expect(result.markedReadCount).toBe(1);
+    expect(result.warning).toMatch(/READ on OurFamilyWizard/);
+    expect(result.warning).toMatch(/co-parent can see/);
+    expect(result.note).toContain(markedReadNote(result.markedRead!));
+    // Nothing is left "cached without a body", so that note is gone.
+    expect(result.note).not.toContain('cached without bodies');
+  });
+
+  it('a deliberate opening is reported even when OFW echoes no view time', async () => {
+    const { client } = inboxOnly([{ id: NEW_ID, read: false }], () => ({ body: 'hello' }));
+
+    const result = await syncAll(client, { folders: ['inbox'], fetchUnreadBodies: true }, store());
+
+    expect(result.markedRead).toEqual([expect.objectContaining({ id: NEW_ID, viewedAt: null, reason: 'fetchUnreadBodies' })]);
+  });
+
+  it('detects a stamp it did not intend: a "read" item whose detail view time is at/after the request', async () => {
+    const { client } = inboxOnly(
+      [{ id: NEW_ID, read: true }],
+      () => ({ body: 'hello', recipients: [{ user: { userId: 1, name: 'Parent A' }, viewed: { dateTime: nowNaiveWallClock() } }] }),
+    );
+
+    const result = await syncAll(client, { folders: ['inbox'] }, store());
+
+    expect(result.markedRead).toEqual([expect.objectContaining({ id: NEW_ID, reason: 'unexpected' })]);
+    expect(result.markedReadCount).toBe(1);
+    expect(result.warning).toMatch(/NOT requested/);
+  });
+
+  it('the body backfill never fetches a bodyless UNREAD inbox row (read:false, showNeverViewed:false)', async () => {
+    upsertMessage({
+      id: NEW_ID, folder: 'inbox', subject: 'Pickup time', fromUser: 'Parent B', sentAt: '2026-05-04T12:00:00',
+      recipients: [{ userId: 1, name: 'Parent A', viewedAt: null }],
+      body: null, fetchedBodyAt: null, replyToId: null, chainRootId: null, listData: {},
+    });
+    const { client, spy } = inboxOnly([{ id: NEW_ID, read: false, showNeverViewed: false }]);
+
+    const result = await syncAll(client, { folders: ['inbox'] }, store());
+
+    expect(detailPaths(spy)).toEqual([]);
+    expect(getMessage(NEW_ID)?.body).toBeNull();
+    // Not new: it was cached by an earlier sync.
+    expect(result.newMessages).toEqual([]);
+    expect(result.newMessagesTotal).toBe(0);
+  });
+
+  it('a backfill heal that stamps unexpectedly is reported too', async () => {
+    upsertMessage({
+      id: NEW_ID, folder: 'inbox', subject: 'Pickup time', fromUser: 'Parent B', sentAt: '2026-05-04T12:00:00',
+      recipients: [], body: null, fetchedBodyAt: null, replyToId: null, chainRootId: null, listData: {},
+    });
+    const { client } = inboxOnly(
+      [{ id: NEW_ID, read: true }],
+      () => ({ body: 'hello', recipients: [{ user: { userId: 1, name: 'Parent A' }, viewed: { dateTime: nowNaiveWallClock() } }] }),
+    );
+
+    const result = await syncAll(client, { folders: ['inbox'] }, store());
+
+    expect(getMessage(NEW_ID)?.body).toBe('hello');
+    expect(result.markedRead).toEqual([expect.objectContaining({ id: NEW_ID, from: 'Parent B', reason: 'unexpected' })]);
+  });
+
+  it('a sent detail is never reported as marked read — its view times belong to the recipient', async () => {
+    const client = new OFWClient();
+    vi.spyOn(client, 'request').mockImplementation(async (_m: string, path: string) => {
+      if (path.startsWith('/pub/v1/messageFolders')) return foldersResponse();
+      if (path.includes('page=1&')) return listResponse([{ id: NEW_ID }]);
+      if (path.includes('page=')) return listResponse([]);
+      return { body: 'mine', recipients: [{ user: { userId: 2, name: 'Parent B' }, viewed: { dateTime: nowNaiveWallClock() } }] };
+    });
+
+    const result = await syncAll(client, { folders: ['sent'] }, store());
+
+    expect(result.markedReadCount).toBe(0);
+    expect(result.newMessages).toEqual([
+      expect.objectContaining({ id: NEW_ID, folder: 'sent', read: true, bodyFetched: true }),
+    ]);
+  });
+
+  it('reports new messages from inbox AND sent together, newest first', async () => {
+    const client = new OFWClient();
+    vi.spyOn(client, 'request').mockImplementation(async (_m: string, path: string) => {
+      if (path.startsWith('/pub/v1/messageFolders')) return foldersResponse();
+      if (path.includes('folders=333')) return draftListResponse([]);
+      if (path.includes('folders=111') && path.includes('page=1&')) {
+        return listResponse([{ id: 100003, sentAt: '2026-05-06T09:00:00', unread: true }, { id: 100001, sentAt: '2026-05-04T09:00:00' }]);
+      }
+      if (path.includes('folders=222') && path.includes('page=1&')) {
+        return listResponse([{ id: 100002, sentAt: '2026-05-05T09:00:00', unread: true }]);
+      }
+      if (path.includes('page=')) return listResponse([]);
+      return { body: 'b' };
+    });
+
+    const result = await syncAll(client, {}, store());
+
+    expect(result.newMessages.map((m) => [m.id, m.folder, m.read, m.bodyFetched])).toEqual([
+      [100003, 'inbox', false, false],
+      [100002, 'sent', false, true],
+      [100001, 'inbox', true, true],
+    ]);
+  });
+
+  it(`caps newMessages at ${50} on a large first sync and says so`, async () => {
+    const ids = Array.from({ length: 60 }, (_, i) => 200001 + i);
+    const client = new OFWClient();
+    vi.spyOn(client, 'request').mockImplementation(async (_m: string, path: string) => {
+      if (path.startsWith('/pub/v1/messageFolders')) return foldersResponse();
+      if (path.includes('page=1&')) {
+        return listResponse(ids.slice(0, 50).map((id) => ({ id, sentAt: `2026-05-04T12:${String(id - 200000).padStart(2, '0')}:00` })));
+      }
+      if (path.includes('page=2&')) {
+        return listResponse(ids.slice(50).map((id) => ({ id, sentAt: `2026-05-04T12:${String(id - 200000).padStart(2, '0')}:00` })));
+      }
+      if (path.includes('page=')) return listResponse([]);
+      return { body: 'b' };
+    });
+
+    const result = await syncAll(client, { folders: ['sent'] }, store());
+
+    expect(NEW_MESSAGES_CAP).toBe(50);
+    expect(result.newMessagesTotal).toBe(60);
+    expect(result.newMessagesTruncated).toBe(true);
+    expect(result.newMessages).toHaveLength(50);
+    expect(result.newMessages[0].id).toBe(200060);
+    expect(result.newMessages[49].id).toBe(200011);
+  });
+
+  it('the deep backfill pass applies the same rule and reports what it cached', async () => {
+    // Page 1 is cached history; page 2 (reached only by the backfill) holds an
+    // older UNREAD message the forward pass never saw.
+    upsertMessage({
+      id: 100005, folder: 'inbox', subject: 'S', fromUser: 'Parent B', sentAt: '2026-05-04T12:00:00',
+      recipients: [], body: 'b', fetchedBodyAt: '2026-05-04T12:01:00Z', replyToId: null, chainRootId: null, listData: {},
+    });
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request').mockImplementation(async (_m: string, path: string) => {
+      if (path.startsWith('/pub/v1/messageFolders')) return foldersResponse();
+      if (path.includes('page=1&')) return listResponse([{ id: 100005 }]);
+      if (path.includes('page=2&')) return listResponse([{ id: 100001, read: false, showNeverViewed: false }]);
+      if (path.includes('page=')) return listResponse([]);
+      throw new Error(`unexpected request ${path}`);
+    });
+
+    const result = await syncAll(client, { folders: ['inbox'], deep: true }, store());
+
+    expect(detailPaths(spy)).toEqual([]);
+    expect(result.newMessages).toEqual([expect.objectContaining({ id: 100001, read: false, bodyFetched: false })]);
+    expect(result.unreadInbox.map((u) => u.id)).toEqual([100001]);
+  });
+});
+
+describe('stampedByFetch', () => {
+  let prevTz: string | undefined;
+  beforeEach(() => { prevTz = process.env.DISPLAY_TZ; process.env.DISPLAY_TZ = 'UTC'; });
+  afterEach(() => {
+    if (prevTz === undefined) delete process.env.DISPLAY_TZ;
+    else process.env.DISPLAY_TZ = prevTz;
+  });
+
+  const start = Date.parse('2026-05-04T12:00:05Z');
+
+  it(`counts a view time at or after the request start, less ${STAMP_TOLERANCE_MS} ms of clock skew`, () => {
+    expect(STAMP_TOLERANCE_MS).toBe(2000);
+    expect(stampedByFetch('2026-05-04T12:00:10', start)).toBe(true);
+    expect(stampedByFetch('2026-05-04T12:00:05', start)).toBe(true);
+    expect(stampedByFetch('2026-05-04T12:00:03', start)).toBe(true);
+  });
+
+  it('does not count an earlier view, a missing one, or one it cannot parse', () => {
+    expect(stampedByFetch('2026-05-04T12:00:02.999', start)).toBe(false);
+    expect(stampedByFetch('2026-05-04T09:00:00', start)).toBe(false);
+    expect(stampedByFetch(null, start)).toBe(false);
+    expect(stampedByFetch('not a time', start)).toBe(false);
+  });
+});
+
+describe('markedRead wording', () => {
+  const hint = (id: number, reason: MarkedReadHint['reason']): MarkedReadHint => ({
+    id, subject: 'S', from: 'Parent B', sentAt: '2026-05-04T12:00:00', viewedAt: null, reason,
+  });
+
+  it('counts one deliberate opening in the singular, with no "not requested" clause', () => {
+    const one = [hint(100001, 'fetchUnreadBodies')];
+    expect(markedReadNote(one)).toMatch(/1 inbox message \(ids 100001\)/);
+    expect(markedReadNote(one)).not.toMatch(/NOT requested/);
+    expect(markedReadWarning(one)).toMatch(/marked 1 inbox message READ/);
+    expect(markedReadWarning(one)).not.toMatch(/NOT requested/);
+  });
+
+  it('names how many stamps were NOT requested, singular and plural', () => {
+    const mixed = [hint(100001, 'fetchUnreadBodies'), hint(100002, 'unexpected')];
+    expect(markedReadNote(mixed)).toMatch(/2 inbox messages \(ids 100001, 100002\).*1 of them was NOT requested/);
+    expect(markedReadWarning(mixed)).toMatch(/marked 2 inbox messages READ.*1 of them was NOT requested: the list reported it as already read, but the fetch stamped it\./);
+    const both = [hint(100001, 'unexpected'), hint(100002, 'unexpected')];
+    expect(markedReadNote(both)).toMatch(/2 of them were NOT requested/);
+    expect(markedReadWarning(both)).toMatch(/2 of them were NOT requested: the list reported them as already read, but the fetch stamped them\./);
   });
 });

@@ -1,8 +1,8 @@
 import { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import type { OFWClient } from '../client.js';
-import { syncAll, unreadInboxNote, fetchAttachmentMeta, fetchAttachmentMetaForMessage, getDraftsCacheStatus } from '../sync.js';
-import type { DraftsCacheStatus } from '../sync.js';
+import { syncAll, fetchAttachmentMeta, fetchAttachmentMetaForMessage, getDraftsCacheStatus, latestViewedAt, NEW_MESSAGES_CAP, refreshReadReporting } from '../sync.js';
+import type { DraftsCacheStatus, MarkedReadHint } from '../sync.js';
 import { buildFreshness } from './freshness.js';
 import type { FreshnessBlock } from './freshness.js';
 import { briefDate, briefLine, briefPage, briefResult, familyMeta } from './hints.js';
@@ -343,8 +343,9 @@ async function unreadCandidates(cache: CacheStore): Promise<{ rows: MessageRow[]
 /**
  * Fetch one unread inbox body and cache it — the request that marks it read.
  * Only ever called after the confirmation gate approved this exact message.
+ * Returns the `markedRead` entry the sync response reports for it.
  */
-async function openUnreadBody(client: OFWClient, cache: CacheStore, cached: MessageRow): Promise<void> {
+async function openUnreadBody(client: OFWClient, cache: CacheStore, cached: MessageRow): Promise<MarkedReadHint> {
   const detail = parseLenient(
     MessageDetailSchema,
     await client.request('GET', `/pub/v3/messages/${cached.id}`),
@@ -359,6 +360,10 @@ async function openUnreadBody(client: OFWClient, cache: CacheStore, cached: Mess
   if (Array.isArray(detail.files) && detail.files.length > 0) {
     await fetchAttachmentMetaForMessage(client, cached.id, detail.files, cache);
   }
+  return {
+    id: cached.id, subject: cached.subject, from: senderOf(cached), sentAt: cached.sentAt,
+    viewedAt: latestViewedAt(detail.recipients), reason: 'fetchUnreadBodies',
+  };
 }
 
 /**
@@ -2281,7 +2286,7 @@ Up to ${MAX_FILES_PER_CALL} files per call; each must be non-empty and at most 2
     _meta: familyMeta('other'),
     // Destructive: fetchUnreadBodies:true stamps a co-parent-visible "First
     // Viewed" time on every unread inbox message it touches — irreversible.
-    description: 'Sync messages from OurFamilyWizard into the local cache. Returns counts per folder and a list of unread inbox messages whose bodies were NOT fetched (to avoid mark-as-read on OFW). Call ofw_get_message(id) on those to read them. EVERY call re-checks the newest page first, so new messages are picked up promptly even while an old-history backfill is still running; only then does it spend what is left of its budget advancing that backfill. Pass deep:true to walk all OFW pages instead of stopping at the first all-cached page (use to backfill suspected gaps). Sync is BOUNDED and RESUMABLE: on hosted deployments a per-call OFW-request budget (env OFW_SYNC_MAX_REQUESTS, or the maxRequests argument) caps how far one call walks; when the budget is hit the response reports done:false with a note — call again with the SAME arguments to resume. done:false means older history is still being backfilled; it does NOT mean recent messages are missing. Local installs are unbounded by default (done is always true). On a server-configured no-read day (OFW_READ_DAYS / OFW_NO_READ_DAYS) no inbox or sent message body is downloaded at all — new messages are cached from the list (sender, date, subject) and the response carries bodiesWithheld:true; the first sync on a reading day fills in those bodies, except unread inbox ones.',
+    description: 'Sync messages from OurFamilyWizard into the local cache. A sync NEVER marks a message read unless fetchUnreadBodies is set: a new inbox message that OFW does not list as read is cached from the list (sender, date, subject) WITHOUT its body, because fetching the body is what stamps a co-parent-visible "First Viewed" time. Every response says what arrived: newMessages lists each message first cached by THIS call — inbox and sent, newest first, with read (its state before the sync) and bodyFetched; newMessagesTotal and newMessagesTruncated give the full count when more than ' + NEW_MESSAGES_CAP + ' arrived (ofw_list_messages pages through the rest). unreadInbox lists the new inbox messages that were unread when the sync began; bodyFetched:false means still unread on OFW — call ofw_get_message(id) to read one, which marks it read. If this call DID mark anything read (fetchUnreadBodies, or a stamp it detected but did not intend), the response LEADS with a warning and lists each in markedRead with reason "fetchUnreadBodies" or "unexpected"; markedRead is omitted when nothing was marked, and markedReadCount is always present. Returns counts per folder too. EVERY call re-checks the newest page first, so new messages are picked up promptly even while an old-history backfill is still running; only then does it spend what is left of its budget advancing that backfill. Pass deep:true to walk all OFW pages instead of stopping at the first all-cached page (use to backfill suspected gaps). Sync is BOUNDED and RESUMABLE: on hosted deployments a per-call OFW-request budget (env OFW_SYNC_MAX_REQUESTS, or the maxRequests argument) caps how far one call walks; when the budget is hit the response reports done:false with a note — call again with the SAME arguments to resume. done:false means older history is still being backfilled; it does NOT mean recent messages are missing. Local installs are unbounded by default (done is always true). On a server-configured no-read day (OFW_READ_DAYS / OFW_NO_READ_DAYS) no inbox or sent message body is downloaded at all — new messages are cached from the list (sender, date, subject) and the response carries bodiesWithheld:true; the first sync on a reading day fills in those bodies, except unread inbox ones.',
     annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
     inputSchema: z.object({
       folders: z.array(z.enum(['inbox', 'sent', 'drafts'])).min(1).describe('Folders to sync (default: all three). Must be non-empty if given — an empty list would sync nothing while reporting success.').optional(),
@@ -2349,19 +2354,18 @@ Up to ${MAX_FILES_PER_CALL} files per call; each must be non-empty and at most 2
           confirmToken: args.confirmToken,
         });
         if (gate) return gate;
-        for (const row of rows) await openUnreadBody(client, cache, row);
+        const markedRead = result.markedRead ?? [];
+        for (const row of rows) markedRead.push(await openUnreadBody(client, cache, row));
+        result.markedRead = markedRead;
       }
       const opened = new Set(rows.map((row) => row.id));
-      const before = result.unreadInbox.length;
-      result.unreadInbox = result.unreadInbox.filter((hint) => !opened.has(hint.id));
-      if (result.unreadInbox.length !== before) {
-        // Keep the note in step with unreadInbox: one payload, one count.
-        // syncAll always writes a note when it reports unread hints, and the
-        // count only moved because there were some, so the note is present.
-        const notes = (result.note as string).split('\n\n').filter((n) => n !== unreadInboxNote(before));
-        if (result.unreadInbox.length > 0) notes.push(unreadInboxNote(result.unreadInbox.length));
-        result.note = notes.length > 0 ? notes.join('\n\n') : undefined;
-      }
+      // unreadInbox keeps its PRE-sync meaning (these were unread when this
+      // call began), so an opened message stays listed — now bodyFetched.
+      // newMessages agrees, and the warning, markedReadCount and both note
+      // lines are recomputed so one payload never carries two counts.
+      result.unreadInbox = result.unreadInbox.map((hint) => (opened.has(hint.id) ? { ...hint, bodyFetched: true } : hint));
+      result.newMessages = result.newMessages.map((m) => (opened.has(m.id) ? { ...m, bodyFetched: true } : m));
+      refreshReadReporting(result);
       unreadBodies = { requested: true, fetched: true, opened: [...opened], ...(remaining > 0 ? { remaining } : {}) };
     }
 
@@ -2371,7 +2375,19 @@ Up to ${MAX_FILES_PER_CALL} files per call; each must be non-empty and at most 2
       source: 'cache',
       folders: args.folders ?? ['inbox', 'sent', 'drafts'],
     });
-    return jsonResponse({ ...result, ...(unreadBodies ? { unreadBodies } : {}), freshness });
+    // Emitted order is load-bearing (see "Paging state is emitted BEFORE the
+    // data array" in CLAUDE.md): the warning first, so even a truncated read
+    // learns that this sync marked messages read; the counts
+    // (newMessagesTotal / newMessagesTruncated / markedReadCount) next; the
+    // newMessages array LAST.
+    const { warning, newMessages, ...rest } = result;
+    return jsonResponse({
+      ...(warning ? { warning } : {}),
+      ...rest,
+      ...(unreadBodies ? { unreadBodies } : {}),
+      freshness,
+      newMessages,
+    });
   });
 
   server.registerTool('ofw_check_freshness', {
