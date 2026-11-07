@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.27.4](https://github.com/chrischall/ofw-mcp/compare/v2.27.3...v2.27.4) (2026-11-07)
+
+
+### Bug Fixes
+
+* **sync:** never mark inbox messages read during a sync, and report every new message ([#428](https://github.com/chrischall/ofw-mcp/issues/428)) ([2b478e5](https://github.com/chrischall/ofw-mcp/commit/2b478e5c6c62513bb6cd715464325efa48e3b24f))
+
+
+### Documentation
+
+* **sync:** explain that unreadInbox now keeps messages a sync opened ([#431](https://github.com/chrischall/ofw-mcp/issues/431)) ([8df05c3](https://github.com/chrischall/ofw-mcp/commit/8df05c3185f8bea8f3d0226129bd69d4aefde386))
+
 ## [2.27.3](https://github.com/chrischall/ofw-mcp/compare/v2.27.2...v2.27.3) (2026-11-07)
 
 
