@@ -196,11 +196,30 @@ describe('deriveRead', () => {
       expect(deriveRead(row)).toBe(true);
     });
 
-    it('falls back to the scraped list flags when nothing else says read', () => {
+    it('falls back to the inbox list\'s own `read` flag when nothing else says read', () => {
       const row = sampleMessageRow({
-        folder: 'inbox', fetchedBodyAt: null, listData: { showNeverViewed: false }, recipients: [],
+        folder: 'inbox', fetchedBodyAt: null, listData: { read: true, showNeverViewed: true }, recipients: [],
       });
       expect(deriveRead(row)).toBe(true);
+    });
+
+    it('does NOT treat showNeverViewed:false as read on an inbox row — fails closed', () => {
+      // The live shape of a brand-new UNREAD inbox message: OFW's inbox list
+      // carries read:false beside showNeverViewed:false. showNeverViewed is the
+      // sender-side "recipient never viewed" badge, not our unread state, so
+      // reading it as "read" let a fetch through that stamped First Viewed.
+      const row = sampleMessageRow({
+        folder: 'inbox', fetchedBodyAt: null, listData: { read: false, showNeverViewed: false },
+        recipients: [{ userId: SELF, name: 'Parent A', viewedAt: null }],
+      });
+      expect(deriveRead(row)).toBe(false);
+    });
+
+    it('reads a missing or non-boolean inbox `read` flag as UNREAD', () => {
+      for (const listData of [{ showNeverViewed: false }, { read: 'true', showNeverViewed: false }, {}]) {
+        const row = sampleMessageRow({ folder: 'inbox', fetchedBodyAt: null, listData, recipients: [] });
+        expect(deriveRead(row)).toBe(false);
+      }
     });
 
     it('is false for an untouched, never-viewed inbox message', () => {
@@ -243,6 +262,13 @@ describe('deriveRead', () => {
     it('falls back to the scraped showNeverViewed flag', () => {
       const row = sampleMessageRow({
         folder: 'sent', fetchedBodyAt: null, listData: { showNeverViewed: false }, recipients: [],
+      });
+      expect(deriveRead(row)).toBe(true);
+    });
+
+    it('also honours the scraped `read` flag, as before', () => {
+      const row = sampleMessageRow({
+        folder: 'sent', fetchedBodyAt: null, listData: { read: true, showNeverViewed: true }, recipients: [],
       });
       expect(deriveRead(row)).toBe(true);
     });

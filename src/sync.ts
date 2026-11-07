@@ -5,9 +5,10 @@ import type {
   MessageRow, DraftRow, FolderName,
 } from './cache/store.js';
 import { z } from 'zod';
-import { ApiRecipientSchema, hasRealView, mapRecipients, threadedReplyTo } from './tools/_shared.js';
+import { ApiRecipientSchema, hasRealView, mapRecipients, scrapeSaysRead, threadedReplyTo } from './tools/_shared.js';
+import { senderOf } from './tools/project.js';
 import { parseLenient } from '@chrischall/mcp-utils';
-import { nowNaiveWallClock } from './timestamps.js';
+import { displayTimeZone, nowNaiveWallClock, parseTimestampValue } from './timestamps.js';
 import { readingBlockedToday } from './read-days.js';
 
 // Each OFW message detail returns `files: [fileId, ...]`. We fetch the metadata
@@ -154,14 +155,18 @@ export async function resolveFolderIds(client: OFWClient, store: CacheStore): Pr
 }
 
 // Required fields are the ones the sync loop reads unguarded (id keys the
-// cache; showNeverViewed drives unread semantics — per CLAUDE.md it's the
-// only reliable unread indicator, so its disappearance must warn loudly).
+// cache; showNeverViewed is the SENT folder's read signal, so its
+// disappearance must warn loudly). `read` is the INBOX list's own read flag —
+// the only inbox read evidence (see scrapeSaysRead). It stays optional because
+// sent items need not carry it, and a missing inbox `read` already fails
+// closed to "unread", which is the safe answer.
 const ListItemSchema = z.looseObject({
   id: z.number(),
   subject: z.string(),
   date: z.looseObject({ dateTime: z.string() }),
   from: z.looseObject({ name: z.string().optional() }).optional(),
   showNeverViewed: z.boolean(),
+  read: z.boolean().optional(),
   recipients: z.array(ApiRecipientSchema).optional(),
 });
 type ListItem = z.infer<typeof ListItemSchema>;
@@ -175,16 +180,86 @@ const DetailResponseSchema = z.looseObject({
   recipients: z.array(ApiRecipientSchema).optional(),
 });
 
+/**
+ * A new inbox message that was UNREAD per the list when this sync first saw
+ * it — the state BEFORE the sync touched anything. `bodyFetched` says whether
+ * this call then opened it (only ever under fetchUnreadBodies, which is also
+ * reported in `markedRead`); `false` means it is still unread on OFW.
+ */
 export interface UnreadHint {
   id: number;
   subject: string;
   from: string;
   sentAt: string;
+  bodyFetched: boolean;
+}
+
+/** A message first cached by THIS sync, inbox or sent, read or unread. */
+export interface NewMessageHint {
+  id: number;
+  folder: 'inbox' | 'sent';
+  /** The sender's name, or null when OFW named none (never a guessed ''). */
+  from: string | null;
+  subject: string;
+  sentAt: string;
+  /** Read state per the LIST, before this sync touched it (scrapeSaysRead). */
+  read: boolean;
+  /** Whether this sync fetched its body. */
+  bodyFetched: boolean;
+}
+
+/**
+ * An inbox message this sync marked READ on OurFamilyWizard by fetching its
+ * detail. `fetchUnreadBodies` = the caller asked for it; `unexpected` = the
+ * detail's own view time shows our fetch stamped a message the list called
+ * read (see stampedByFetch) — the belt-and-braces check that makes a leak in
+ * the read-state rule visible instead of silent.
+ */
+export interface MarkedReadHint {
+  id: number;
+  subject: string;
+  from: string | null;
+  sentAt: string;
+  /** The view time OFW reported after the fetch, or null when it echoed none. */
+  viewedAt: string | null;
+  reason: 'fetchUnreadBodies' | 'unexpected';
+}
+
+/**
+ * How far BEFORE the request start a detail's view time may fall and still
+ * count as stamped by that request. OFW reports view times to the second
+ * (truncation costs up to 1 s) and its clock is not ours; 2 s absorbs both
+ * without blaming us for a view that genuinely happened earlier.
+ */
+export const STAMP_TOLERANCE_MS = 2000;
+
+/**
+ * True when `viewedAt` (OFW's naive wall clock, read in DISPLAY_TZ like every
+ * other OFW time) is at or after `startedAtMs` less STAMP_TOLERANCE_MS — i.e.
+ * the fetch that began at `startedAtMs` is what stamped it. A missing or
+ * unparseable time is not evidence. If DISPLAY_TZ does not match the
+ * account's zone the comparison is off by the offset; this check is a
+ * backstop for the read-state rule, never a substitute for it.
+ */
+export function stampedByFetch(viewedAt: string | null, startedAtMs: number): boolean {
+  if (viewedAt === null) return false;
+  const at = parseTimestampValue('viewedAt', viewedAt, displayTimeZone());
+  return at !== null && at.getTime() >= startedAtMs - STAMP_TOLERANCE_MS;
+}
+
+/** The latest real (non-placeholder) view time on a detail's recipients. */
+export function latestViewedAt(recipients: ListItem['recipients']): string | null {
+  const times = mapRecipients(recipients).map((r) => r.viewedAt).filter((t): t is string => t !== null);
+  return times.length === 0 ? null : times.sort().at(-1)!;
 }
 
 export interface MessageSyncResult {
   synced: number;
   unread: UnreadHint[];
+  /** Every message first cached by this call (unsorted, uncapped). */
+  newMessages: NewMessageHint[];
+  /** Inbox messages this call marked read on OFW (see MarkedReadHint). */
+  markedRead: MarkedReadHint[];
   /** True when the folder walk completed within budget; false when it paused. */
   done: boolean;
   /**
@@ -201,6 +276,8 @@ export interface MessageSyncResult {
 interface WalkTotals {
   synced: number;
   unread: UnreadHint[];
+  newMessages: NewMessageHint[];
+  markedRead: MarkedReadHint[];
   /** Highest message id seen on the pages this walk actually fetched. */
   newestId: number | null;
   /**
@@ -267,11 +344,40 @@ async function walkPages(
   let synced = 0;
   let pagesFetched = 0;
   const unread: UnreadHint[] = [];
+  const newMessages: NewMessageHint[] = [];
+  const markedRead: MarkedReadHint[] = [];
+  const totals = (): WalkTotals => ({ synced, unread, newMessages, markedRead, newestId, pagesFetched });
+
+  /**
+   * GET one message's detail. For an INBOX message, compare the view time OFW
+   * now reports with when the request began: a view at/after it means this
+   * fetch stamped "First Viewed", and that is reported, never silent.
+   * `deliberate` = the caller asked for unread bodies, so it is reported
+   * whatever the echo says.
+   */
+  const fetchDetail = async (item: ListItem, row: Pick<MessageRow, 'subject' | 'sentAt'> & { from: string | null }, context: string, deliberate: boolean) => {
+    const startedAt = Date.now();
+    const detail = parseLenient(
+      DetailResponseSchema,
+      await client.request('GET', `/pub/v3/messages/${item.id}`),
+      { label: 'ofw-mcp', context },
+    );
+    if (folder === 'inbox') {
+      const viewedAt = latestViewedAt(detail.recipients);
+      if (deliberate || stampedByFetch(viewedAt, startedAt)) {
+        markedRead.push({
+          id: item.id, subject: row.subject, from: row.from, sentAt: row.sentAt, viewedAt,
+          reason: deliberate ? 'fetchUnreadBodies' : 'unexpected',
+        });
+      }
+    }
+    return detail;
+  };
 
   while (true) {
     // One unit per list-page fetch. Out of budget → pause and resume at `page`.
     if (!budget.take()) {
-      return { synced, unread, newestId, pagesFetched, done: false, nextPage: page };
+      return { ...totals(), done: false, nextPage: page };
     }
     const path = `/pub/v3/messages?folders=${encodeURIComponent(folderId)}&page=${page}&size=50&sort=date&sortDirection=desc`;
     const list = parseLenient(
@@ -282,7 +388,7 @@ async function walkPages(
     pagesFetched++;
     const items = list.data ?? [];
     if (items.length === 0) {
-      return { synced, unread, newestId, pagesFetched, done: true, nextPage: null };
+      return { ...totals(), done: true, nextPage: null };
     }
 
     // One batch read of this page's ids (S1) instead of a per-item getMessage.
@@ -297,18 +403,23 @@ async function walkPages(
     for (const item of items) {
       if (newestId === null || item.id > newestId) newestId = item.id;
       const existing = existingById.get(item.id);
-      const isInboxUnread = folder === 'inbox' && item.showNeverViewed === true;
+      // Read per the LIST, before we touch anything. For inbox that is the
+      // list's own `read === true` and nothing else: `showNeverViewed` on the
+      // inbox list is the sender-side badge and reads false on a message we
+      // never opened, so trusting it fetched — and stamped — unread bodies.
+      // Missing/non-boolean `read` fails closed to unread (scrapeSaysRead).
+      const listRead = scrapeSaysRead(folder, item);
+      const isInboxUnread = folder === 'inbox' && !listRead;
       if (existing) {
         // Heal a row cached without its body — typically one listed on a
         // no-read day — once fetching it can stamp nothing: a sent message, or
-        // an inbox message OFW already reports as read. An unread inbox body
+        // an inbox message OFW's list reports as read. An unread inbox body
         // stays the caller's explicit choice (ofw_get_message), as before.
         if (opts.fetchBodies && existing.body === null && !isInboxUnread) {
           if (!budget.take()) { pageBudgetHit = true; break; }
-          const detail = parseLenient(
-            DetailResponseSchema,
-            await client.request('GET', `/pub/v3/messages/${item.id}`),
-            { label: 'ofw-mcp', context: 'GET /pub/v3/messages/{id} (body backfill)' },
+          const detail = await fetchDetail(
+            item, { subject: existing.subject, sentAt: existing.sentAt, from: senderOf(existing) },
+            'GET /pub/v3/messages/{id} (body backfill)', false,
           );
           toUpsert.push({
             ...existing,
@@ -359,41 +470,51 @@ async function walkPages(
       // already read by the time we first saw it — reporting "never viewed" for
       // a message OFW shows as read, until a later sync's refresh healed it.
       let detailRecipients: ListItem['recipients'];
-      if (shouldFetchBody) {
-        if (!budget.take()) { pageBudgetHit = true; break; }
-        const detail = parseLenient(
-          DetailResponseSchema,
-          await client.request('GET', `/pub/v3/messages/${item.id}`),
-          { label: 'ofw-mcp', context: 'GET /pub/v3/messages/{id} (sync)' },
-        );
-        body = detail.body ?? '';
-        fetchedBodyAt = new Date().toISOString();
-        detailRecipients = detail.recipients;
-        if (Array.isArray(detail.files) && detail.files.length > 0) {
-          detailFileIds = detail.files;
-        }
-      } else if (isInboxUnread) {
-        unread.push({
-          id: item.id,
-          subject: item.subject,
-          from: item.from?.name ?? '',
-          sentAt: item.date.dateTime,
-        });
-      }
-
+      // The row as the list describes it; the detail (if fetched) fills in
+      // body and real view times below.
       const row: MessageRow = {
         id: item.id,
         folder,
         subject: item.subject ?? '(no subject)',
         fromUser: item.from?.name ?? '',
         sentAt: item.date?.dateTime ?? nowNaiveWallClock(),
-        recipients: mapRecipients(detailRecipients ?? item.recipients),
-        body,
-        fetchedBodyAt,
+        recipients: mapRecipients(item.recipients),
+        body: null,
+        fetchedBodyAt: null,
         replyToId: null,
         chainRootId: null,
         listData: item,
       };
+      const from = senderOf(row);
+      if (shouldFetchBody) {
+        if (!budget.take()) { pageBudgetHit = true; break; }
+        // Reached for an unread inbox message only under fetchUnreadBodies.
+        const detail = await fetchDetail(item, { subject: row.subject, sentAt: row.sentAt, from }, 'GET /pub/v3/messages/{id} (sync)', isInboxUnread);
+        body = detail.body ?? '';
+        fetchedBodyAt = new Date().toISOString();
+        detailRecipients = detail.recipients;
+        if (Array.isArray(detail.files) && detail.files.length > 0) {
+          detailFileIds = detail.files;
+        }
+      }
+      if (isInboxUnread) {
+        // Pre-sync state: listed even when fetchUnreadBodies then opened it.
+        unread.push({
+          id: item.id,
+          subject: item.subject,
+          from: from ?? '',
+          sentAt: item.date.dateTime,
+          bodyFetched: shouldFetchBody,
+        });
+      }
+      newMessages.push({
+        id: item.id, folder, from, subject: row.subject, sentAt: row.sentAt,
+        read: listRead, bodyFetched: shouldFetchBody,
+      });
+
+      row.body = body;
+      row.fetchedBodyAt = fetchedBodyAt;
+      if (detailRecipients) row.recipients = mapRecipients(detailRecipients);
       toUpsert.push(row);
       synced++;
       if (detailFileIds.length > 0) {
@@ -411,7 +532,7 @@ async function walkPages(
     if (pageBudgetHit) {
       // Paused mid-page. Resume at THIS page: the partial rows are cached, so
       // getMessages skips them next time and upserts are idempotent.
-      return { synced, unread, newestId, pagesFetched, done: false, nextPage: page };
+      return { ...totals(), done: false, nextPage: page };
     }
 
     // Reached cached history (see `stopAtCachedPage`). Report THIS page as the
@@ -419,7 +540,7 @@ async function walkPages(
     // all-cached) fetch if a backfill later starts here, and it cannot skip a
     // message the way an off-by-one `page + 1` could.
     if (opts.stopAtCachedPage && !pageHadNewItem) {
-      return { synced, unread, newestId, pagesFetched, done: true, nextPage: page };
+      return { ...totals(), done: true, nextPage: page };
     }
     page++;
   }
@@ -465,6 +586,8 @@ export async function syncMessageFolder(
 
   let synced = fwd.synced;
   const unread = [...fwd.unread];
+  const newMessages = [...fwd.newMessages];
+  const markedRead = [...fwd.markedRead];
   // Never regress the folder's newest id: a pass that only walked cached pages
   // still saw page 1, but a paused one may not have.
   let newestId = maxId(saved?.newestId ?? null, fwd.newestId);
@@ -513,6 +636,8 @@ export async function syncMessageFolder(
     }, store);
     synced += bf.synced;
     unread.push(...bf.unread);
+    newMessages.push(...bf.newMessages);
+    markedRead.push(...bf.markedRead);
     newestId = maxId(newestId, bf.newestId);
     done = bf.done;
     resumePage = bf.done ? null : bf.nextPage;
@@ -527,7 +652,7 @@ export async function syncMessageFolder(
   // sync (buildFreshness downgrades when lastSyncAt runs ahead of verifiedAt).
   if (fwd.done) await markFolderVerified(store, folder, now);
 
-  return { synced, unread, done, verified: fwd.done };
+  return { synced, unread, newMessages, markedRead, done, verified: fwd.done };
 }
 
 const DraftListItemSchema = z.looseObject({
@@ -773,11 +898,22 @@ export interface SyncAllOptions {
 
 export interface SyncAllResult {
   /**
+   * Present only when `markedRead` is non-empty: a loud, top-of-payload
+   * statement that this sync marked messages read on OurFamilyWizard.
+   */
+  warning?: string;
+  /**
    * Per-folder count of messages/drafts applied. A key is present ONLY when
    * that folder was actually diffed against OFW — see `notRefreshed`. A `0`
    * here always means "verified, nothing changed", never "not looked at".
    */
   synced: Partial<Record<FolderName, number>>;
+  /** Always present; `markedRead` is omitted when this is 0. */
+  markedReadCount: number;
+  /** Every message first cached by this call, before the cap. */
+  newMessagesTotal: number;
+  /** True when `newMessages` holds only the newest NEW_MESSAGES_CAP of them. */
+  newMessagesTruncated: boolean;
   unreadInbox: UnreadHint[];
   /** True only when every requested folder completed within the budget. */
   done: boolean;
@@ -794,6 +930,31 @@ export interface SyncAllResult {
   /** Present (true) when today is a no-read day and no message body was fetched. */
   bodiesWithheld?: true;
   note?: string;
+  /** Inbox messages this call marked read on OFW. Omitted when none. */
+  markedRead?: MarkedReadHint[];
+  /**
+   * Every message first cached by this call, inbox and sent, read or unread,
+   * newest first, capped at NEW_MESSAGES_CAP. Always present (`[]` when none).
+   * Emitted after the counts above so a truncated read reaches "this is a
+   * slice" before the array.
+   */
+  newMessages: NewMessageHint[];
+}
+
+/**
+ * The most new messages one sync response lists. A first sync of a large
+ * account caches thousands of rows; echoing them all would make the response
+ * the problem (see "Response shape" in CLAUDE.md). The newest are the ones a
+ * caller acts on, `newMessagesTotal` keeps the real count, and
+ * `newMessagesTruncated` says the array is a slice — ofw_list_messages pages
+ * through the rest.
+ */
+export const NEW_MESSAGES_CAP = 50;
+
+/** Newest first: by sentAt (OFW's uniform naive format sorts as text), then id. */
+function newestFirst(a: NewMessageHint, b: NewMessageHint): number {
+  if (a.sentAt !== b.sentAt) return a.sentAt < b.sentAt ? 1 : -1;
+  return b.id - a.id;
 }
 
 /**
@@ -804,6 +965,49 @@ export interface SyncAllResult {
  */
 export function unreadInboxNote(count: number): string {
   return `${count} unread inbox messages cached without bodies. Call ofw_get_message(id) to read them — this will mark them as read on OFW.`;
+}
+
+const MARKED_READ_LEAD = 'MARKED READ on OurFamilyWizard by this sync:';
+
+/**
+ * The note line for messages this sync marked read. Exported, like
+ * unreadInboxNote, so ofw_sync_messages can rewrite it after a confirmed open.
+ */
+export function markedReadNote(markedRead: MarkedReadHint[]): string {
+  const unexpected = markedRead.filter((m) => m.reason === 'unexpected').length;
+  return `${MARKED_READ_LEAD} ${markedRead.length} inbox message${markedRead.length === 1 ? '' : 's'} (ids ${markedRead.map((m) => m.id).join(', ')}). Each now carries a "First Viewed" time your co-parent can see; it cannot be undone.${unexpected > 0 ? ` ${unexpected} of them ${unexpected === 1 ? 'was' : 'were'} NOT requested (reason "unexpected").` : ''}`;
+}
+
+/** The top-level `warning` for messages this sync marked read. */
+export function markedReadWarning(markedRead: MarkedReadHint[]): string {
+  const unexpected = markedRead.filter((m) => m.reason === 'unexpected').length;
+  return `WARNING: this sync marked ${markedRead.length} inbox message${markedRead.length === 1 ? '' : 's'} READ on OurFamilyWizard (see markedRead). Your co-parent can see the "First Viewed" time, and it cannot be undone.${unexpected > 0 ? ` ${unexpected} of them ${unexpected === 1 ? 'was' : 'were'} NOT requested: the list reported ${unexpected === 1 ? 'it' : 'them'} as already read, but the fetch stamped ${unexpected === 1 ? 'it' : 'them'}. Tell the user, and report this as a bug.` : ''}`;
+}
+
+/**
+ * Recompute everything in a sync result DERIVED from `markedRead` and
+ * `unreadInbox` — `warning`, `markedReadCount`, and their two note lines —
+ * from the arrays as they now stand. syncAll calls it once; ofw_sync_messages
+ * calls it again after a confirmed open adds to them, so one payload never
+ * carries two counts for the same thing. Other note lines keep their order.
+ */
+export function refreshReadReporting(result: SyncAllResult): void {
+  const markedRead = result.markedRead ?? [];
+  const notes = (result.note === undefined ? [] : result.note.split('\n\n'))
+    .filter((n) => !n.startsWith(MARKED_READ_LEAD) && !/^\d+ unread inbox messages cached without bodies\./.test(n));
+  const bodiless = result.unreadInbox.filter((h) => !h.bodyFetched).length;
+  if (bodiless > 0) notes.push(unreadInboxNote(bodiless));
+  if (markedRead.length > 0) notes.unshift(markedReadNote(markedRead));
+  result.note = notes.length > 0 ? notes.join('\n\n') : undefined;
+  if (result.note === undefined) delete result.note;
+  result.markedReadCount = markedRead.length;
+  if (markedRead.length > 0) {
+    result.warning = markedReadWarning(markedRead);
+    result.markedRead = markedRead;
+  } else {
+    delete result.warning;
+    delete result.markedRead;
+  }
 }
 
 export async function syncAll(client: OFWClient, opts: SyncAllOptions, store: CacheStore): Promise<SyncAllResult> {
@@ -832,6 +1036,8 @@ export async function syncAll(client: OFWClient, opts: SyncAllOptions, store: Ca
   const ids = await resolveFolderIds(client, store);
   const synced: Partial<Record<FolderName, number>> = {};
   let unreadInbox: UnreadHint[] = [];
+  const newMessages: NewMessageHint[] = [];
+  const markedRead: MarkedReadHint[] = [];
   let done = true;
   let draftsUnverified = false;
   const refreshed: FolderName[] = [];
@@ -860,6 +1066,8 @@ export async function syncAll(client: OFWClient, opts: SyncAllOptions, store: Ca
       }, store);
       record('inbox', r.verified, r.synced);
       unreadInbox = r.unread;
+      newMessages.push(...r.newMessages);
+      markedRead.push(...r.markedRead);
       if (!r.done) done = false;
     } else if (folder === 'sent') {
       const r = await syncMessageFolder(client, 'sent', ids.sent, {
@@ -869,6 +1077,8 @@ export async function syncAll(client: OFWClient, opts: SyncAllOptions, store: Ca
         budget,
       }, store);
       record('sent', r.verified, r.synced);
+      // A sent detail never stamps OUR read state, so it adds no markedRead.
+      newMessages.push(...r.newMessages);
       if (!r.done) done = false;
     } else if (folder === 'drafts') {
       const r = await syncDrafts(client, ids.drafts, store, budget);
@@ -891,9 +1101,6 @@ export async function syncAll(client: OFWClient, opts: SyncAllOptions, store: Ca
   if (draftsUnverified) {
     notes.push('The drafts folder was NOT checked against OurFamilyWizard on this call (the request budget ran out first), so no drafts count is reported and the cached drafts are marked "unverified". Cached draft bodies may be behind the server. Call ofw_sync_messages again — or ofw_sync_messages with folders:["drafts"] — before editing or deleting a draft.');
   }
-  if (unreadInbox.length > 0) {
-    notes.push(unreadInboxNote(unreadInbox.length));
-  }
   if (notRefreshed.length > 0) {
     notes.push(`NOT checked against OurFamilyWizard on this call: ${notRefreshed.join(', ')}. No count is reported for ${notRefreshed.length > 1 ? 'those folders' : 'that folder'} — absence of a count means "not looked at", not "no changes". Cached contents may be behind the server; call ofw_sync_messages again to finish, or ofw_check_freshness for a cheap live confirmation.`);
   }
@@ -901,15 +1108,27 @@ export async function syncAll(client: OFWClient, opts: SyncAllOptions, store: Ca
     notes.push('Paused after the request budget to stay within the hosting limit; more pages remain — call ofw_sync_messages again with the same arguments to resume where it left off and continue the backfill.');
   }
   const note = notes.length > 0 ? notes.join('\n\n') : undefined;
+  newMessages.sort(newestFirst);
 
-  return {
+  // Key order is the emitted order: the warning first (a truncated read must
+  // hit it), counts before arrays, newMessages last. `warning` is declared
+  // here as a placeholder so refreshReadReporting fills it IN PLACE.
+  const result: SyncAllResult = {
+    warning: undefined,
     synced,
+    markedReadCount: 0,
+    newMessagesTotal: newMessages.length,
+    newMessagesTruncated: newMessages.length > NEW_MESSAGES_CAP,
     unreadInbox,
     done,
     syncComplete: done,
     refreshed,
     notRefreshed,
     ...(readingBlocked ? { bodiesWithheld: true as const } : {}),
-    ...(note ? { note } : {}),
+    note,
+    markedRead,
+    newMessages: newMessages.slice(0, NEW_MESSAGES_CAP),
   };
+  refreshReadReporting(result);
+  return result;
 }

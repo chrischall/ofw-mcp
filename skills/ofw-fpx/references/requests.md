@@ -40,14 +40,18 @@ curl -s 'https://ofw.ourfamilywizard.com/pub/v1/messageFolders?includeFolderCoun
 ```
 
 **List messages in a folder** (date-desc, 50/page is what the MCP's sync
-uses; unread inbox items carry `showNeverViewed: true` — the reliable
-unread signal, per CLAUDE.md):
+uses). On the INBOX list, an item is read only when it carries
+`read: true`; anything else (`read: false`, or no `read` at all) means
+unread. Do NOT use `showNeverViewed` for the inbox: it is the sender-side
+"recipient never viewed" badge and is `false` on a brand-new message you
+have never opened. For SENT items, `showNeverViewed: false` means the
+recipient has viewed it:
 
 ```sh
 FOLDER_ID=<id from above>
 curl -s "https://ofw.ourfamilywizard.com/pub/v3/messages?folders=${FOLDER_ID}&page=1&size=50&sort=date&sortDirection=desc" \
   "${AUTH_HEADERS[@]}" \
-  | jq '.data[] | {id, subject, sentAt: .date.dateTime, from: .from.name, showNeverViewed}'
+  | jq '.data[] | {id, subject, sentAt: .date.dateTime, from: (.author.name // .from.name), read, showNeverViewed}'
 ```
 
 **Message/draft detail by id** (GETting an unread inbox message marks it

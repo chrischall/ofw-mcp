@@ -135,7 +135,7 @@ Read-only tools run automatically. Writes that reach your co-parent or the court
 | `ofw_list_message_folders` | Folders with unread counts — **get folder IDs here before listing messages** | Auto | any |
 | `ofw_list_messages` | Messages in a folder | Auto | any |
 | `ofw_get_message` | Full content of a single message | Auto | any |
-| `ofw_sync_messages` | Sync messages into the local cache (unread bodies left unfetched to avoid read receipts) | Auto | any |
+| `ofw_sync_messages` | Sync messages into the local cache and list every new message (`newMessages`). Unread inbox bodies are left unfetched, so a sync never marks anything read unless you ask for it; if it ever does, the response says so (`warning`, `markedRead`) | Auto | any |
 | `ofw_get_unread_sent` | Sent messages a recipient hasn't read yet (from local cache) | Auto | any |
 | `ofw_check_freshness` | Cheap live check that the cache still matches OFW — per id, whether it is still a `draft` or was `sent`/`deleted`, without a full sync | Auto | any |
 | `ofw_status` | **One live call for "where does everything stand?"** — the full verified draft inventory, and the current state of any ids or draft keys | Auto | any |

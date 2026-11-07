@@ -115,6 +115,83 @@ describe('ofw_list_message_folders', () => {
 });
 
 describe('ofw_sync_messages', () => {
+  const folders = {
+    systemFolders: [
+      { id: '111', folderType: 'INBOX' },
+      { id: '222', folderType: 'SENT_MESSAGES' },
+      { id: '333', folderType: 'DRAFTS' },
+    ],
+  };
+  // The live shape of a brand-new UNREAD inbox message. Placeholders only.
+  const liveUnread = {
+    id: 100001, subject: 'Pickup time', author: { name: 'Parent B' }, date: { dateTime: '2026-05-04T12:00:00' },
+    read: false, showNeverViewed: false, recipients: [],
+  };
+  const serve = (detail: unknown) => {
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request').mockImplementation(async (_m: string, path: string) => {
+      if (path.startsWith('/pub/v1/messageFolders')) return folders;
+      if (path.includes('folders=111') && path.includes('page=1&')) return { data: [liveUnread] };
+      if (path.includes('folders=')) return { data: [] };
+      return detail;
+    });
+    return { client, spy };
+  };
+
+  it('a plain sync never opens a new unread message — it reports it in newMessages, LAST', async () => {
+    const { client, spy } = serve({ body: 'never fetched' });
+    setup(client);
+
+    const result = await handlers.get('ofw_sync_messages')!({});
+    const text = result.content[0].text as string;
+    const parsed = JSON.parse(text);
+
+    expect(spy).not.toHaveBeenCalledWith('GET', '/pub/v3/messages/100001');
+    expect(getMessage(100001)!.body).toBeNull();
+    expect(parsed.newMessages).toEqual([
+      { id: 100001, folder: 'inbox', from: 'Parent B', subject: 'Pickup time', sentAt: '2026-05-04T12:00:00-04:00', sentAtDisplay: 'Mon, May 4, 2026, 12:00 PM EDT', read: false, bodyFetched: false },
+    ]);
+    expect(parsed.unreadInbox.map((u: { id: number; from: string }) => [u.id, u.from])).toEqual([[100001, 'Parent B']]);
+    expect(parsed.markedReadCount).toBe(0);
+    expect(parsed).not.toHaveProperty('markedRead');
+    expect(parsed).not.toHaveProperty('warning');
+    // Counts before the array; the array is the last key.
+    const keys = Object.keys(parsed);
+    expect(keys.at(-1)).toBe('newMessages');
+    expect(keys.indexOf('newMessagesTotal')).toBeLessThan(keys.indexOf('newMessages'));
+    expect(keys.indexOf('newMessagesTruncated')).toBeLessThan(keys.indexOf('newMessages'));
+    expect(text.indexOf('"newMessagesTotal"')).toBeLessThan(text.indexOf('"newMessages"'));
+  });
+
+  it('fetchUnreadBodies:true opens it and leads the response with a warning and markedRead', async () => {
+    const { client, spy } = serve({ body: 'hello', recipients: [] });
+    setup(client);
+
+    const parsed = JSON.parse((await handlers.get('ofw_sync_messages')!({ fetchUnreadBodies: true })).content[0].text);
+
+    expect(spy).toHaveBeenCalledWith('GET', '/pub/v3/messages/100001');
+    expect(Object.keys(parsed)[0]).toBe('warning');
+    expect(parsed.warning).toMatch(/co-parent can see/);
+    expect(parsed.markedReadCount).toBe(1);
+    expect(parsed.markedRead).toEqual([expect.objectContaining({ id: 100001, from: 'Parent B', reason: 'fetchUnreadBodies' })]);
+    expect(parsed.unreadInbox).toEqual([expect.objectContaining({ id: 100001, bodyFetched: true })]);
+    expect(parsed.newMessages).toEqual([expect.objectContaining({ id: 100001, read: false, bodyFetched: true })]);
+  });
+
+  it('its description promises the never-marks-read guarantee and names the new fields', () => {
+    const server = new McpServer({ name: 'test', version: '0.0.0' });
+    const configs = new Map<string, { description: string }>();
+    vi.spyOn(server, 'registerTool').mockImplementation((name: string, config: unknown) => {
+      configs.set(name, config as { description: string });
+      return undefined as never;
+    });
+    registerMessageTools(server, new OFWClient(), cacheProvider, attachmentIO);
+    const description = configs.get('ofw_sync_messages')!.description;
+    expect(description).toMatch(/NEVER marks a message read unless fetchUnreadBodies/);
+    expect(description).toMatch(/newMessages/);
+    expect(description).toMatch(/markedRead/);
+  });
+
   it('syncs all folders by default and returns counts plus unread hint', async () => {
     const client = new OFWClient();
     vi.spyOn(client, 'request')
@@ -2821,6 +2898,22 @@ describe('mark-read gate (issue #192)', () => {
     expect(spy).not.toHaveBeenCalled();
   });
 
+  it('OFW_ALLOW_MARK_READ=false refuses the LIVE unread shape (read:false beside showNeverViewed:false)', async () => {
+    // On the inbox list showNeverViewed is the sender-side badge, not our read
+    // state. The old rule read showNeverViewed:false as "already read" and
+    // waved this fetch past the ceiling — the leak that stamped First Viewed.
+    process.env[KEY] = 'false';
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request');
+    upsertMessage({ ...unreadInbox(709), listData: { id: 709, read: false, showNeverViewed: false } });
+    setup(client);
+
+    const result = await handlers.get('ofw_get_message')!({ messageId: '709' });
+    expect(result.isError).toBe(true);
+    expect(JSON.parse(result.content[0].text).error).toBe('MARK_READ_BLOCKED');
+    expect(spy).not.toHaveBeenCalled();
+  });
+
   it('OFW_ALLOW_MARK_READ=false is a ceiling: allowMarkRead:true cannot raise it', async () => {
     process.env[KEY] = 'false';
     const client = new OFWClient();
@@ -2924,6 +3017,18 @@ describe('mark-read confirmation (OFW_CONFIRM_MARK_READ)', () => {
   const detail = (id: number) => ({
     id, subject: 'Pickup Friday', body: 'live body', from: { name: 'Alice' },
     date: { dateTime: '2026-07-27T23:31:09' }, recipients: [],
+  });
+
+  it('routes the LIVE unread shape (read:false, showNeverViewed:false) through the confirmation too', async () => {
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request');
+    upsertMessage({ ...unreadInbox(909), listData: { id: 909, read: false, showNeverViewed: false, author: { name: 'Alice' } } });
+    setup(client);
+
+    const preview = await callPreview(handlers.get('ofw_get_message')!, { messageId: '909' });
+    expect(preview.action).toBe('ofw.message.mark_read');
+    expect(spy).not.toHaveBeenCalled();
+    expect(getMessage(909)!.body).toBeNull();
   });
 
   it('phase 1 shows subject, sender and timestamp and does NOT contact OFW', async () => {
@@ -3049,7 +3154,8 @@ describe('mark-read confirmation (OFW_CONFIRM_MARK_READ)', () => {
 
   describe('ofw_sync_messages fetchUnreadBodies under confirmation', () => {
     const emptySync = () => vi.spyOn(syncModule, 'syncAll').mockResolvedValue({
-      synced: { inbox: 0 }, unreadInbox: [], refreshed: ['inbox'], notRefreshed: [], done: true, syncComplete: true,
+      synced: { inbox: 0 }, markedReadCount: 0, newMessagesTotal: 0, newMessagesTruncated: false,
+      unreadInbox: [], refreshed: ['inbox'], notRefreshed: [], done: true, syncComplete: true, newMessages: [],
     } as never);
 
     it('syncs WITHOUT stamping, then previews every unread message it would open — and opens none', async () => {
@@ -3088,6 +3194,11 @@ describe('mark-read confirmation (OFW_CONFIRM_MARK_READ)', () => {
       expect(parsed.unreadBodies).toMatchObject({ requested: true, fetched: true, opened: [922] });
       expect(getMessage(922)!.body).toBe('live body');
       expect(getMessage(922)!.fetchedBodyAt).not.toBeNull();
+      // A confirmed opening is still an opening: reported, loudly.
+      expect(parsed.markedReadCount).toBe(1);
+      expect(parsed.markedRead).toEqual([expect.objectContaining({ id: 922, subject: 'Pickup Friday', from: 'Alice', viewedAt: null, reason: 'fetchUnreadBodies' })]);
+      expect(Object.keys(parsed)[0]).toBe('warning');
+      expect(parsed.warning).toMatch(/READ on OurFamilyWizard/);
     });
 
     it('a client that can be prompted is asked, naming the messages, and nothing is fetched', async () => {
@@ -3124,38 +3235,46 @@ describe('mark-read confirmation (OFW_CONFIRM_MARK_READ)', () => {
       expect(getMessage(924)!.body).toBeNull();
     });
 
-    it('drops the opened messages from unreadInbox and from the note', async () => {
+    it('keeps opened messages in unreadInbox (pre-sync state) as bodyFetched, and drops them from the unread note', async () => {
       const client = new OFWClient();
       vi.spyOn(client, 'request').mockResolvedValue(detail(930));
-      const hint = { id: 930, subject: 'Pickup Friday', from: 'Alice', sentAt: '2026-07-27T23:31:09' };
+      const hint = { id: 930, subject: 'Pickup Friday', from: 'Alice', sentAt: '2026-07-27T23:31:09', bodyFetched: false };
+      const fresh = { id: 930, folder: 'inbox', from: 'Alice', subject: 'Pickup Friday', sentAt: '2026-07-27T23:31:09', read: false, bodyFetched: false };
       vi.spyOn(syncModule, 'syncAll').mockResolvedValue({
-        synced: { inbox: 1 }, unreadInbox: [hint], refreshed: ['inbox'], notRefreshed: [], done: true, syncComplete: true,
-        note: syncModule.unreadInboxNote(1),
+        synced: { inbox: 1 }, markedReadCount: 0, newMessagesTotal: 1, newMessagesTruncated: false,
+        unreadInbox: [hint], refreshed: ['inbox'], notRefreshed: [], done: true, syncComplete: true,
+        note: syncModule.unreadInboxNote(1), newMessages: [fresh],
       } as never);
       upsertMessage(unreadInbox(930));
       setup(client);
 
       const parsed = JSON.parse((await callConfirmed(handlers.get('ofw_sync_messages')!, { fetchUnreadBodies: true })).content[0].text);
-      expect(parsed.unreadInbox).toEqual([]);
-      expect(parsed.note).toBeUndefined();
+      // (jsonResponse adds the sentAt offset + sentAtDisplay; the rest is as sent.)
+      expect(parsed.unreadInbox).toEqual([expect.objectContaining({ ...hint, sentAt: '2026-07-27T23:31:09-04:00', bodyFetched: true })]);
+      expect(parsed.newMessages).toEqual([expect.objectContaining({ ...fresh, sentAt: '2026-07-27T23:31:09-04:00', bodyFetched: true })]);
+      expect(parsed.note).not.toContain('cached without bodies');
+      expect(parsed.note).toBe(syncModule.markedReadNote(parsed.markedRead));
     });
 
     it('keeps the other notes and recounts the unread still waiting', async () => {
       const client = new OFWClient();
       vi.spyOn(client, 'request').mockResolvedValue(detail(931));
-      const hint = (id: number) => ({ id, subject: 'S', from: 'Alice', sentAt: '2026-07-27T23:31:09' });
+      const hint = (id: number) => ({ id, subject: 'S', from: 'Alice', sentAt: '2026-07-27T23:31:09', bodyFetched: false });
       const paused = 'Paused after the request budget.';
       vi.spyOn(syncModule, 'syncAll').mockResolvedValue({
         // 932 is a hint the cache does not hold, so it is not opened.
-        synced: { inbox: 2 }, unreadInbox: [hint(931), hint(932)], refreshed: ['inbox'], notRefreshed: [], done: false, syncComplete: false,
+        synced: { inbox: 2 }, markedReadCount: 0, newMessagesTotal: 0, newMessagesTruncated: false,
+        unreadInbox: [hint(931), hint(932)], refreshed: ['inbox'], notRefreshed: [], done: false, syncComplete: false,
         note: `${syncModule.unreadInboxNote(2)}\n\n${paused}`,
+        newMessages: [931, 932].map((id) => ({ id, folder: 'inbox', from: 'Alice', subject: 'S', sentAt: '2026-07-27T23:31:09', read: false, bodyFetched: false })),
       } as never);
       upsertMessage(unreadInbox(931));
       setup(client);
 
       const parsed = JSON.parse((await callConfirmed(handlers.get('ofw_sync_messages')!, { fetchUnreadBodies: true })).content[0].text);
-      expect(parsed.unreadInbox.map((h: { id: number }) => h.id)).toEqual([932]);
-      expect(parsed.note).toBe(`${paused}\n\n${syncModule.unreadInboxNote(1)}`);
+      expect(parsed.unreadInbox.map((h: { id: number; bodyFetched: boolean }) => [h.id, h.bodyFetched])).toEqual([[931, true], [932, false]]);
+      expect(parsed.newMessages.map((m: { id: number; bodyFetched: boolean }) => [m.id, m.bodyFetched])).toEqual([[931, true], [932, false]]);
+      expect(parsed.note).toBe(`${syncModule.markedReadNote(parsed.markedRead)}\n\n${paused}\n\n${syncModule.unreadInboxNote(1)}`);
     });
 
     it('caches what OFW returned: attachments harvested, missing fields never invented', async () => {
@@ -3283,7 +3402,7 @@ describe('mark-read confirmation (OFW_CONFIRM_MARK_READ)', () => {
     const client = new OFWClient();
     const spy = vi.spyOn(client, 'request').mockResolvedValue({ systemFolders: [] });
     const syncSpy = vi.spyOn(syncModule, 'syncAll').mockResolvedValue({
-      synced: {}, refreshed: [], notRefreshed: [], syncComplete: true, unreadInbox: [], done: true,
+      synced: {}, refreshed: [], notRefreshed: [], syncComplete: true, unreadInbox: [], done: true, newMessages: [],
     } as never);
     setup(client);
 
