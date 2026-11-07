@@ -403,6 +403,10 @@ The one other host the server contacts is `*.oaiusercontent.com`, and only for `
 
 On a hosted connector the server also reaches mcp-host's own blob store (`MCP_BLOB_BASE_URL`, the gateway that serves the connector) with signed requests and no OFW credential. It stores `.ics` exports and download links, and reads (then deletes) files you upload through `uploadSlots`.
 
+## Upgrading
+
+**2.27.4 — `ofw_sync_messages` `unreadInbox` now reports the inbox as it was before the sync.** It used to drop any message the same call opened. Now a message opened by `fetchUnreadBodies` stays in `unreadInbox` with `bodyFetched: true`, and is also listed in `markedRead`. If you read every `unreadInbox` entry as "still unread", skip the ones with `bodyFetched: true` (or use `markedRead`). Without `fetchUnreadBodies` nothing changes: a sync does not open unread inbox messages, so every entry is still unread.
+
 ## Troubleshooting
 
 **"0 messages"** — Claude may have read the notification counts rather than the actual messages. Ask explicitly: *"List the messages in my OFW inbox"* or *"Use ofw_list_message_folders then ofw_list_messages"*.
