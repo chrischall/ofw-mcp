@@ -97,7 +97,8 @@ env:
       Allow list of days message content may be read, e.g. "mon,thu" (weekday
       names, YYYY-MM-DD, or YYYY-MM-DD..YYYY-MM-DD, in DISPLAY_TZ). On other
       days senders, dates and subjects stay visible, but bodies and attachments
-      are withheld and nothing is marked read. Unset = every day.
+      are withheld and nothing is marked read, unless you explicitly ask to read
+      anyway (overrideNoReadDay, which is logged). Unset = every day.
   - name: OFW_NO_READ_DAYS
     required: false
     help: >-

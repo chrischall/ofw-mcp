@@ -11,7 +11,7 @@ import { setReplyToSource } from './tools/reply-source.js';
 import { senderOf } from './tools/project.js';
 import { parseLenient } from '@chrischall/mcp-utils';
 import { displayTimeZone, nowNaiveWallClock, parseTimestampValue } from './timestamps.js';
-import { readingBlockedToday } from './read-days.js';
+import { READ_OVERRIDE_NOTE, readingBlockedToday } from './read-days.js';
 
 // Each OFW message detail returns `files: [fileId, ...]`. We fetch the metadata
 // for each file id (cheap JSON call) so the model can see filenames/mime types
@@ -336,6 +336,7 @@ async function walkPages(
      * day fills the bodies in — see the heal path below.
      */
     fetchBodies: boolean;
+    onBodyFetched?: (id: number) => void;
     budget: Budget;
   },
   store: CacheStore,
@@ -423,6 +424,7 @@ async function walkPages(
             item, { subject: existing.subject, sentAt: existing.sentAt, from: senderOf(existing) },
             'GET /pub/v3/messages/{id} (body backfill)', false,
           );
+          opts.onBodyFetched?.(item.id);
           toUpsert.push({
             ...existing,
             body: detail.body ?? '',
@@ -492,6 +494,7 @@ async function walkPages(
         if (!budget.take()) { pageBudgetHit = true; break; }
         // Reached for an unread inbox message only under fetchUnreadBodies.
         const detail = await fetchDetail(item, { subject: row.subject, sentAt: row.sentAt, from }, 'GET /pub/v3/messages/{id} (sync)', isInboxUnread);
+        opts.onBodyFetched?.(item.id);
         body = detail.body ?? '';
         fetchedBodyAt = new Date().toISOString();
         detailRecipients = detail.recipients;
@@ -568,7 +571,7 @@ export async function syncMessageFolder(
   client: OFWClient,
   folder: 'inbox' | 'sent',
   folderId: string,
-  opts: { fetchUnreadBodies: boolean; fetchBodies?: boolean; deep?: boolean; budget?: Budget },
+  opts: { fetchUnreadBodies: boolean; fetchBodies?: boolean; onBodyFetched?: (id: number) => void; deep?: boolean; budget?: Budget },
   store: CacheStore,
 ): Promise<MessageSyncResult> {
   const fetchBodies = opts.fetchBodies ?? true;
@@ -583,6 +586,7 @@ export async function syncMessageFolder(
     stopAtCachedPage: true,
     fetchUnreadBodies: opts.fetchUnreadBodies,
     fetchBodies,
+    onBodyFetched: opts.onBodyFetched,
     budget,
   }, store);
 
@@ -634,6 +638,7 @@ export async function syncMessageFolder(
       stopAtCachedPage: false,
       fetchUnreadBodies: opts.fetchUnreadBodies,
       fetchBodies,
+    onBodyFetched: opts.onBodyFetched,
       budget,
     }, store);
     synced += bf.synced;
@@ -906,6 +911,8 @@ export interface SyncAllOptions {
   folders?: FolderName[];
   fetchUnreadBodies?: boolean;
   deep?: boolean;
+  /** Fetch bodies on a no-read day, as if it were a reading day (read-days.ts). */
+  overrideNoReadDay?: boolean;
   /**
    * Max OFW requests this whole invocation may make (resolveFolderIds + list
    * pages + detail + attachment-meta fetches share the budget). Omit / Infinity
@@ -948,6 +955,11 @@ export interface SyncAllResult {
   notRefreshed: FolderName[];
   /** Present (true) when today is a no-read day and no message body was fetched. */
   bodiesWithheld?: true;
+  /** Present only when overrideNoReadDay actually lifted a no-read day. */
+  readOverride?: true;
+  readOverrideNote?: string;
+  /** Every message whose body this call fetched under the override. */
+  readOverrideMessageIds?: number[];
   note?: string;
   /** Inbox messages this call marked read on OFW. Omitted when none. */
   markedRead?: MarkedReadHint[];
@@ -1047,7 +1059,11 @@ export async function syncAll(client: OFWClient, opts: SyncAllOptions, store: Ca
   const budget = makeBudget(opts.maxRequests ?? Number.POSITIVE_INFINITY);
   // Decided HERE, not by each caller, so every path into a sync — the tool,
   // a read's autoRefresh, ofw_status — honours a no-read day (read-days.ts).
-  const readingBlocked = readingBlockedToday() !== null;
+  const noReadDay = readingBlockedToday() !== null;
+  const overriding = noReadDay && opts.overrideNoReadDay === true;
+  const readingBlocked = noReadDay && !overriding;
+  const bodyFetchedIds: number[] = [];
+  const onBodyFetched = (id: number): void => { bodyFetchedIds.push(id); };
   // resolveFolderIds always makes exactly one request; the tool guarantees
   // maxRequests >= 1, so this unit is always available (result intentionally
   // ignored — we account for it without a branch that can't be reached).
@@ -1080,6 +1096,7 @@ export async function syncAll(client: OFWClient, opts: SyncAllOptions, store: Ca
       const r = await syncMessageFolder(client, 'inbox', ids.inbox, {
         fetchUnreadBodies: !readingBlocked && (opts.fetchUnreadBodies ?? false),
         fetchBodies: !readingBlocked,
+        onBodyFetched,
         deep: opts.deep ?? false,
         budget,
       }, store);
@@ -1092,6 +1109,7 @@ export async function syncAll(client: OFWClient, opts: SyncAllOptions, store: Ca
       const r = await syncMessageFolder(client, 'sent', ids.sent, {
         fetchUnreadBodies: false,
         fetchBodies: !readingBlocked,
+        onBodyFetched,
         deep: opts.deep ?? false,
         budget,
       }, store);
@@ -1144,6 +1162,7 @@ export async function syncAll(client: OFWClient, opts: SyncAllOptions, store: Ca
     refreshed,
     notRefreshed,
     ...(readingBlocked ? { bodiesWithheld: true as const } : {}),
+    ...(overriding ? { readOverride: true as const, readOverrideNote: READ_OVERRIDE_NOTE, readOverrideMessageIds: bodyFetchedIds } : {}),
     note,
     markedRead,
     newMessages: newMessages.slice(0, NEW_MESSAGES_CAP),

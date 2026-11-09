@@ -25,6 +25,12 @@
 // An unparseable token fails CLOSED (every day blocked) with a stderr warning:
 // someone who wrote "Thrusday" meant to restrict reading, and silently
 // ignoring the typo would keep reading on the day they meant to keep clear.
+//
+// `overrideNoReadDay` is the one way past this, per call, for when the user
+// explicitly asks to read anyway. It lifts ONLY the day restriction: the
+// mark-read gates (OFW_ALLOW_MARK_READ, OFW_CONFIRM_MARK_READ, sync's
+// fetchUnreadBodies) apply exactly as on a reading day, and each use is logged
+// through auditReadOverride.
 
 import { readEnvVar } from '@chrischall/mcp-utils';
 import { displayTimeZone } from './timestamps.js';
@@ -159,7 +165,24 @@ export function readingBlockedToday(now: Date = new Date()): ReadingBlocked | nu
     today: today.date,
     weekday: WEEKDAY_LABELS[today.weekday],
     timeZone,
-    reason: `${reason} You may see that messages arrived, who sent them, when, and their subjects — but message bodies and attachments are withheld, and nothing may be marked read on OurFamilyWizard. This is a deployment setting; no per-call argument can override it.`,
+    reason: `${reason} You may see that messages arrived, who sent them, when, and their subjects — but message bodies and attachments are withheld, and nothing may be marked read on OurFamilyWizard. This is a deployment setting: respect it. Only if the user has explicitly asked to read anyway today, pass overrideNoReadDay:true to ofw_get_message, ofw_list_messages or ofw_sync_messages. Attachments stay withheld either way.`,
     nextReadableDay,
   };
+}
+
+/** What a response that used the override says about itself. */
+export const READ_OVERRIDE_NOTE = 'Read on a no-read day via override.';
+
+/**
+ * Record one use of overrideNoReadDay. stderr is this server's only log — on a
+ * hosted deployment it is what `mcp-host logs` tails — so the audit line goes
+ * there, in one greppable, parseable shape. Ids only: never subjects or bodies.
+ */
+export function auditReadOverride(tool: string, messageIds: number[], now: Date = new Date()): void {
+  console.error(`[ofw-mcp] AUDIT ${JSON.stringify({
+    event: 'no_read_day_override',
+    timestamp: now.toISOString(),
+    tool,
+    messageIds,
+  })}`);
 }
