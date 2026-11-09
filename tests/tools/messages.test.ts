@@ -7647,6 +7647,71 @@ describe('overrideNoReadDay', () => {
   });
 });
 
+describe('draft follow-ups (#434)', () => {
+  const OLD = 700;
+  const NEW = 701;
+  const seed = async () => {
+    upsertDraft({ id: OLD, subject: 'S', body: 'B', recipients: [], replyToId: 500, modifiedAt: '2026-05-04T12:00:00Z', listData: {} });
+    await cacheProvider().setMeta(`draft_reply_source:${OLD}`, 'cache');
+  };
+  const routed = (client: OFWClient) => vi.spyOn(client, 'request').mockImplementation(async (method: string, path: string) => {
+    if (method === 'POST') return { entityId: NEW };
+    if (method === 'DELETE') return {};
+    if (path === `/pub/v3/messages/${OLD}`) {
+      return { id: OLD, subject: 'S', body: 'B', recipients: [], replyToId: 500, inReplyTo: 500, showContext: true, date: { dateTime: '2026-05-04T12:00:00' }, folder: { id: 3, name: 'Drafts' } };
+    }
+    return { id: NEW, subject: 'S2', body: 'B2', recipients: [], replyToId: null, date: { dateTime: '2026-05-04T13:00:00' } };
+  });
+  const posted = (spy: ReturnType<typeof routed>) => JSON.stringify(spy.mock.calls.find((c) => c[0] === 'POST')![2]);
+  const sourceOfOld = () => cacheProvider().getMeta(`draft_reply_source:${OLD}`);
+
+  it('ofw_save_draft replyToId:null makes a reply draft top-level, with no thread warning', async () => {
+    await seed();
+    const client = new OFWClient();
+    const spy = routed(client);
+    setup(client);
+    const text = (await handlers.get('ofw_save_draft')!({ subject: 'S2', body: 'B2', messageId: OLD, replyToId: null, force: true })).content[0].text;
+    expect(posted(spy)).toContain('"replyToId":null');
+    expect(text).not.toMatch(/did not thread/);
+  });
+
+  it('ofw_save_draft with replyToId omitted still keeps the draft\'s own thread', async () => {
+    await seed();
+    const client = new OFWClient();
+    const spy = routed(client);
+    setup(client);
+    await handlers.get('ofw_save_draft')!({ subject: 'S2', body: 'B2', messageId: OLD, force: true });
+    expect(posted(spy)).toContain('"replyToId":500');
+  });
+
+  it('replacing a draft clears the old id\'s reply-source record', async () => {
+    await seed();
+    const client = new OFWClient();
+    routed(client);
+    setup(client);
+    await handlers.get('ofw_save_draft')!({ subject: 'S2', body: 'B2', messageId: OLD, force: true });
+    expect(await sourceOfOld()).toBeNull();
+  });
+
+  it('deleting a draft clears its reply-source record', async () => {
+    await seed();
+    const client = new OFWClient();
+    routed(client);
+    setup(client);
+    await handlers.get('ofw_delete_draft')!({ messageId: OLD, force: true });
+    expect(await sourceOfOld()).toBeNull();
+  });
+
+  it('a confirmed send clears the draft\'s reply-source record', async () => {
+    await seed();
+    const client = new OFWClient();
+    routed(client);
+    setup(client);
+    await callConfirmed(handlers.get('ofw_send_message')! as GatedHandler, { draftId: OLD, recipientIds: [1], force: true });
+    expect(await sourceOfOld()).toBeNull();
+  });
+});
+
 describe('no-read days (OFW_READ_DAYS / OFW_NO_READ_DAYS)', () => {
   const KEYS = ['OFW_READ_DAYS', 'OFW_NO_READ_DAYS'] as const;
   const prev: Record<string, string | undefined> = {};

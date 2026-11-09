@@ -1691,6 +1691,16 @@ describe('syncDrafts — lineage across a replace made outside this cache', () =
     expect((await cache.getDraftLineageById(11))?.draftKey).toBe('dk_other');
   });
 
+  it('an evicted draft takes its reply-source record with it', async () => {
+    upsertDraft({ id: 40, subject: 'S', body: 'B', recipients: [], replyToId: 9, modifiedAt: '2026-05-04T12:00:00Z', listData: {} });
+    await cache.setMeta('draft_reply_source:40', 'cache');
+    const client = new OFWClient();
+    vi.spyOn(client, 'request').mockResolvedValueOnce(draftListResponse([]));
+    await syncDrafts(client, '333', store());
+    expect(getDraft(40)).toBeNull();
+    expect(getMeta('draft_reply_source:40')).toBeNull();
+  });
+
   it('a vanished draft with no key and nothing held is simply evicted', async () => {
     upsertDraft(old);
     const client = new OFWClient();

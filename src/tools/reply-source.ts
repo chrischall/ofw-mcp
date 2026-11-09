@@ -22,6 +22,11 @@ export async function setReplyToSource(
   await cache.setMeta(key(draftId), source ?? '');
 }
 
+/** Forget a draft's record (sent, deleted, replaced or evicted): its id never returns. */
+export async function clearReplyToSource(cache: CacheStore, draftId: number): Promise<void> {
+  await cache.deleteMeta(key(draftId));
+}
+
 /**
  * The source of a draft's reply target, or null when it has no target.
  * Anything but an explicit `cache` reads as `server` (see the header).

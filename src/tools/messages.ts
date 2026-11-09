@@ -25,7 +25,7 @@ import {
 } from './uploads.js';
 import type { InlineFile, UploadOptions } from './uploads.js';
 import { clearHeldFiles, getHeldFiles, heldFilesFor, HELD_NOTE, setHeldFiles, uniqueIds } from './held-attachments.js';
-import { replyToSourceField, setReplyToSource } from './reply-source.js';
+import { clearReplyToSource, replyToSourceField, setReplyToSource } from './reply-source.js';
 import { buildInlineDelivery, MAX_INLINE_BYTES, tryExtract } from './delivery.js';
 import { resolveDownloadMime, resolveSaveDest } from './attachments.js';
 import {
@@ -1221,7 +1221,10 @@ export function registerMessageTools(
       }
     }
     if (newId !== null) {
-      if (draftRef !== undefined) await clearHeldFiles(cache, draftRef);
+      if (draftRef !== undefined) {
+        await clearHeldFiles(cache, draftRef);
+        await clearReplyToSource(cache, draftRef);
+      }
       verifyNote = verifyWriteLanded('message', { subject, body }, detail);
 
       // Threading verdict, from OFW's own echo on the re-fetched sent record.
@@ -1626,7 +1629,7 @@ export function registerMessageTools(
       body: z.string().describe('Message body text'),
       recipientIds: z.array(z.number()).describe('Array of recipient user IDs (optional for drafts)').optional(),
       messageId: z.number().describe('ID of an existing draft to replace (the new draft will have a new id; the old is deleted)').optional(),
-      replyToId: z.number().describe('ID of the message this draft replies to').optional(),
+      replyToId: z.number().nullable().describe('ID of the message this draft replies to. When replacing a draft (messageId), omit it to keep the draft\'s own reply target, or pass null to make the draft a new top-level message.').optional(),
       myFileIDs: z.array(z.number()).describe('Attachment file ids (from ofw_upload_attachment) to attach. OurFamilyWizard does not store attachments on drafts, so they are HELD with this draft by this server and attached when you send it with ofw_send_message(draftId). When replacing a draft (messageId), the files already held are kept and these are added (de-duplicated); use removeFileIDs to drop one.').optional(),
       removeFileIDs: z.array(z.number()).describe('When replacing a draft: held attachment file ids to drop.').optional(),
       inlineAttachments: inlineAttachmentsParam,
@@ -1674,7 +1677,8 @@ export function registerMessageTools(
       // a new top-level conversation.
       serverReplyTo = guard.server?.replyToId ?? null;
     }
-    const requestedReplyTo = args.replyToId ?? serverReplyTo;
+    // undefined keeps the draft's thread; null is the caller unthreading it.
+    const requestedReplyTo = args.replyToId === undefined ? serverReplyTo : args.replyToId;
     let resolvedReplyTo = requestedReplyTo;
     let rewriteNote: string | null = null;
 
@@ -1854,6 +1858,7 @@ export function registerMessageTools(
           await deleteOFWMessages(client, [args.messageId]);
           await cache.deleteDraft(args.messageId);
           await clearHeldFiles(cache, args.messageId);
+          await clearReplyToSource(cache, args.messageId);
           replaceNote = `NOTE: ofw_save_draft replaced draft ${args.messageId} via create-then-delete. The new draft id is ${newId}; the old draft has been deleted. The draftKey is UNCHANGED — key off it rather than the volatile id, which changes on every edit. (OFW's update-in-place endpoint silently no-ops on subsequent updates, so we never use it.) Fields carried over to the new draft: subject, body, recipients (${persisted.recipients.length}), replyToId (${persisted.replyToId === null ? 'none' : persisted.replyToId}), attachments: ${onDraft.length} on the draft, ${held.length} held for send.${warnings.length > 0 ? ' See warnings above for any field OurFamilyWizard did not carry over.' : ''}`;
         } catch (e) {
           // Partial-failure safety: the new draft is already created and
@@ -1929,6 +1934,7 @@ export function registerMessageTools(
     const data = await deleteOFWMessages(client, [args.messageId]);
     await cache.deleteDraft(args.messageId);
     await clearHeldFiles(cache, args.messageId);
+    await clearReplyToSource(cache, args.messageId);
     return notedJsonResponse([guard.note], data, 'Draft deleted.');
   });
 

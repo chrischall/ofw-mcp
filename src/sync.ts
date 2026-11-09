@@ -7,7 +7,7 @@ import type {
 import { z } from 'zod';
 import { ApiRecipientSchema, draftReplyTarget, hasRealView, mapRecipients, scrapeSaysRead } from './tools/_shared.js';
 import type { ReplyToSource } from './tools/_shared.js';
-import { setReplyToSource } from './tools/reply-source.js';
+import { clearReplyToSource, setReplyToSource } from './tools/reply-source.js';
 import { senderOf } from './tools/project.js';
 import { parseLenient } from '@chrischall/mcp-utils';
 import { displayTimeZone, nowNaiveWallClock, parseTimestampValue } from './timestamps.js';
@@ -893,7 +893,10 @@ export async function syncDrafts(
   const seenIds = new Set(ids);
   const vanished = (await store.listDraftIds()).filter((id) => !seenIds.has(id));
   await inferReplacedDraftLineage(store, vanished, rows.filter((r) => !existingById.has(r.id)));
-  for (const id of vanished) await store.deleteDraft(id);
+  for (const id of vanished) {
+    await store.deleteDraft(id);
+    await clearReplyToSource(store, id);
+  }
 
   // The complete walk fetched every draft's DETAIL and reconciled deletions, so
   // the cache is now known-equal to the server. Only here is `synced: 0`
