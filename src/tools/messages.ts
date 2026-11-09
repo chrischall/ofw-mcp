@@ -2394,7 +2394,10 @@ Up to ${MAX_FILES_PER_CALL} files per call; each must be non-empty and at most 2
       // only, and the approved bodies are opened below, one by one.
       fetchUnreadBodies: requested && ceiling === null && !askFirst,
       deep: args.deep,
-      overrideNoReadDay: args.overrideNoReadDay,
+      // This call's one decision, not the raw argument: the two day checks can
+      // straddle midnight, and syncAll must not honour an override the gates
+      // above did not apply.
+      overrideNoReadDay: overriding,
       maxRequests: args.maxRequests ?? getSyncMaxRequests(),
     }, cache);
     // Logged here, not after the confirmation below: these bodies are already

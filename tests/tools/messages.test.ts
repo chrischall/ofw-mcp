@@ -7545,6 +7545,18 @@ describe('overrideNoReadDay', () => {
       spy.mockRestore();
     });
 
+    it('hands syncAll the handler\'s one decision, so a midnight rollover cannot apply the override to the env default', async () => {
+      // A reading day when the handler decides: the flag must not reach syncAll,
+      // which would otherwise honour it if the day turned no-read a moment later.
+      process.env.OFW_NO_READ_DAYS = '2000-01-01';
+      process.env.OFW_FETCH_UNREAD_BODIES = 'true';
+      const spy = vi.spyOn(syncModule, 'syncAll').mockResolvedValue(structuredClone(emptySync) as never);
+      setup(new OFWClient());
+      await handlers.get('ofw_sync_messages')!({ overrideNoReadDay: true });
+      expect(spy.mock.calls[0][1]).toMatchObject({ overrideNoReadDay: false, fetchUnreadBodies: true });
+      spy.mockRestore();
+    });
+
     it('lifts the day ceiling on fetchUnreadBodies', async () => {
       const spy = vi.spyOn(syncModule, 'syncAll').mockResolvedValue(overridden as never);
       setup(new OFWClient());
