@@ -288,7 +288,10 @@ async function probeOne(
 
   let snapshot: MessageSnapshot | null;
   try {
-    snapshot = await fetchMessageSnapshot(client, id);
+    // The cached target is the fallback for a detail that does not echo the
+    // linkage, the same rule the drafts sync applies, so an unchanged draft
+    // reports cacheRevision === serverRevision.
+    snapshot = await fetchMessageSnapshot(client, id, cachedDraft?.replyToId ?? null);
   } catch (e) {
     return {
       requests: 1,

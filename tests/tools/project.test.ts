@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, afterEach } from 'vitest';
-import { compactMessage, compactDraft, viewMessages, viewDrafts, MESSAGE_VIEWS } from '../../src/tools/project.js';
+import { bodyDigest, compactMessage, compactDraft, viewMessages, viewDrafts, MESSAGE_VIEWS } from '../../src/tools/project.js';
 import type { MessageRow, DraftRow } from '../../src/cache/store.js';
 
 afterEach(() => vi.restoreAllMocks());
@@ -208,5 +208,15 @@ describe('the view selector', () => {
     const drafts = [{ id: 1, subject: 's', body: 'b', recipients: [], replyToId: null, modifiedAt: 'x', listData: {} }] as DraftRow[];
     expect(viewDrafts('compact', drafts)[0]).not.toHaveProperty('listData');
     expect(viewDrafts('full', drafts)).toBe(drafts);
+  });
+});
+
+describe('bodyDigest', () => {
+  it('reduces a body to its length and a 16-hex SHA-256 prefix', () => {
+    expect(bodyDigest('hello')).toEqual({ bodyLength: 5, bodySha256: '2cf24dba5fb0a30e' });
+  });
+
+  it('reports nulls for a missing body rather than hashing nothing', () => {
+    expect(bodyDigest(null)).toEqual({ bodyLength: null, bodySha256: null });
   });
 });

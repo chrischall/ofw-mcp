@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { z } from 'zod';
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, truncateSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { McpServer } from '@modelcontextprotocol/server';
@@ -1207,11 +1208,13 @@ describe('ofw_send_message with messageId (send-existing-draft)', () => {
       modifiedAt: '2026-05-01T00:00:00Z', listData: {},
     });
     const client = new OFWClient();
+    // Server copy: OFW POSITIVELY dropped the reply link (inReplyTo null,
+    // showContext false) — metadata-only drift → FRESH, and OFW's answer stands.
+    const dropped = { subject: 'S', body: 'server body', recipients: [], replyToId: null, inReplyTo: null, showContext: false, folder: { id: '3', name: 'Drafts' } };
     const spy = vi.spyOn(client, 'request')
-      // Server copy: OFW dropped the replyToId (metadata-only drift → FRESH).
-      .mockResolvedValueOnce({ subject: 'S', body: 'server body', recipients: [], replyToId: null, folder: { id: '3', name: 'Drafts' } })
+      .mockResolvedValueOnce(dropped)
       // (again: the confirmation gate's phase-2 call re-reads the draft too)
-      .mockResolvedValueOnce({ subject: 'S', body: 'server body', recipients: [], replyToId: null, folder: { id: '3', name: 'Drafts' } })
+      .mockResolvedValueOnce(dropped)
       .mockResolvedValueOnce({ entityId: 61 })
       .mockResolvedValueOnce({
         id: 61, subject: 'S', body: 'server body',
@@ -1229,6 +1232,38 @@ describe('ofw_send_message with messageId (send-existing-draft)', () => {
     // cached row's stale 100.
     expect(sent.replyToId).toBeNull();
     expect(result.content[0].text).toMatch(/treated as current for this send/);
+  });
+
+  it('keeps the cached reply target when the server detail does not echo the linkage', async () => {
+    // A bare `replyToId: null` with no inReplyTo/showContext is OFW's normal
+    // shape on threaded items — not evidence the link is gone. The send must
+    // thread to the draft's known target, never go out as a new conversation.
+    upsertDraft({
+      id: 62, subject: 'Re: S', body: 'reply body', recipients: [], replyToId: 100,
+      modifiedAt: '2026-05-01T00:00:00Z', listData: {},
+    });
+    const client = new OFWClient();
+    const silent = { subject: 'Re: S', body: 'reply body', recipients: [], replyToId: null, folder: { id: '3', name: 'Drafts' } };
+    const spy = vi.spyOn(client, 'request')
+      .mockResolvedValueOnce(silent)
+      .mockResolvedValueOnce(silent)
+      .mockResolvedValueOnce({ entityId: 63 })
+      .mockResolvedValueOnce({
+        id: 63, subject: 'Re: S', body: 'reply body', inReplyTo: 100, showContext: true,
+        date: { dateTime: '2026-05-02T00:00:00Z' }, from: { name: 'Me' }, recipients: [],
+      })
+      .mockResolvedValueOnce({});
+    setup(client);
+
+    const result = await callConfirmed(handlers.get('ofw_send_message')!, { draftId: 62, recipientIds: [7] });
+
+    const postCall = spy.mock.calls.find((c) => c[0] === 'POST');
+    expect((postCall![2] as { replyToId: number | null }).replyToId).toBe(100);
+    const text = result.content[0].text;
+    const out = JSON.parse(text.slice(text.indexOf('{')));
+    expect(out.threaded).toBe(true);
+    // Nothing drifted once both sides apply the same rule, so no metadata note.
+    expect(result.content[0].text).not.toMatch(/treated as current/);
   });
 
   it('uses provided fields as overrides on top of the server draft', async () => {
@@ -1904,8 +1939,8 @@ describe('ofw_save_draft — threading & field preservation (Defects 1 & 3)', ()
         id: 700, subject: 'S', body: 'B',
         date: { dateTime: '2026-07-20T00:00:00Z' }, replyToId: 100,
       })
-      .mockResolvedValueOnce({                                        // guard fetch: OFW normalized replyToId → null
-        subject: 'S', body: 'B', replyToId: null, recipients: [],
+      .mockResolvedValueOnce({                                        // guard fetch: OFW positively dropped the link
+        subject: 'S', body: 'B', replyToId: null, inReplyTo: null, showContext: false, recipients: [],
       })
       .mockResolvedValueOnce({ entityId: 701 })                       // replace POST
       .mockResolvedValueOnce({                                        // replace detail
@@ -4567,7 +4602,7 @@ describe('messages.ts — attachment-backfill branches', () => {
       .mockResolvedValueOnce({ entityId: 500 }) // POST
       .mockResolvedValueOnce({ id: 500 }); // GET bare detail → 290-294 fallbacks
     setup(c);
-    const text = (await callConfirmed(handlers.get('ofw_send_message')!, { subject: 'S', body: 'B', recipientIds: [1] })).content[0].text;
+    const text = (await callConfirmed(handlers.get('ofw_send_message')!, { subject: 'S', body: 'B', recipientIds: [1], view: 'full' })).content[0].text;
     // A detail with neither subject nor body cannot confirm the write landed.
     expect(text).toMatch(/^WARNING: the message re-fetched from OFW does not contain the subject and body/);
     const out = JSON.parse(text.slice(text.indexOf('\n\n') + 2));
@@ -6966,9 +7001,11 @@ describe('auto-review follow-ups for the consolidated fixes (issue #207)', () =>
     expect(result.content[0].text).not.toMatch(/did not thread/);
     const parsed = trailingJson(result.content[0].text);
     expect(parsed.warnings).toBeUndefined();
-    // The stored value is still the server echo (null), never masked intent —
-    // the revision must hash what the next sync reads.
-    expect(parsed.replyToId).toBeNull();
+    // A bare null is not evidence of a drop, so the posted target is kept and
+    // marked as this server's record — the drafts sync and the freshness
+    // snapshot apply the same fallback, so the revision still matches them.
+    expect(parsed.replyToId).toBe(100);
+    expect(parsed.replyToSource).toBe('cache');
   });
 
   it('save: a detail omitting EVERY echo field is "not echoed", never "dropped"', async () => {
@@ -7493,5 +7530,184 @@ describe('no-read days (OFW_READ_DAYS / OFW_NO_READ_DAYS)', () => {
     const status = JSON.parse((await handlers.get('ofw_status')!({ ids: [909], allowMarkRead: true })).content[0].text);
     expect(JSON.stringify(status)).toContain('WOULD_MARK_READ');
     expect(spy).not.toHaveBeenCalled();
+  });
+});
+
+// ── One revision, one reply target, on every path ────────────────────────
+//
+// Live evidence (draft 575372481, 2026-11-08): the save echo reported
+// `inReplyTo: 574607114` and revision r1:02f3…, while ofw_list_drafts reported
+// the SAME unedited draft as `replyToId: null` with r1:dc34…. The drafts LIST
+// payload carries no replyToId/inReplyTo/showContext key at all, and the sync
+// built the cached row from it. These pin that every path now agrees. The
+// payloads below mirror the live shapes (ids are synthetic).
+describe('draft revision and reply target agree across save, list, get and check_freshness', () => {
+  const REPLY_TO = 9100;
+  const DRAFT = 9200;
+  const subject = 'Re: Responses Required';
+  const body = 'Alison,\n\n2. Not yet.\n\nThanks,\nChris';
+  const folders = { systemFolders: [
+    { id: '1', folderType: 'INBOX' }, { id: '2', folderType: 'SENT_MESSAGES' }, { id: '3', folderType: 'DRAFTS' },
+  ] };
+  // The DETAIL echoes the linkage (live: replyToId null, inReplyTo set).
+  const detail = (extra: Record<string, unknown> = {}) => ({
+    id: DRAFT, subject, body, recipients: [], replyToId: null, inReplyTo: REPLY_TO, showContext: true,
+    date: { dateTime: '2026-11-08T20:27:12' }, folder: { id: '3', name: 'Drafts' }, ...extra,
+  });
+  // The LIST item carries no linkage key at all (live shape).
+  const listItem = { id: DRAFT, subject, date: { dateTime: '2026-11-08T20:27:12' }, recipients: [], folder: 13471259, draft: true, files: 0 };
+  const parse = (r: { content: Array<{ text: string }> }): Record<string, any> => {
+    const text = r.content[0]!.text;
+    return JSON.parse(text.slice(text.indexOf('{')));
+  };
+
+  it('save, then list, then get, then check_freshness all report the same revision and replyToId for an unchanged draft', async () => {
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce({ entityId: DRAFT })        // save POST
+      .mockResolvedValueOnce(detail())                    // save detail
+      .mockResolvedValueOnce(folders)                     // list → sync: folder resolve
+      .mockResolvedValueOnce({ data: [listItem] })        // drafts list page (no linkage)
+      .mockResolvedValueOnce(detail())                    // draft detail
+      .mockResolvedValueOnce(detail());                   // check_freshness probe
+    setup(client);
+
+    const saved = parse(await handlers.get('ofw_save_draft')!({ subject, body, replyToId: REPLY_TO }));
+    const listed = parse(await handlers.get('ofw_list_drafts')!({}));
+    const got = parse(await handlers.get('ofw_get_message')!({ messageId: String(DRAFT) }));
+    const checked = parse(await handlers.get('ofw_check_freshness')!({ messageIds: [DRAFT] }));
+
+    expect(listed.autoVerified).toBe(true);
+    const draft = listed.drafts[0];
+    expect(draft.revision).toBe(saved.revision);
+    expect(got.revision).toBe(saved.revision);
+    expect(checked.items[0].cacheRevision).toBe(saved.revision);
+    expect(checked.items[0].serverRevision).toBe(saved.revision);
+    expect(checked.items[0].inSync).toBe(true);
+
+    for (const r of [saved, draft, got]) {
+      expect(r.replyToId).toBe(REPLY_TO);
+      expect(r.replyToSource).toBe('server');
+    }
+  });
+
+  it('a list AND detail that both omit the linkage still report the replyToId, marked as from the cache', async () => {
+    const silent = { id: DRAFT, subject, body, recipients: [], date: { dateTime: '2026-11-08T20:27:12' } };
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce({ entityId: DRAFT })
+      .mockResolvedValueOnce(silent)                      // save detail: no echo at all
+      .mockResolvedValueOnce(folders)
+      .mockResolvedValueOnce({ data: [listItem] })
+      .mockResolvedValueOnce(silent);                     // sync detail: no echo either
+    setup(client);
+
+    const saved = parse(await handlers.get('ofw_save_draft')!({ subject, body, replyToId: REPLY_TO }));
+    const listed = parse(await handlers.get('ofw_list_drafts')!({}));
+
+    expect(saved.replyToId).toBe(REPLY_TO);
+    expect(saved.replyToSource).toBe('cache');
+    expect(listed.drafts[0].replyToId).toBe(REPLY_TO);
+    expect(listed.drafts[0].replyToSource).toBe('cache');
+    expect(listed.drafts[0].revision).toBe(saved.revision);
+  });
+
+  it('a POSITIVELY unthreaded detail is not overridden by the cache', async () => {
+    upsertDraft({ id: DRAFT, subject, body, recipients: [], replyToId: REPLY_TO, modifiedAt: '2026-11-08T20:27:12', listData: {} });
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce(folders)
+      .mockResolvedValueOnce({ data: [listItem] })
+      .mockResolvedValueOnce(detail({ inReplyTo: null, showContext: false }));
+    setup(client);
+
+    const draft = parse(await handlers.get('ofw_list_drafts')!({})).drafts[0];
+    expect(draft.replyToId).toBeNull();
+    expect(draft.replyToSource).toBeUndefined();
+  });
+
+  it('send by draftId threads to the reply target even though the drafts list shows no linkage', async () => {
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request')
+      .mockResolvedValueOnce(folders)                     // ofw_list_drafts → sync
+      .mockResolvedValueOnce({ data: [listItem] })
+      .mockResolvedValueOnce(detail())
+      .mockResolvedValueOnce(detail())                    // send guard (preview)
+      .mockResolvedValueOnce(detail())                    // send guard (confirmed)
+      .mockResolvedValueOnce({ entityId: 9300 })          // send POST
+      .mockResolvedValueOnce({                            // sent detail
+        id: 9300, subject, body, inReplyTo: REPLY_TO, showContext: true,
+        date: { dateTime: '2026-11-09T08:00:00' }, from: { name: 'Me' }, recipients: [],
+      })
+      .mockResolvedValueOnce({});                         // DELETE the draft
+    setup(client);
+
+    const listed = parse(await handlers.get('ofw_list_drafts')!({}));
+    const sent = parse(await callConfirmed(handlers.get('ofw_send_message')!, {
+      draftId: DRAFT, recipientIds: [7], expectedRevision: listed.drafts[0].revision,
+    }));
+
+    const post = spy.mock.calls.find((c) => c[0] === 'POST');
+    expect((post![2] as { replyToId: number | null }).replyToId).toBe(REPLY_TO);
+    expect(sent.threaded).toBe(true);
+    expect(sent.replyToId).toBe(REPLY_TO);
+  });
+
+  it('replacing a draft without replyToId keeps the server draft\'s reply target', async () => {
+    upsertDraft({ id: DRAFT, subject, body, recipients: [], replyToId: REPLY_TO, modifiedAt: '2026-11-08T20:27:12', listData: {} });
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request')
+      .mockResolvedValueOnce(detail())                    // guard read
+      .mockResolvedValueOnce({ entityId: 9201 })          // replace POST
+      .mockResolvedValueOnce(detail({ id: 9201, body: `${body} edited` }))
+      .mockResolvedValueOnce({});                         // DELETE old
+    setup(client);
+
+    const saved = parse(await handlers.get('ofw_save_draft')!({ subject, body: `${body} edited`, messageId: DRAFT }));
+
+    const post = spy.mock.calls.find((c) => c[0] === 'POST');
+    expect((post![2] as { replyToId: number | null }).replyToId).toBe(REPLY_TO);
+    expect(saved.replyToId).toBe(REPLY_TO);
+  });
+
+  it('save and send default to compact: no listData and no body echo, just its length and hash', async () => {
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce({ entityId: DRAFT })
+      .mockResolvedValueOnce(detail())
+      .mockResolvedValueOnce({ entityId: 9300 })
+      .mockResolvedValueOnce({
+        id: 9300, subject, body, inReplyTo: REPLY_TO, showContext: true,
+        date: { dateTime: '2026-11-09T08:00:00' }, from: { name: 'Me' }, recipients: [],
+      });
+    setup(client);
+
+    const saved = parse(await handlers.get('ofw_save_draft')!({ subject, body, replyToId: REPLY_TO }));
+    const sent = parse(await callConfirmed(handlers.get('ofw_send_message')!, { subject, body, recipientIds: [7] }));
+
+    const digest = { bodyLength: body.length, bodySha256: createHash('sha256').update(body).digest('hex').slice(0, 16) };
+    for (const r of [saved, sent]) {
+      expect(r).not.toHaveProperty('listData');
+      expect(r).not.toHaveProperty('body');
+      expect(r).toMatchObject(digest);
+    }
+    expect(saved).toMatchObject({ id: DRAFT, replyToId: REPLY_TO, recipients: [] });
+    expect(saved.draftKey).toMatch(/^dk_/);
+    expect(saved.revision).toMatch(/^r1:/);
+    expect(sent).not.toHaveProperty('fromUser');
+    expect(sent).toMatchObject({ sentMessageId: 9300, id: 9300, threaded: true });
+  });
+
+  it('view:"full" on a save keeps the listData echo and the body', async () => {
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce({ entityId: DRAFT })
+      .mockResolvedValueOnce(detail());
+    setup(client);
+
+    const saved = parse(await handlers.get('ofw_save_draft')!({ subject, body, replyToId: REPLY_TO, view: 'full' }));
+    expect(saved.body).toBe(body);
+    expect(saved.listData).toBeDefined();
+    expect(saved).not.toHaveProperty('bodySha256');
   });
 });

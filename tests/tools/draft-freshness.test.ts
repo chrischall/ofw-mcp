@@ -49,6 +49,16 @@ describe('draftRevision', () => {
     expect(draftRevision(content({ recipients: [] }))).not.toBe(base);
   });
 
+  it('changes when ONLY the reply target, ONLY the recipients or ONLY the held files change', () => {
+    const base = content({ replyToId: 100 });
+    const rev = draftRevision(base, [5, 6]);
+    expect(draftRevision({ ...base, replyToId: 101 }, [5, 6])).not.toBe(rev);
+    expect(draftRevision({ ...base, recipients: [{ userId: 43, name: 'Co Parent', viewedAt: null }] }, [5, 6])).not.toBe(rev);
+    expect(draftRevision(base, [5, 7])).not.toBe(rev);
+    // ...and not when the file ids are merely reordered or repeated.
+    expect(draftRevision(base, [6, 5, 5])).toBe(rev);
+  });
+
   it('does not collide across a field-boundary shift', () => {
     // Naive concatenation would make these two identical.
     const a = draftRevision(content({ subject: 'ab', body: 'c' }));
@@ -102,6 +112,26 @@ describe('fetchServerDraft', () => {
       expect(snap?.folderId).toBe('3');
       expect(snap?.folderName).toBe('Drafts');
     }
+  });
+
+  it('keeps the fallback reply target when the detail does not echo the linkage', async () => {
+    const c = new OFWClient();
+    vi.spyOn(c, 'request').mockResolvedValue({ subject: 'S', body: 'B', replyToId: null });
+    const snap = await fetchMessageSnapshot(c, 5, 100);
+    expect(snap?.content.replyToId).toBe(100);
+    expect(snap?.replyToSource).toBe('cache');
+  });
+
+  it('prefers the echoed linkage, and honours a positive drop over the fallback', async () => {
+    const c = new OFWClient();
+    vi.spyOn(c, 'request')
+      .mockResolvedValueOnce({ subject: 'S', body: 'B', replyToId: null, inReplyTo: 200, showContext: true })
+      .mockResolvedValueOnce({ subject: 'S', body: 'B', inReplyTo: null, showContext: false });
+    const echoed = await fetchMessageSnapshot(c, 5, 100);
+    expect(echoed?.content.replyToId).toBe(200);
+    expect(echoed?.replyToSource).toBe('server');
+    const dropped = await fetchServerDraft(c, 5, 100);
+    expect(dropped?.replyToId).toBeNull();
   });
 
   it('reports a null folderId when OFW omits the folder entirely', async () => {
