@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.27.5](https://github.com/chrischall/ofw-mcp/compare/v2.27.4...v2.27.5) (2026-11-09)
+
+
+### Bug Fixes
+
+* **drafts:** one revision and reply target on every read path ([#433](https://github.com/chrischall/ofw-mcp/issues/433)) ([132d9eb](https://github.com/chrischall/ofw-mcp/commit/132d9eba59ce4bbf9012bbe63dcae67fa2acf99f))
+
 ## [2.27.4](https://github.com/chrischall/ofw-mcp/compare/v2.27.3...v2.27.4) (2026-11-07)
 
 
