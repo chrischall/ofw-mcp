@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { getReadDayPolicy, readingBlockedToday } from '../src/read-days.js';
+import { auditReadOverride, getReadDayPolicy, readingBlockedToday } from '../src/read-days.js';
 
 // 2026-10-25 is a Sunday; 2026-10-26 a Monday; 2026-12-25 a Friday.
 const SUNDAY_NOON_ET = new Date('2026-10-25T16:00:00Z');
@@ -45,7 +45,8 @@ describe('read-day policy (OFW_READ_DAYS / OFW_NO_READ_DAYS)', () => {
       nextReadableDay: 'Monday 2026-10-26',
     });
     expect(blocked!.reason).toMatch(/subjects/);
-    expect(blocked!.reason).toMatch(/no per-call argument/);
+    expect(blocked!.reason).toMatch(/overrideNoReadDay/);
+    expect(blocked!.reason).toMatch(/explicitly asked/);
   });
 
   it('deny list: dates and inclusive ranges', () => {
@@ -61,6 +62,61 @@ describe('read-day policy (OFW_READ_DAYS / OFW_NO_READ_DAYS)', () => {
     process.env.OFW_READ_DAYS = 'mon';
     process.env.OFW_NO_READ_DAYS = '2026-10-26';
     expect(readingBlockedToday(MONDAY_NOON_ET)).toMatchObject({ nextReadableDay: 'Monday 2026-11-02' });
+  });
+
+  describe('a three-weekday allow list', () => {
+    beforeEach(() => { process.env.OFW_READ_DAYS = 'sun,tue,fri'; });
+
+    it.each([
+      ['2026-11-08T17:00:00Z', 'Sunday'],
+      ['2026-11-10T17:00:00Z', 'Tuesday'],
+      ['2026-11-06T17:00:00Z', 'Friday'],
+    ])('%s (%s) is a reading day', (instant) => {
+      expect(readingBlockedToday(new Date(instant))).toBeNull();
+    });
+
+    it.each([
+      ['2026-11-09T17:00:00Z', 'Monday', 'Tuesday 2026-11-10'],
+      ['2026-11-11T17:00:00Z', 'Wednesday', 'Friday 2026-11-13'],
+      ['2026-11-12T17:00:00Z', 'Thursday', 'Friday 2026-11-13'],
+      ['2026-11-07T17:00:00Z', 'Saturday', 'Sunday 2026-11-08'],
+    ])('%s (%s) is not', (instant, weekday, nextReadableDay) => {
+      expect(readingBlockedToday(new Date(instant))).toMatchObject({ weekday, nextReadableDay });
+    });
+
+    it('11:30 PM ET Friday counts as Friday, though it is already Saturday in UTC', () => {
+      expect(readingBlockedToday(new Date('2026-11-07T04:30:00Z'))).toBeNull();
+    });
+
+    it('12:30 AM ET Saturday is Saturday', () => {
+      expect(readingBlockedToday(new Date('2026-11-07T05:30:00Z'))).toMatchObject({ weekday: 'Saturday' });
+    });
+
+    it('the boundary holds on the daylight-time side too', () => {
+      // 2026-07-10 is a Friday: 11:30 PM EDT is 03:30 UTC Saturday.
+      expect(readingBlockedToday(new Date('2026-07-11T03:30:00Z'))).toBeNull();
+    });
+  });
+
+  it('day numbers are not a format: "0" fails closed rather than meaning Sunday', () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    process.env.OFW_READ_DAYS = '0,2,5';
+    expect(getReadDayPolicy()!.invalid).toEqual(['0', '2', '5']);
+    expect(readingBlockedToday(SUNDAY_NOON_ET)).not.toBeNull();
+  });
+
+  it('auditReadOverride writes one structured stderr line: timestamp, tool, messageIds', () => {
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    auditReadOverride('ofw_get_message', [7, 8], new Date('2026-11-09T12:00:00Z'));
+    expect(err).toHaveBeenCalledTimes(1);
+    const line = err.mock.calls[0][0] as string;
+    expect(line.startsWith('[ofw-mcp] AUDIT ')).toBe(true);
+    expect(JSON.parse(line.slice('[ofw-mcp] AUDIT '.length))).toEqual({
+      event: 'no_read_day_override', timestamp: '2026-11-09T12:00:00.000Z', tool: 'ofw_get_message', messageIds: [7, 8],
+    });
+    // and with no clock argument, "now"
+    auditReadOverride('ofw_sync_messages', []);
+    expect(err.mock.calls[1][0]).toMatch(/"timestamp":"\d{4}-/);
   });
 
   it('decides "today" in DISPLAY_TZ, not UTC', () => {

@@ -16,6 +16,7 @@ import { isNaiveTimestamp } from '../../src/timestamps.js';
 import { OFWCache } from '../../src/cache/node.js';
 import { sampleMessageRow } from '../_fixtures.js';
 import { CAN_ASK_CTX, NO_ELICIT_CTX, callConfirmed, callPreview } from './_confirm-helpers.js';
+import type { GatedHandler } from './_confirm-helpers.js';
 import { makeXlsx, xlsxSheetData, makeDocx, makePptx } from '../extract/_ooxml.js';
 import { makePdf, showText } from '../extract/_pdf.js';
 import type {
@@ -7373,6 +7374,276 @@ describe('write-tool responses go through the timestamp seam (QUAL-2)', () => {
     expect(overwritten.body).toBe('edited on the web');
     expect(naiveValues(overwritten)).toEqual([]);
     warn.mockRestore();
+  });
+});
+
+describe('overrideNoReadDay', () => {
+  const KEYS = ['OFW_READ_DAYS', 'OFW_NO_READ_DAYS', 'OFW_ALLOW_MARK_READ', 'OFW_CONFIRM_MARK_READ', 'OFW_FETCH_UNREAD_BODIES'] as const;
+  const prev: Record<string, string | undefined> = {};
+  let err: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    for (const k of KEYS) { prev[k] = process.env[k]; delete process.env[k]; }
+    process.env.OFW_NO_READ_DAYS = 'sun mon tue wed thu fri sat';
+    err = vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+  afterEach(() => {
+    for (const k of KEYS) {
+      if (prev[k] === undefined) delete process.env[k];
+      else process.env[k] = prev[k];
+    }
+    err.mockRestore();
+  });
+
+  const NOTE = 'Read on a no-read day via override.';
+  const audits = () => err.mock.calls
+    .map((c: unknown[]) => String(c[0]))
+    .filter((l: string) => l.startsWith('[ofw-mcp] AUDIT '))
+    .map((l: string) => JSON.parse(l.slice('[ofw-mcp] AUDIT '.length)));
+  const unread = (id: number) => sampleMessageRow({
+    id, folder: 'inbox', subject: `Subject ${id}`, body: null, fetchedBodyAt: null,
+    recipients: [{ userId: 1, name: 'Me', viewedAt: null }], listData: { id, read: false },
+  });
+  const read = (id: number) => sampleMessageRow({ id, folder: 'inbox', subject: `Subject ${id}`, body: 'secret body' });
+  const detail = (id: number) => ({ id, subject: `Subject ${id}`, body: 'live body', date: { dateTime: '2026-11-09T09:00:00' } });
+  const emptySync = {
+    synced: {}, unreadInbox: [], refreshed: [], notRefreshed: [], done: true, syncComplete: true, markedReadCount: 0, newMessages: [],
+  };
+
+  it('ofw_get_message returns a cached body, flags it and audits it', async () => {
+    upsertMessage(read(950));
+    const client = new OFWClient();
+    setup(client);
+    const parsed = JSON.parse((await handlers.get('ofw_get_message')!({ messageId: '950', overrideNoReadDay: true })).content[0].text);
+    expect(parsed).toMatchObject({ body: 'secret body', readOverride: true, readOverrideNote: NOTE });
+    expect(parsed.bodyWithheld).toBeUndefined();
+    expect(parsed.readingBlocked).toBeUndefined();
+    expect(audits()).toEqual([expect.objectContaining({ event: 'no_read_day_override', tool: 'ofw_get_message', messageIds: [950], timestamp: expect.any(String) })]);
+  });
+
+  it('ofw_get_message fetches an unread body when nothing else stands in the way', async () => {
+    upsertMessage(unread(951));
+    const client = new OFWClient();
+    vi.spyOn(client, 'request').mockResolvedValue(detail(951));
+    setup(client);
+    const parsed = JSON.parse((await handlers.get('ofw_get_message')!({ messageId: '951', overrideNoReadDay: true })).content[0].text);
+    expect(parsed).toMatchObject({ body: 'live body', readOverride: true, readOverrideNote: NOTE });
+    expect(audits().map((a: { messageIds: number[] }) => a.messageIds)).toEqual([[951]]);
+  });
+
+  it('without the param a no-read day still withholds, and nothing is audited', async () => {
+    upsertMessage(read(952));
+    setup(new OFWClient());
+    for (const overrideNoReadDay of [undefined, false]) {
+      const parsed = JSON.parse((await handlers.get('ofw_get_message')!({ messageId: '952', overrideNoReadDay })).content[0].text);
+      expect(parsed).toMatchObject({ body: null, bodyWithheld: true });
+      expect(parsed.readOverride).toBeUndefined();
+    }
+    expect(audits()).toEqual([]);
+  });
+
+  it('is a no-op on a reading day: no flag, no note, no audit', async () => {
+    process.env.OFW_NO_READ_DAYS = '2000-01-01';
+    upsertMessage(read(953));
+    setup(new OFWClient());
+    const got = JSON.parse((await handlers.get('ofw_get_message')!({ messageId: '953', overrideNoReadDay: true })).content[0].text);
+    expect(got.body).toBe('secret body');
+    expect(got.readOverride).toBeUndefined();
+    expect(got.readOverrideNote).toBeUndefined();
+    const listed = JSON.parse((await handlers.get('ofw_list_messages')!({ overrideNoReadDay: true })).content[0].text);
+    expect(listed.readOverride).toBeUndefined();
+    expect(audits()).toEqual([]);
+  });
+
+  it('OFW_ALLOW_MARK_READ=false still refuses an unread message, and no use is audited', async () => {
+    process.env.OFW_ALLOW_MARK_READ = 'false';
+    upsertMessage(unread(954));
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request');
+    setup(client);
+    const result = await handlers.get('ofw_get_message')!({ messageId: '954', overrideNoReadDay: true, allowMarkRead: true });
+    expect(result.isError).toBe(true);
+    expect(JSON.parse(result.content[0].text)).toMatchObject({ error: 'MARK_READ_BLOCKED' });
+    expect(spy).not.toHaveBeenCalled();
+    expect(audits()).toEqual([]);
+  });
+
+  it('allowMarkRead:false still refuses', async () => {
+    upsertMessage(unread(955));
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request');
+    setup(client);
+    const result = await handlers.get('ofw_get_message')!({ messageId: '955', overrideNoReadDay: true, allowMarkRead: false });
+    expect(JSON.parse(result.content[0].text)).toMatchObject({ error: 'MARK_READ_BLOCKED' });
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('OFW_CONFIRM_MARK_READ still asks first, naming the override; only the token opens it', async () => {
+    process.env.OFW_CONFIRM_MARK_READ = 'true';
+    upsertMessage(unread(956));
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request').mockResolvedValue(detail(956));
+    setup(client);
+    const handler = handlers.get('ofw_get_message')! as GatedHandler;
+    const args = { messageId: '956', overrideNoReadDay: true };
+    const { preview, confirmToken } = await callPreview(handler, args);
+    expect(preview).toMatchObject({ messageId: 956, noReadDayOverride: true });
+    expect(spy).not.toHaveBeenCalled();
+    expect(audits()).toEqual([]);
+
+    const done = JSON.parse((await handler({ ...args, confirmToken }, NO_ELICIT_CTX)).content[0].text);
+    expect(done).toMatchObject({ body: 'live body', readOverride: true });
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(audits()).toHaveLength(1);
+  });
+
+  it('a confirmToken minted for the override cannot be spent without it', async () => {
+    process.env.OFW_CONFIRM_MARK_READ = 'true';
+    upsertMessage(unread(957));
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request').mockResolvedValue(detail(957));
+    setup(client);
+    const handler = handlers.get('ofw_get_message')! as GatedHandler;
+    const { confirmToken } = await callPreview(handler, { messageId: '957', overrideNoReadDay: true });
+    process.env.OFW_NO_READ_DAYS = '2000-01-01';
+    await handler({ messageId: '957', confirmToken }, NO_ELICIT_CTX);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('ofw_list_messages returns bodies, searches them, flags before the data and audits what it returned', async () => {
+    upsertMessage(read(958));
+    upsertMessage(unread(959));
+    setup(new OFWClient());
+    const text = (await handlers.get('ofw_list_messages')!({ overrideNoReadDay: true })).content[0].text;
+    const parsed = JSON.parse(text);
+    expect(parsed).toMatchObject({ readOverride: true, readOverrideNote: NOTE });
+    expect(parsed.readingBlocked).toBeUndefined();
+    expect(text.indexOf('"readOverride"')).toBeLessThan(text.indexOf('"messages"'));
+    expect(parsed.messages.find((m: { id: number }) => m.id === 958).body).toBe('secret body');
+    expect(audits()).toEqual([expect.objectContaining({ tool: 'ofw_list_messages', messageIds: [958] })]);
+    const byBody = JSON.parse((await handlers.get('ofw_list_messages')!({ q: 'secret body', overrideNoReadDay: true })).content[0].text);
+    expect(byBody.messages.map((m: { id: number }) => m.id)).toEqual([958]);
+  });
+
+  it('ofw_list_messages view:"brief" returns no bodies, so it claims and audits nothing', async () => {
+    upsertMessage(read(960));
+    setup(new OFWClient());
+    const text = (await handlers.get('ofw_list_messages')!({ view: 'brief', overrideNoReadDay: true })).content[0].text;
+    expect(text).not.toContain('readOverride');
+    expect(audits()).toEqual([]);
+  });
+
+  describe('ofw_sync_messages', () => {
+    const overridden = { ...emptySync, readOverride: true, readOverrideNote: NOTE, readOverrideMessageIds: [5] };
+
+    it('passes the override through, reports it and audits the fetched ids', async () => {
+      const spy = vi.spyOn(syncModule, 'syncAll').mockResolvedValue(overridden as never);
+      setup(new OFWClient());
+      const parsed = JSON.parse((await handlers.get('ofw_sync_messages')!({ overrideNoReadDay: true })).content[0].text);
+      expect(spy.mock.calls[0][1]).toMatchObject({ overrideNoReadDay: true, fetchUnreadBodies: false });
+      expect(parsed).toMatchObject({ readOverride: true, readOverrideNote: NOTE });
+      expect(audits()).toEqual([expect.objectContaining({ tool: 'ofw_sync_messages', messageIds: [5] })]);
+      spy.mockRestore();
+    });
+
+    it('hands syncAll the handler\'s one decision, so a midnight rollover cannot apply the override to the env default', async () => {
+      // A reading day when the handler decides: the flag must not reach syncAll,
+      // which would otherwise honour it if the day turned no-read a moment later.
+      process.env.OFW_NO_READ_DAYS = '2000-01-01';
+      process.env.OFW_FETCH_UNREAD_BODIES = 'true';
+      const spy = vi.spyOn(syncModule, 'syncAll').mockResolvedValue(structuredClone(emptySync) as never);
+      setup(new OFWClient());
+      await handlers.get('ofw_sync_messages')!({ overrideNoReadDay: true });
+      expect(spy.mock.calls[0][1]).toMatchObject({ overrideNoReadDay: false, fetchUnreadBodies: true });
+      spy.mockRestore();
+    });
+
+    it('lifts the day ceiling on fetchUnreadBodies', async () => {
+      const spy = vi.spyOn(syncModule, 'syncAll').mockResolvedValue(overridden as never);
+      setup(new OFWClient());
+      const parsed = JSON.parse((await handlers.get('ofw_sync_messages')!({ overrideNoReadDay: true, fetchUnreadBodies: true })).content[0].text);
+      expect(spy.mock.calls[0][1]).toMatchObject({ fetchUnreadBodies: true });
+      expect(parsed.unreadBodies).toBeUndefined();
+      spy.mockRestore();
+    });
+
+    it('OFW_FETCH_UNREAD_BODIES alone cannot mark anything read under the override', async () => {
+      process.env.OFW_FETCH_UNREAD_BODIES = 'true';
+      const spy = vi.spyOn(syncModule, 'syncAll').mockResolvedValue(overridden as never);
+      setup(new OFWClient());
+      await handlers.get('ofw_sync_messages')!({ overrideNoReadDay: true });
+      expect(spy.mock.calls[0][1]).toMatchObject({ fetchUnreadBodies: false });
+      spy.mockRestore();
+    });
+
+    it('OFW_ALLOW_MARK_READ=false stays a ceiling', async () => {
+      process.env.OFW_ALLOW_MARK_READ = 'false';
+      const spy = vi.spyOn(syncModule, 'syncAll').mockResolvedValue(overridden as never);
+      setup(new OFWClient());
+      const parsed = JSON.parse((await handlers.get('ofw_sync_messages')!({ overrideNoReadDay: true, fetchUnreadBodies: true })).content[0].text);
+      expect(spy.mock.calls[0][1]).toMatchObject({ fetchUnreadBodies: false });
+      expect(parsed.unreadBodies).toMatchObject({ fetched: false, gate: 'OFW_ALLOW_MARK_READ' });
+      spy.mockRestore();
+    });
+
+    it('OFW_CONFIRM_MARK_READ asks first, then opens and audits the approved set', async () => {
+      process.env.OFW_CONFIRM_MARK_READ = 'true';
+      upsertMessage(unread(961));
+      const spy = vi.spyOn(syncModule, 'syncAll').mockImplementation(async () => structuredClone({ ...overridden, readOverrideMessageIds: [] }) as never);
+      const client = new OFWClient();
+      const req = vi.spyOn(client, 'request').mockResolvedValue(detail(961));
+      setup(client);
+      const handler = handlers.get('ofw_sync_messages')! as GatedHandler;
+      const args = { overrideNoReadDay: true, fetchUnreadBodies: true };
+      const { preview, confirmToken } = await callPreview(handler, args);
+      expect(preview).toMatchObject({ noReadDayOverride: true });
+      expect(spy.mock.calls[0][1]).toMatchObject({ fetchUnreadBodies: false });
+      expect(req).not.toHaveBeenCalled();
+
+      const done = JSON.parse((await handler({ ...args, confirmToken }, NO_ELICIT_CTX)).content[0].text);
+      expect(req).toHaveBeenCalledWith('GET', '/pub/v3/messages/961');
+      expect(done.readOverrideMessageIds).toEqual([961]);
+      expect(audits().at(-1)).toMatchObject({ tool: 'ofw_sync_messages', messageIds: [961] });
+      spy.mockRestore();
+    });
+
+    it('confirmation still names the plain prompt when no override is in play', async () => {
+      process.env.OFW_NO_READ_DAYS = '2000-01-01';
+      process.env.OFW_CONFIRM_MARK_READ = 'true';
+      upsertMessage(unread(962));
+      const spy = vi.spyOn(syncModule, 'syncAll').mockResolvedValue(structuredClone(emptySync) as never);
+      setup(new OFWClient());
+      const { preview } = await callPreview(handlers.get('ofw_sync_messages')! as GatedHandler, { fetchUnreadBodies: true });
+      expect(preview.noReadDayOverride).toBeUndefined();
+      spy.mockRestore();
+    });
+  });
+
+  /** Each tool's description and input-parameter names, as a model sees them. */
+  const registeredTools = (): Map<string, string> => {
+    const server = new McpServer({ name: 'test', version: '0.0.0' });
+    const seen = new Map<string, string>();
+    vi.spyOn(server, 'registerTool').mockImplementation((name: string, config: unknown) => {
+      const { description, inputSchema } = config as { description: string; inputSchema?: z.ZodObject };
+      seen.set(name, `${description} ${Object.keys(inputSchema?.shape ?? {}).join(' ')}`);
+      return undefined as never;
+    });
+    registerMessageTools(server, new OFWClient(), cacheProvider, attachmentIO);
+    return seen;
+  };
+
+  it('ofw_check_freshness and ofw_status do not take it: they return no bodies', () => {
+    const registered = registeredTools();
+    for (const tool of ['ofw_check_freshness', 'ofw_status']) {
+      expect(registered.get(tool)).not.toContain('overrideNoReadDay');
+    }
+  });
+
+  it('every overriding tool tells the model to use it only on the user\'s explicit ask', () => {
+    const registered = registeredTools();
+    for (const tool of ['ofw_get_message', 'ofw_list_messages', 'ofw_sync_messages']) {
+      expect(registered.get(tool)).toMatch(/overrideNoReadDay/);
+      expect(registered.get(tool)).toMatch(/explicitly asked/);
+    }
   });
 });
 

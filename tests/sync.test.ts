@@ -1539,6 +1539,56 @@ describe('sync on a no-read day (OFW_READ_DAYS / OFW_NO_READ_DAYS)', () => {
     expect(result.note).toMatch(/no-read day/);
   });
 
+  describe('overrideNoReadDay', () => {
+    const routed = () => {
+      const client = new OFWClient();
+      const spy = vi.spyOn(client, 'request').mockImplementation(async (_m: string, path: string) => {
+        if (path.startsWith('/pub/v1/messageFolders')) return foldersResponse();
+        if (path.includes('folders=111') && path.includes('page=1&')) return listResponse([{ id: 10 }, { id: 11, unread: true }, { id: 12 }]);
+        if (path.includes('folders=')) return listResponse([]);
+        if (path === '/pub/v3/messages/10') return { body: 'body-10' };
+        if (path === '/pub/v3/messages/11') return { body: 'body-11' };
+        if (path === '/pub/v3/messages/12') return { body: 'body-12' };
+        throw new Error(`unexpected request ${path}`);
+      });
+      return { client, spy };
+    };
+
+    it('fetches bodies as on a reading day, reporting and listing what it fetched', async () => {
+      upsertMessage(nullBodyRow(12, 'inbox')); // a row withheld earlier, heals too
+      const { client } = routed();
+      const result = await syncAll(client, { folders: ['inbox'], overrideNoReadDay: true }, store());
+      expect(getMessage(10)?.body).toBe('body-10');
+      expect(getMessage(12)?.body).toBe('body-12');
+      expect(result.bodiesWithheld).toBeUndefined();
+      expect(result).toMatchObject({ readOverride: true, readOverrideNote: 'Read on a no-read day via override.' });
+      expect([...result.readOverrideMessageIds!].sort()).toEqual([10, 12]);
+    });
+
+    it('never opens an unread inbox message without fetchUnreadBodies', async () => {
+      const { client, spy } = routed();
+      const result = await syncAll(client, { folders: ['inbox'], overrideNoReadDay: true }, store());
+      expect(spy).not.toHaveBeenCalledWith('GET', '/pub/v3/messages/11');
+      expect(getMessage(11)?.body).toBeNull();
+      expect(result.markedReadCount).toBe(0);
+    });
+
+    it('with fetchUnreadBodies it opens them, as on a reading day', async () => {
+      const { client, spy } = routed();
+      const result = await syncAll(client, { folders: ['inbox'], overrideNoReadDay: true, fetchUnreadBodies: true }, store());
+      expect(spy).toHaveBeenCalledWith('GET', '/pub/v3/messages/11');
+      expect(result.readOverrideMessageIds).toContain(11);
+    });
+
+    it('is a no-op on a reading day', async () => {
+      process.env.OFW_NO_READ_DAYS = '2000-01-01';
+      const { client } = routed();
+      const result = await syncAll(client, { folders: ['inbox'], overrideNoReadDay: true }, store());
+      expect(result.readOverride).toBeUndefined();
+      expect(result.readOverrideMessageIds).toBeUndefined();
+    });
+  });
+
   it('fills in withheld bodies on the next reading day — never an unread inbox one', async () => {
     delete process.env.OFW_NO_READ_DAYS;
     upsertMessage(nullBodyRow(10, 'inbox'));   // read on OFW since
