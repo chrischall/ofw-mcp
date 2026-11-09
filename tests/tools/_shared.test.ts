@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { isAbsolute } from 'node:path';
 import { z } from 'zod';
 import { OFWClient } from '../../src/client.js';
-import { deriveRead, expandPath, hasRealView, jsonResponse, mapRecipients, postMessageAndRefetch, textResponse, UnconfirmedWriteError, verifyWriteLanded, withReadState } from '../../src/tools/_shared.js';
+import { deriveRead, draftReplyTarget, expandPath, hasRealView, jsonResponse, mapRecipients, postMessageAndRefetch, textResponse, UnconfirmedWriteError, verifyWriteLanded, withReadState } from '../../src/tools/_shared.js';
 import { sampleMessageRow } from '../_fixtures.js';
 
 describe('jsonResponse', () => {
@@ -336,5 +336,26 @@ describe('postMessageAndRefetch — unknown vs definitive failures', () => {
     await expect(post(rejected)).rejects.toBe(rejected);
     const limited = new Error('Rate limited by OFW API');
     await expect(post(limited)).rejects.toBe(limited);
+  });
+});
+
+describe('draftReplyTarget', () => {
+  it('takes the first echo that names a target, from either spelling', () => {
+    expect(draftReplyTarget([{ replyToId: null, inReplyTo: 7 }, { replyToId: 8 }], 9)).toEqual({ replyToId: 7, replyToSource: 'server' });
+    expect(draftReplyTarget([{}, { replyToId: 8 }], 9)).toEqual({ replyToId: 8, replyToSource: 'server' });
+  });
+
+  it('keeps the fallback when no echo reports the linkage either way', () => {
+    // A bare replyToId:null and a missing key are both "not echoed".
+    expect(draftReplyTarget([{ replyToId: null }, {}], 9)).toEqual({ replyToId: 9, replyToSource: 'cache' });
+  });
+
+  it('never resurrects a target an echo POSITIVELY dropped', () => {
+    expect(draftReplyTarget([{ inReplyTo: null }], 9)).toEqual({ replyToId: null, replyToSource: null });
+    expect(draftReplyTarget([{}, { showContext: false }], 9)).toEqual({ replyToId: null, replyToSource: null });
+  });
+
+  it('reports no target when there is neither an echo nor a fallback', () => {
+    expect(draftReplyTarget([{}], null)).toEqual({ replyToId: null, replyToSource: null });
   });
 });

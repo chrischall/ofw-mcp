@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { projectOrRaw, pruneUndefined, type View } from '@chrischall/mcp-utils';
 import type { DraftRow, MessageRow } from '../cache/store.js';
 
@@ -161,6 +162,53 @@ export function compactDraft(row: DraftRow): Record<string, unknown> {
     body: rest.body,
     ...omitKnown(rest as Record<string, unknown>, DRAFT_ROW_KEYS),
   });
+}
+
+/**
+ * A body the caller just wrote, reduced to what confirms it landed: its length
+ * and a short SHA-256 (16 hex characters). Hash the text you sent to compare.
+ */
+export function bodyDigest(body: string): { bodyLength: number; bodySha256: string };
+export function bodyDigest(body: string | null): { bodyLength: number | null; bodySha256: string | null };
+export function bodyDigest(body: string | null): { bodyLength: number | null; bodySha256: string | null } {
+  if (body === null) return { bodyLength: null, bodySha256: null };
+  return { bodyLength: body.length, bodySha256: createHash('sha256').update(body).digest('hex').slice(0, 16) };
+}
+
+/**
+ * The compact echo of a draft `ofw_save_draft` just wrote. Unlike
+ * {@link compactDraft} (a READ, where the body is the payload), the caller
+ * already holds this body, so it is replaced by {@link bodyDigest} — and the
+ * OFW `listData` echo, which repeats body, subject, recipients and an
+ * eleven-rendering date block, is dropped.
+ */
+export function compactWrittenDraft(row: DraftRow): Record<string, unknown> {
+  return {
+    id: row.id,
+    subject: row.subject,
+    ...bodyDigest(row.body),
+    recipients: row.recipients,
+    replyToId: row.replyToId,
+    modifiedAt: row.modifiedAt,
+  };
+}
+
+/**
+ * The compact echo of a message `ofw_send_message` just sent: the body becomes
+ * {@link bodyDigest}, and `listData`, `fromUser` (the account holder) and
+ * `fetchedBodyAt` (the moment of this very call) are dropped.
+ */
+export function compactSentMessage(row: MessageRow): Record<string, unknown> {
+  return {
+    id: row.id,
+    folder: row.folder,
+    subject: row.subject,
+    ...bodyDigest(row.body),
+    sentAt: row.sentAt,
+    recipients: row.recipients,
+    replyToId: row.replyToId,
+    chainRootId: row.chainRootId,
+  };
 }
 
 /**

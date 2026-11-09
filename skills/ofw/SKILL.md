@@ -177,6 +177,21 @@ eight fields per recipient beside the three the row already normalised, and a
 - **On a draft, `ofw_get_message` returns `from: null`** — a draft is unsent, so
   there is no sender, and `""` would read as one we failed to find.
 
+**The two write tools default to compact too.** `ofw_save_draft` and
+`ofw_send_message` drop the `listData` echo and replace the body you just wrote
+with `bodyLength` + `bodySha256` (the first 16 hex characters of its SHA-256),
+which is enough to confirm what landed. They keep `draftKey`, `id`, `revision`,
+`replyToId`, `recipients`, the attachments block, `modifiedAt`/`sentAt`, notes
+and warnings. `view: "full"` returns the body and the echo.
+
+**`replyToSource` says where a draft's reply target came from.** `"server"`
+means OFW reported it. `"cache"` means OFW's payload left the linkage out, so
+the target this server recorded was kept (a payload that *positively* reports
+the draft as unthreaded is never overridden). The target, and the `revision`
+built from it, are the same on every path — save, list, get and
+`ofw_check_freshness` — so a revision from any of them works as
+`expectedRevision`, and sending by `draftId` threads to it.
+
 Pass `view: "full"` when you need a field compact dropped — `listData` and
 everything in it. There is deliberately **no `raw` rung**: a message here is
 assembled from a list item, a detail GET and derived fields, so there is no

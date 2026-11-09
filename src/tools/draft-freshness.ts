@@ -2,7 +2,8 @@ import { z } from 'zod';
 import { parseLenient } from '@chrischall/mcp-utils';
 import type { OFWClient } from '../client.js';
 import type { Recipient } from '../cache/store.js';
-import { ApiRecipientSchema, mapRecipients, threadedReplyTo } from './_shared.js';
+import { ApiRecipientSchema, draftReplyTarget, mapRecipients } from './_shared.js';
+import type { ReplyToSource } from './_shared.js';
 
 /**
  * The content of a draft, normalized so a server copy and a cached copy are
@@ -85,6 +86,7 @@ const ServerDraftSchema = z.looseObject({
   // that disagreed about the same draft.
   replyToId: z.number().nullable().optional(),
   inReplyTo: z.number().nullable().optional(),
+  showContext: z.boolean().optional(),
   recipients: z.array(ApiRecipientSchema).optional(),
   // Attachment fileIds — read so send-by-draft carries the draft's
   // attachments onto the sent message (see DraftContent.files).
@@ -130,6 +132,8 @@ export interface MessageSnapshot {
   folderName: string | null;
   /** `date.dateTime` — the sent time for a sent message. */
   dateTime: string | null;
+  /** How `content.replyToId` was established (null: no reply target). */
+  replyToSource: ReplyToSource | null;
 }
 
 /**
@@ -143,7 +147,11 @@ export interface MessageSnapshot {
  * the narrower type (the catch blocks read only `.message`, which every Error
  * carries).
  */
-export async function fetchMessageSnapshot(client: OFWClient, id: number): Promise<MessageSnapshot | null> {
+export async function fetchMessageSnapshot(
+  client: OFWClient,
+  id: number,
+  fallbackReplyTo: number | null = null,
+): Promise<MessageSnapshot | null> {
   let raw: unknown;
   try {
     raw = await client.request('GET', `/pub/v3/messages/${id}`);
@@ -162,17 +170,22 @@ export async function fetchMessageSnapshot(client: OFWClient, id: number): Promi
     context: 'GET /pub/v3/messages/{id} (draft freshness check)',
     mode: 'strict',
   });
+  // The same reply-target rule as the save echo and the drafts sync
+  // (draftReplyTarget), with the cached target as the fallback, so a detail
+  // that does not echo the linkage hashes exactly like the cached row.
+  const reply = draftReplyTarget([detail], fallbackReplyTo);
   return {
     content: {
       subject: detail.subject ?? '',
       body: detail.body ?? '',
-      replyToId: threadedReplyTo(detail),
+      replyToId: reply.replyToId,
       recipients: mapRecipients(detail.recipients),
       ...(detail.files !== undefined ? { files: detail.files } : {}),
     },
     folderId: detail.folder?.id === undefined ? null : String(detail.folder.id),
     folderName: detail.folder?.name ?? null,
     dateTime: detail.date?.dateTime ?? null,
+    replyToSource: reply.replyToSource,
   };
 }
 
@@ -184,8 +197,12 @@ export async function fetchMessageSnapshot(client: OFWClient, id: number): Promi
  * the callers in messages.ts abort on ALL of them: a freshness check that could
  * not run must never wave the write through.
  */
-export async function fetchServerDraft(client: OFWClient, id: number): Promise<DraftContent | null> {
-  return (await fetchMessageSnapshot(client, id))?.content ?? null;
+export async function fetchServerDraft(
+  client: OFWClient,
+  id: number,
+  fallbackReplyTo: number | null = null,
+): Promise<DraftContent | null> {
+  return (await fetchMessageSnapshot(client, id, fallbackReplyTo))?.content ?? null;
 }
 
 export type FreshnessVerdict = 'FRESH' | 'STALE' | 'MISSING';

@@ -25,6 +25,7 @@ import {
 } from './uploads.js';
 import type { InlineFile, UploadOptions } from './uploads.js';
 import { clearHeldFiles, getHeldFiles, heldFilesFor, HELD_NOTE, setHeldFiles, uniqueIds } from './held-attachments.js';
+import { replyToSourceField, setReplyToSource } from './reply-source.js';
 import { buildInlineDelivery, MAX_INLINE_BYTES, tryExtract } from './delivery.js';
 import { resolveDownloadMime, resolveSaveDest } from './attachments.js';
 import {
@@ -33,10 +34,16 @@ import {
 } from '../config.js';
 import { basename, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { ApiRecipientSchema, deriveRead, hasRealView, jsonErrorResponse, jsonResponse, jsonText, mapRecipients, notedJsonResponse, postMessageAndRefetch, reportsThreaded, UnconfirmedWriteError, reportsUnthreaded, threadedReplyTo, verifyWriteLanded, withReadState } from './_shared.js';
+import { ApiRecipientSchema, deriveRead, draftReplyTarget, hasRealView, jsonErrorResponse, jsonResponse, jsonText, mapRecipients, notedJsonResponse, postMessageAndRefetch, reportsThreaded, UnconfirmedWriteError, reportsUnthreaded, threadedReplyTo, verifyWriteLanded, withReadState } from './_shared.js';
+import type { ReplyToSource } from './_shared.js';
 import { parseLenient } from '@chrischall/mcp-utils';
 import { pageState } from './pagination.js';
-import { MESSAGE_VIEWS, senderOf, viewDrafts, viewMessages, viewOne } from './project.js';
+import { compactSentMessage, compactWrittenDraft, MESSAGE_VIEWS, senderOf, viewDrafts, viewMessages, viewOne } from './project.js';
+
+// The `view` note on the two write tools. Their echo is what the caller just
+// wrote, so compact replaces the body with its length + hash rather than
+// repeating it, and drops OFW's raw `listData` echo.
+const WRITE_VIEW_NOTE = 'compact omits OurFamilyWizard\'s raw `listData` echo (which repeats the body, subject, recipients and a date block) and replaces the body you just wrote with `bodyLength` + `bodySha256` (the first 16 hex characters of its SHA-256) to confirm what landed. Pass "full" for both.';
 import { resolveView, viewParam } from '@chrischall/mcp-utils';
 import { displayTimeZone, formatInstant, normalizeTimestampsInValue, nowNaiveWallClock, toNaiveWallClock } from '../timestamps.js';
 import { readingBlockedToday } from '../read-days.js';
@@ -784,6 +791,9 @@ export function registerMessageTools(
         // ofw_delete_draft / ofw_send_message to assert you are acting on
         // THIS version.
         revision: draftRevision(draftRow, held),
+        // Whether the reply target is OFW's own echo or this server's record of
+        // it (OFW's payload omitted the linkage) — see reply-source.ts.
+        ...(await replyToSourceField(cache, draftRow.id, draftRow.replyToId)),
         cacheStatus,
         // False = this draft's existence and unsent status are remembered from
         // a cache, not confirmed on OFW. Call ofw_check_freshness before
@@ -947,6 +957,7 @@ export function registerMessageTools(
       inlineAttachments: inlineAttachmentsParam,
       blobKeys: blobKeysParam,
       confirmToken: confirmTokenParam,
+      view: viewParam(MESSAGE_VIEWS, { note: WRITE_VIEW_NOTE }),
     }),
   }, async (args, ctx) => {
     if (args.messageId !== undefined && args.draftId !== undefined && args.messageId !== args.draftId) {
@@ -1320,7 +1331,7 @@ export function registerMessageTools(
             previousId: draftRef,
           }
           : {}),
-        ...persisted,
+        ...(resolveView(args.view, MESSAGE_VIEWS) === 'full' ? persisted : compactSentMessage(persisted)),
         ...(attachmentCheck !== null ? { attachments: attachmentCheck } : {}),
         ...(newFiles.length > 0 ? { attachmentsUploaded: newFiles } : {}),
         ...(uploadWarnings.length > 0 ? { warnings: uploadWarnings } : {}),
@@ -1373,7 +1384,7 @@ export function registerMessageTools(
 
     let server: DraftContent | null;
     try {
-      server = await fetchServerDraft(client, draftId);
+      server = await fetchServerDraft(client, draftId, cachedRow?.replyToId ?? null);
     } catch (e) {
       // Anything landing here means the check could not RUN. Most failures
       // arrive as DraftFreshnessError from fetchServerDraft, but not all of
@@ -1500,8 +1511,9 @@ export function registerMessageTools(
         // compared this cache against OFW.
         const held = await heldFilesFor(cache, rows.map((d) => d.id));
         const inferred = await inferredDraftKeys(cache, rows.map((d) => d.id));
-        const drafts = rows.map((d) => ({
+        const drafts = await Promise.all(rows.map(async (d) => ({
           ...d,
+          ...(await replyToSourceField(cache, d.id, d.replyToId)),
           revision: draftRevision(d, held.get(d.id)),
           ...(held.get(d.id)!.length > 0 ? { heldFiles: held.get(d.id) } : {}),
           draftKey: keyById.get(d.id) ?? null,
@@ -1509,7 +1521,7 @@ export function registerMessageTools(
           cacheStatus,
           serverConfirmed,
           asOf: freshness.asOf,
-        }));
+        })));
         return { drafts, total, freshness, serverConfirmed };
       },
     });
@@ -1570,7 +1582,7 @@ export function registerMessageTools(
 
   if (allowDrafts) server.registerTool('ofw_save_draft', {
     _meta: familyMeta('change'),
-    description: 'Save a message as a draft in OurFamilyWizard. RECIPIENTS: OurFamilyWizard has not reliably kept recipients on drafts (when the saved draft comes back with none it is noted once, not warned about) — supply recipientIds at send time as well. ATTACHMENTS: OurFamilyWizard does not store files on drafts, so myFileIDs / inlineAttachments / blobKeys are HELD with the draft by this server (carried across edits, de-duplicated; removeFileIDs drops one), shown under attachments.held, folded into `revision`, and attached when the draft is sent with ofw_send_message(draftId). They are not visible on the draft in the OurFamilyWizard web app. IDENTITY: the response leads with `draftKey`, the stable identity that survives editing — key off it, because the `id` changes on EVERY edit (replacing a draft creates a NEW draft and deletes the old one; OFW\'s update-in-place endpoint silently no-ops, so we never use it). Pass messageId to replace an existing draft; the response.id will be the NEW id, and a transparency NOTE documents the swap and which fields were carried over. THREADING: if replyToId is provided, the cache may rewrite it to the latest reply in the thread (note included). The threading verdict is read from OFW\'s full echo (replyToId/inReplyTo/showContext) — a warning appears ONLY when the reply linkage was genuinely dropped or re-targeted, and the response\'s top-level replyToId/inReplyTo always agree with its listData. After saving, the tool re-fetches the draft from OFW, and the returned `revision` reflects that authoritative state (so it will match on your next edit). SAFETY: because replacing DESTROYS the old draft rather than merging, passing messageId first re-reads that draft from OFW and REFUSES the write if its subject/body/recipients changed since you read it (drafts edited in the OFW web app do not bump any timestamp, so the local cache can be silently behind). A pure replyToId normalization by OFW is NOT treated as a conflict. The refusal returns the current server body under serverBody — merge your edit into it and retry with expectedRevision.',
+    description: 'Save a message as a draft in OurFamilyWizard. RECIPIENTS: OurFamilyWizard has not reliably kept recipients on drafts (when the saved draft comes back with none it is noted once, not warned about) — supply recipientIds at send time as well. ATTACHMENTS: OurFamilyWizard does not store files on drafts, so myFileIDs / inlineAttachments / blobKeys are HELD with the draft by this server (carried across edits, de-duplicated; removeFileIDs drops one), shown under attachments.held, folded into `revision`, and attached when the draft is sent with ofw_send_message(draftId). They are not visible on the draft in the OurFamilyWizard web app. IDENTITY: the response leads with `draftKey`, the stable identity that survives editing — key off it, because the `id` changes on EVERY edit (replacing a draft creates a NEW draft and deletes the old one; OFW\'s update-in-place endpoint silently no-ops, so we never use it). Pass messageId to replace an existing draft; the response.id will be the NEW id, and a transparency NOTE documents the swap and which fields were carried over. THREADING: if replyToId is provided, the cache may rewrite it to the latest reply in the thread (note included). The threading verdict is read from OFW\'s full echo (replyToId/inReplyTo/showContext) — a warning appears ONLY when the reply linkage was genuinely dropped or re-targeted. When OFW\'s echo omits the linkage entirely, the posted target is kept and marked replyToSource:"cache". Replacing a draft (messageId) without replyToId keeps the draft\'s own reply target. RESPONSE: compact by default — no listData echo, and the body you wrote is returned as bodyLength + bodySha256; view:"full" returns both. After saving, the tool re-fetches the draft from OFW, and the returned `revision` reflects that authoritative state (so it will match on your next edit). SAFETY: because replacing DESTROYS the old draft rather than merging, passing messageId first re-reads that draft from OFW and REFUSES the write if its subject/body/recipients changed since you read it (drafts edited in the OFW web app do not bump any timestamp, so the local cache can be silently behind). A pure replyToId normalization by OFW is NOT treated as a conflict. The refusal returns the current server body under serverBody — merge your edit into it and retry with expectedRevision.',
     // Destructive: with messageId, saving REPLACES the draft by creating a new
     // one and deleting the old (OFW has no draft update), so the old draft's
     // server content is gone. Not idempotent: every call mints a new draft id.
@@ -1587,9 +1599,11 @@ export function registerMessageTools(
       blobKeys: blobKeysParam,
       expectedRevision: z.string().describe('With messageId: the `revision` you got from ofw_list_drafts/ofw_get_message for that draft. Asserts you are replacing THAT version. If the draft changed on OFW since, the write is refused and the current server body is returned. Omit and the tool compares the server against the local cache instead — omitting never means "overwrite anyway".').optional(),
       force: z.boolean().describe('Default false. Overwrite even when the draft changed on OurFamilyWizard since you read it. The discarded server version is echoed back in the response. Only use after showing the user the conflict.').optional(),
+      view: viewParam(MESSAGE_VIEWS, { note: WRITE_VIEW_NOTE }),
     }),
   }, async (args) => {
     const cache = cacheProvider();
+    const view = resolveView(args.view, MESSAGE_VIEWS);
     // New attachments are validated before ANYTHING happens, so a bad entry
     // fails the call with nothing uploaded and nothing saved.
     const blobStore = args.blobKeys?.length ? blobStoreFromEnv() : undefined;
@@ -1604,6 +1618,7 @@ export function registerMessageTools(
     let serverFiles: number[] | undefined;
     let priorHeld: number[] = [];
     let serverRecipientIds: number[] | undefined;
+    let serverReplyTo: number | null = null;
     if (args.messageId !== undefined) {
       const guard = await guardDestructiveDraftOp({
         cache,
@@ -1620,8 +1635,12 @@ export function registerMessageTools(
       // live), so a replace that names none must not post [] and drop them.
       const kept = (guard.server?.recipients ?? []).map((r) => r.userId).filter((id) => id !== 0);
       if (kept.length > 0) serverRecipientIds = [...new Set(kept)];
+      // Likewise the reply target: a replace that names no replyToId keeps the
+      // draft's own thread. Posting without one turned an edit of a reply into
+      // a new top-level conversation.
+      serverReplyTo = guard.server?.replyToId ?? null;
     }
-    const requestedReplyTo = args.replyToId ?? null;
+    const requestedReplyTo = args.replyToId ?? serverReplyTo;
     let resolvedReplyTo = requestedReplyTo;
     let rewriteNote: string | null = null;
 
@@ -1670,6 +1689,7 @@ export function registerMessageTools(
     let verifyNote: string | null = null;
     let recipientsNote: string | null = null;
     let newRevision: string | null = null;
+    let replyToSource: ReplyToSource | null = null;
     let onDraft: number[] = [];
     let held: number[] = [];
     let draftKey: string | null = null;
@@ -1689,7 +1709,15 @@ export function registerMessageTools(
       // null — reading only `replyToId` fired a false "did not thread" warning
       // on nearly every threaded save while the same response's listData
       // showed inReplyTo populated.
-      const effectiveReplyTo = threadedReplyTo(detail);
+      //
+      // The shared rule (draftReplyTarget) keeps the posted target when the
+      // detail does not echo the linkage at all, exactly as the drafts sync and
+      // the freshness snapshot do — so the revision returned here is the one
+      // every later read reports. A POSITIVELY unthreaded echo still stores
+      // null (the drop is not masked) and is warned about below.
+      const reply = draftReplyTarget([detail], resolvedReplyTo);
+      const effectiveReplyTo = reply.replyToId;
+      replyToSource = reply.replyToSource;
       const storedRecipients = mapRecipients(detail.recipients);
       persisted = {
         id: newId,
@@ -1701,6 +1729,7 @@ export function registerMessageTools(
         listData: detail,
       };
       await cache.upsertDraft(persisted);
+      await setReplyToSource(cache, newId, replyToSource);
       // What OFW actually kept on the draft (in practice none), and what is
       // therefore held here for the send.
       onDraft = Array.isArray(detail.files) ? detail.files : [];
@@ -1746,9 +1775,11 @@ export function registerMessageTools(
       // trained callers to skim warnings. The "dropped" warning demands
       // POSITIVE evidence (reportsUnthreaded): a bare `replyToId: null` or a
       // detail omitting every echo field is "not echoed", never "dropped".
-      // The stored replyToId is still the server echo (null when unreported) —
-      // masking it with intent was Defect 1, and the revision must hash what
-      // the next sync will read.
+      // The stored replyToId is the server echo, or the posted target when OFW
+      // echoed no linkage at all (replyToSource "cache"). Masking a POSITIVE
+      // drop with intent was Defect 1; filling silence is not, because the
+      // drafts sync and the freshness snapshot apply the same fallback, so the
+      // revision still hashes what the next read reports.
       if (resolvedReplyTo !== null && effectiveReplyTo !== resolvedReplyTo && reportsUnthreaded(detail)) {
         const rewrittenFrom = requestedReplyTo !== resolvedReplyTo ? ` (rewritten from ${requestedReplyTo})` : '';
         warnings.push(
@@ -1806,12 +1837,18 @@ export function registerMessageTools(
     // `revision` concurrency token; the volatile `id` is carried further down
     // as an implementation detail. `inReplyTo` echoes the effective threading,
     // and `warnings` names any requested field that did not land.
+    //
+    // compact (the default) drops the OFW echo (`listData`, which repeats the
+    // body, subject, recipients and an eleven-rendering date block) and the
+    // body itself — the caller just wrote it — leaving its length and hash to
+    // confirm what landed. `view: "full"` keeps both.
     const responseObj = persisted !== null
       ? {
         draftKey,
         revision: newRevision,
-        ...persisted,
+        ...(view === 'full' ? persisted : compactWrittenDraft(persisted)),
         inReplyTo: persisted.replyToId,
+        ...(replyToSource !== null ? { replyToSource } : {}),
         previousId: args.messageId ?? null,
         cacheStatus: 'fresh',
         serverConfirmed: true,
@@ -2562,7 +2599,7 @@ Up to ${MAX_FILES_PER_CALL} files per call; each must be non-empty and at most 2
       );
       const held = await heldFilesFor(cache, rows.map((d) => d.id));
         const inferred = await inferredDraftKeys(cache, rows.map((d) => d.id));
-      drafts = rows.map((d) => ({
+      drafts = await Promise.all(rows.map(async (d) => ({
         id: d.id,
         draftKey: keyById.get(d.id) ?? null,
         ...(inferred.has(d.id) ? { draftKeyInferred: true } : {}),
@@ -2572,8 +2609,9 @@ Up to ${MAX_FILES_PER_CALL} files per call; each must be non-empty and at most 2
         modifiedAt: d.modifiedAt,
         recipients: d.recipients,
         replyToId: d.replyToId,
+        ...(await replyToSourceField(cache, d.id, d.replyToId)),
         cacheStatus,
-      }));
+      })));
       if (!inventoryComplete) {
         incomplete.push('the drafts folder was not fully verified against OurFamilyWizard on this call (the request budget paused the walk), so this inventory may be missing or misreporting drafts');
       }

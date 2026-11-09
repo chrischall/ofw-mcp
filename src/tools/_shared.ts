@@ -136,6 +136,45 @@ export function threadedReplyTo(detail: ThreadingEcho): number | null {
   return detail.replyToId ?? detail.inReplyTo ?? null;
 }
 
+/**
+ * Where a draft's reply target came from: OurFamilyWizard's own echo
+ * (`server`), or this server's record of it, kept because OFW's payload did not
+ * report the linkage at all (`cache`).
+ */
+export type ReplyToSource = 'server' | 'cache';
+
+/**
+ * The ONE rule for a draft's reply target, used by every path that builds a
+ * draft's content (save echo, drafts sync, the freshness snapshot, the
+ * destructive-draft guard), so the revision hashed from it cannot depend on
+ * which path produced it.
+ *
+ * The first echo that names a target wins (`server`). When none does, the
+ * `fallback` (the cached row's target, or the one just posted) is kept as
+ * `cache` — unless an echo POSITIVELY reports the draft unthreaded
+ * ({@link reportsUnthreaded}), in which case OFW's answer stands and nothing
+ * is resurrected.
+ *
+ * Why the fallback exists: the drafts LIST payload carries no `replyToId`,
+ * `inReplyTo` or `showContext` key at all (verified live 2026-11-08), so a
+ * cached row built from it read `replyToId: null` for a draft whose detail said
+ * `inReplyTo: 574607114` — and its revision disagreed with the one the save
+ * returned. Silence about the linkage is not evidence it is gone.
+ */
+export function draftReplyTarget(
+  echoes: readonly ThreadingEcho[],
+  fallback: number | null,
+): { replyToId: number | null; replyToSource: ReplyToSource | null } {
+  for (const echo of echoes) {
+    const target = threadedReplyTo(echo);
+    if (target !== null) return { replyToId: target, replyToSource: 'server' };
+  }
+  if (fallback !== null && !echoes.some(reportsUnthreaded)) {
+    return { replyToId: fallback, replyToSource: 'cache' };
+  }
+  return { replyToId: null, replyToSource: null };
+}
+
 /** True when the payload positively reports the message as threaded. */
 export function reportsThreaded(detail: ThreadingEcho): boolean {
   return threadedReplyTo(detail) !== null || detail.showContext === true;

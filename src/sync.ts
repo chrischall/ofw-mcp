@@ -5,7 +5,9 @@ import type {
   MessageRow, DraftRow, FolderName,
 } from './cache/store.js';
 import { z } from 'zod';
-import { ApiRecipientSchema, hasRealView, mapRecipients, scrapeSaysRead, threadedReplyTo } from './tools/_shared.js';
+import { ApiRecipientSchema, draftReplyTarget, hasRealView, mapRecipients, scrapeSaysRead } from './tools/_shared.js';
+import type { ReplyToSource } from './tools/_shared.js';
+import { setReplyToSource } from './tools/reply-source.js';
 import { senderOf } from './tools/project.js';
 import { parseLenient } from '@chrischall/mcp-utils';
 import { displayTimeZone, nowNaiveWallClock, parseTimestampValue } from './timestamps.js';
@@ -673,6 +675,14 @@ const DraftListResponseSchema = z.looseObject({ data: z.array(DraftListItemSchem
 const DraftDetailSchema = z.looseObject({
   body: z.string().optional(),
   subject: z.string().optional(),
+  // The reply linkage and recipients are read from the DETAIL, not the list
+  // item: the drafts list carries no replyToId/inReplyTo/showContext key at all
+  // (verified live 2026-11-08), so a row built from it hashed to a different
+  // revision than the save echo and lost the reply target.
+  replyToId: z.number().nullable().optional(),
+  inReplyTo: z.number().nullable().optional(),
+  showContext: z.boolean().optional(),
+  recipients: z.array(ApiRecipientSchema).optional(),
 });
 
 export interface DraftSyncResult {
@@ -823,7 +833,13 @@ export async function syncDrafts(
   // Fetch every draft's detail up front, still buffered. OFW's list
   // `date.dateTime` is NOT a reliable modification timestamp for drafts —
   // direct UI edits don't bump it — so we can't skip the detail fetch.
+  //
+  // Pre-sync state (S1 batch read) — for the synced-count comparison below,
+  // and as the reply-target fallback when a payload does not echo the linkage.
+  const ids = items.map((it) => it.id);
+  const existingById = new Map((await store.getDrafts(ids)).map((d) => [d.id, d]));
   const rows: DraftRow[] = [];
+  const replySources: (ReplyToSource | null)[] = [];
   for (const item of items) {
     if (!b.take()) return defer();
     const detail = parseLenient(
@@ -831,22 +847,25 @@ export async function syncDrafts(
       await client.request('GET', `/pub/v3/messages/${item.id}`),
       { label: 'ofw-mcp', context: 'GET /pub/v3/messages/{id} (drafts sync)' },
     );
+    // The same rule ofw_save_draft and the freshness snapshot apply
+    // (draftReplyTarget), so the revision a read reports matches the one the
+    // save returned for the same server state.
+    const reply = draftReplyTarget([detail, item], existingById.get(item.id)?.replyToId ?? null);
     rows.push({
       id: item.id,
       subject: detail.subject ?? item.subject ?? '(no subject)',
       body: detail.body ?? '',
-      recipients: mapRecipients(item.recipients),
-      replyToId: threadedReplyTo(item),
+      recipients: mapRecipients(detail.recipients ?? item.recipients),
+      replyToId: reply.replyToId,
       modifiedAt: item.date?.dateTime ?? nowNaiveWallClock(),
       listData: item,
     });
+    replySources.push(reply.replyToSource);
   }
 
-  // Budget funded the whole walk — apply atomically. Batch reads (S1) snapshot
-  // pre-upsert state for the synced-count comparison and stale-row eviction.
-  const ids = items.map((it) => it.id);
-  const existingById = new Map((await store.getDrafts(ids)).map((d) => [d.id, d]));
+  // Budget funded the whole walk — apply atomically.
   await store.upsertDrafts(rows);
+  for (const [i, row] of rows.entries()) await setReplyToSource(store, row.id, replySources[i]!);
 
   // If a stale `messages` row exists for a draft id (cached by a prior
   // ofw_get_message call before the drafts table knew about this id), evict it.
