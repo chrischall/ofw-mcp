@@ -1,10 +1,18 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { OFWCache } from '../../src/cache/node.js';
-import { getReplyToSource, replyToSourceField, setReplyToSource } from '../../src/tools/reply-source.js';
+import { clearReplyToSource, getReplyToSource, replyToSourceField, setReplyToSource } from '../../src/tools/reply-source.js';
 
 describe('reply-source meta', () => {
   let cache: OFWCache;
   beforeEach(() => { cache = OFWCache.open(':memory:'); });
+
+  it('clearing removes the row, not just its value', async () => {
+    await setReplyToSource(cache, 1, 'cache');
+    await clearReplyToSource(cache, 1);
+    expect(await cache.getMeta('draft_reply_source:1')).toBeNull();
+    // Clearing what was never set is fine: a draft may predate the key.
+    await expect(clearReplyToSource(cache, 2)).resolves.toBeUndefined();
+  });
 
   it('round-trips a cache-sourced target', async () => {
     await setReplyToSource(cache, 1, 'cache');

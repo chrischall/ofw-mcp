@@ -172,6 +172,7 @@ export interface CacheStore {
   setSyncState(folder: FolderName, state: SyncState): Promise<void>;
   getMeta(key: string): Promise<string | null>;
   setMeta(key: string, value: string): Promise<void>;
+  deleteMeta(key: string): Promise<void>;
   findLatestReplyTip(replyToId: number): Promise<number>;
   getAttachment(fileId: number): Promise<AttachmentRow | null>;
   listAttachmentsForMessage(messageId: number): Promise<AttachmentRow[]>;
@@ -676,6 +677,10 @@ export class OFWCacheCore {
     return r ? r.value : null;
   }
 
+  deleteMeta(key: string): void {
+    this.db.run('DELETE FROM meta WHERE key = ?', [key]);
+  }
+
   setMeta(key: string, value: string): void {
     this.db.run(
       'INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',
@@ -838,6 +843,10 @@ export class LocalCacheStore implements CacheStore {
   async getMeta(key: string): Promise<string | null> {
     return this.core.getMeta(key);
   }
+  async deleteMeta(key: string): Promise<void> {
+    this.core.deleteMeta(key);
+  }
+
   async setMeta(key: string, value: string): Promise<void> {
     this.core.setMeta(key, value);
   }
