@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.28.0](https://github.com/chrischall/ofw-mcp/compare/v2.27.5...v2.28.0) (2026-11-09)
+
+
+### Features
+
+* **messages:** add overrideNoReadDay to read on a no-read day when asked ([#436](https://github.com/chrischall/ofw-mcp/issues/436)) ([eac0e44](https://github.com/chrischall/ofw-mcp/commit/eac0e44d5a7a211fb75c068eeb28fdb6a08c02f2))
+
+
+### Bug Fixes
+
+* **drafts:** allow unthreading a replaced draft and clear stale reply-source records ([#438](https://github.com/chrischall/ofw-mcp/issues/438)) ([601e4ab](https://github.com/chrischall/ofw-mcp/commit/601e4ab78f1eae307ed062406032404603ef5d68))
+
 ## [2.27.5](https://github.com/chrischall/ofw-mcp/compare/v2.27.4...v2.27.5) (2026-11-09)
 
 
