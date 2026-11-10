@@ -1564,14 +1564,15 @@ describe('sync on a no-read day (OFW_READ_DAYS / OFW_NO_READ_DAYS)', () => {
       return { client, spy };
     };
 
-    it('read bodies need no override, so the override audits only unread ones it opened', async () => {
+    it('claims no override when it opened no unread message — read bodies never need one', async () => {
       upsertMessage(nullBodyRow(12, 'inbox'));
       const { client } = routed();
       const result = await syncAll(client, { folders: ['inbox'], overrideNoReadDay: true }, store());
       expect(getMessage(10)?.body).toBe('body-10');
       expect(getMessage(12)?.body).toBe('body-12');
-      expect(result).toMatchObject({ readOverride: true, readOverrideNote: 'Read on a no-read day via override.' });
-      expect(result.readOverrideMessageIds).toEqual([]);
+      expect(result).not.toHaveProperty('readOverride');
+      expect(result).not.toHaveProperty('readOverrideNote');
+      expect(result).not.toHaveProperty('readOverrideMessageIds');
     });
 
     it('never opens an unread inbox message without fetchUnreadBodies', async () => {
@@ -1586,7 +1587,7 @@ describe('sync on a no-read day (OFW_READ_DAYS / OFW_NO_READ_DAYS)', () => {
       const { client, spy } = routed();
       const result = await syncAll(client, { folders: ['inbox'], overrideNoReadDay: true, fetchUnreadBodies: true }, store());
       expect(spy).toHaveBeenCalledWith('GET', '/pub/v3/messages/11');
-      expect(result.readOverrideMessageIds).toEqual([11]);
+      expect(result).toMatchObject({ readOverride: true, readOverrideNote: 'Read on a no-read day via override.', readOverrideMessageIds: [11] });
     });
 
     it('is a no-op on a reading day', async () => {

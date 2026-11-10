@@ -2490,9 +2490,14 @@ Up to ${MAX_FILES_PER_CALL} files per call; each must be non-empty and at most 2
         const markedRead = result.markedRead ?? [];
         for (const row of rows) markedRead.push(await openUnreadBody(client, cache, row));
         result.markedRead = markedRead;
-        if (result.readOverride) {
+        // Keyed on this call's own decision, not on result.readOverride: the
+        // sync claims an override only when IT opened something, and under
+        // confirmation it opens nothing — these opens are the release.
+        if (overriding) {
           const openedIds = rows.map((row) => row.id);
-          result.readOverrideMessageIds!.push(...openedIds);
+          result.readOverride = true;
+          result.readOverrideNote = READ_OVERRIDE_NOTE;
+          result.readOverrideMessageIds = [...(result.readOverrideMessageIds ?? []), ...openedIds];
           auditReadOverride('ofw_sync_messages', openedIds);
         }
       }
