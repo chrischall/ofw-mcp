@@ -2,10 +2,13 @@
 //
 // Some co-parenting arrangements (a court order, a parenting-plan clause, or
 // just a personal rule) limit when OFW messages are read — e.g. "check OFW on
-// Mondays and Thursdays only". On the other days it is fine to see THAT a
-// message arrived, who sent it and its subject, but not to read it — and above
-// all not to mark it read, which stamps a co-parent-visible "First Viewed"
-// time on the record that cannot be undone.
+// Mondays and Thursdays only". A no-read day exists for ONE reason: to keep an
+// unread INBOX message from being marked read, which stamps a co-parent-visible
+// "First Viewed" time on the record that cannot be undone. So on those days an
+// unread inbox message shows only that it arrived — sender, subject, time —
+// with its body and attachments withheld, and nothing that could stamp it is
+// requested. Everything else stays fully readable: every sent message, every
+// inbox message already read, and drafts. Blocking those protects nothing.
 //
 // Two env vars, either or both:
 //   OFW_READ_DAYS     allow list — reading is permitted ONLY on these days
@@ -27,7 +30,7 @@
 // ignoring the typo would keep reading on the day they meant to keep clear.
 //
 // `overrideNoReadDay` is the one way past this, per call, for when the user
-// explicitly asks to read anyway. It lifts ONLY the day restriction: the
+// explicitly asks to read an unread message anyway. It lifts ONLY the day restriction: the
 // mark-read gates (OFW_ALLOW_MARK_READ, OFW_CONFIRM_MARK_READ, sync's
 // fetchUnreadBodies) apply exactly as on a reading day, and each use is logged
 // through auditReadOverride.
@@ -137,6 +140,9 @@ export interface ReadingBlocked {
   nextReadableDay: string | null;
 }
 
+/** Why a single message's body is absent on a no-read day. */
+export const UNREAD_ON_NO_READ_DAY = 'UNREAD_ON_NO_READ_DAY';
+
 /**
  * Null when message content may be read today; otherwise a description of why
  * not, suitable for embedding in a tool response.
@@ -165,7 +171,7 @@ export function readingBlockedToday(now: Date = new Date()): ReadingBlocked | nu
     today: today.date,
     weekday: WEEKDAY_LABELS[today.weekday],
     timeZone,
-    reason: `${reason} You may see that messages arrived, who sent them, when, and their subjects — but message bodies and attachments are withheld, and nothing may be marked read on OurFamilyWizard. This is a deployment setting: respect it. Only if the user has explicitly asked to read anyway today, pass overrideNoReadDay:true to ofw_get_message, ofw_list_messages or ofw_sync_messages. Attachments stay withheld either way.`,
+    reason: `${reason} A no-read day only protects UNREAD inbox messages: their sender, subject and time are shown, but their bodies and attachments are withheld and nothing may mark them read on OurFamilyWizard. Sent messages, inbox messages already read, and drafts stay fully readable. This is a deployment setting: respect it. Only if the user has explicitly asked to read an unread message anyway today, pass overrideNoReadDay:true to ofw_get_message, ofw_list_messages or ofw_sync_messages. Attachments of unread messages stay withheld either way.`,
     nextReadableDay,
   };
 }

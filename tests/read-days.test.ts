@@ -44,7 +44,8 @@ describe('read-day policy (OFW_READ_DAYS / OFW_NO_READ_DAYS)', () => {
       timeZone: 'America/New_York',
       nextReadableDay: 'Monday 2026-10-26',
     });
-    expect(blocked!.reason).toMatch(/subjects/);
+    expect(blocked!.reason).toMatch(/only protects UNREAD inbox messages/);
+    expect(blocked!.reason).toMatch(/Sent messages, inbox messages already read, and drafts stay fully readable/);
     expect(blocked!.reason).toMatch(/overrideNoReadDay/);
     expect(blocked!.reason).toMatch(/explicitly asked/);
   });

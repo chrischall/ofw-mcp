@@ -61,13 +61,13 @@
         },
         {
           "name": "OFW_READ_DAYS",
-          "description": "Allow list of days message content may be read, e.g. \"mon,thu\" (weekdays, YYYY-MM-DD, or YYYY-MM-DD..YYYY-MM-DD, in DISPLAY_TZ). Other days: subjects only, nothing marked read. Unset = every day.",
+          "description": "Allow list of days message content may be read, e.g. \"mon,thu\" (weekdays, YYYY-MM-DD, or YYYY-MM-DD..YYYY-MM-DD, in DISPLAY_TZ). Other days: unread inbox messages show subject only and are never marked read; sent and read messages stay readable. Unset = every day.",
           "isRequired": false,
           "format": "string"
         },
         {
           "name": "OFW_NO_READ_DAYS",
-          "description": "Deny list of days message content may NOT be read (same format as OFW_READ_DAYS; wins over it). Unset = none.",
+          "description": "Deny list of days unread inbox messages may NOT be opened (same format as OFW_READ_DAYS; wins over it). Unset = none.",
           "isRequired": false,
           "format": "string"
         },

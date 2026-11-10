@@ -117,9 +117,15 @@ export interface ListMessagesOptions {
   since?: string;              // ISO date or datetime, inclusive
   until?: string;              // ISO date or datetime, exclusive
   q?: string;                  // substring match on subject and body (case-insensitive)
-  // Restrict `q` to the subject. Set on a no-read day (see read-days.ts): a
-  // body match would disclose what a message says without returning it.
-  qSubjectOnly?: boolean;
+  // On a no-read day (see read-days.ts) `q` matches a body only where the body
+  // may be read that day: a sent message, or an inbox message we have already
+  // opened (fetched_body_at set — fetching an inbox body is what marks it read,
+  // so deriveRead counts it read). An unread inbox message matches on its
+  // subject alone: a body match would disclose what it says without returning it.
+  qBodyReadOnly?: boolean;
+  // Only inbox rows we have never opened (fetched_body_at null) — the rows
+  // whose body `qBodyReadOnly` leaves unsearched. Used to count them.
+  unopenedInboxOnly?: boolean;
 }
 
 export type MessageFilter = Omit<ListMessagesOptions, 'page' | 'size' | 'sort'>;
@@ -385,11 +391,14 @@ function buildMessageFilter(opts: MessageFilter): { where: string; params: SqlPa
     wheres.push('sent_at < ?');
     params.push(opts.until);
   }
+  if (opts.unopenedInboxOnly) {
+    wheres.push("folder = 'inbox' AND fetched_body_at IS NULL");
+  }
   if (opts.q !== undefined && opts.q.length > 0) {
     const pattern = `%${opts.q}%`;
-    if (opts.qSubjectOnly) {
-      wheres.push('subject LIKE ?');
-      params.push(pattern);
+    if (opts.qBodyReadOnly) {
+      wheres.push("(subject LIKE ? OR (body LIKE ? AND (folder <> 'inbox' OR fetched_body_at IS NOT NULL)))");
+      params.push(pattern, pattern);
     } else {
       wheres.push('(subject LIKE ? OR body LIKE ?)');
       params.push(pattern, pattern);
