@@ -955,7 +955,7 @@ export interface SyncAllResult {
    * carry no `synced` count.
    */
   notRefreshed: FolderName[];
-  /** Present only when overrideNoReadDay actually lifted a no-read day. */
+  /** Present only when overrideNoReadDay lifted a no-read day AND opened an unread message. */
   readOverride?: true;
   readOverrideNote?: string;
   /** Every unread inbox message this call opened under the override. */
@@ -1160,7 +1160,12 @@ export async function syncAll(client: OFWClient, opts: SyncAllOptions, store: Ca
     syncComplete: done,
     refreshed,
     notRefreshed,
-    ...(overriding ? { readOverride: true as const, readOverrideNote: READ_OVERRIDE_NOTE, readOverrideMessageIds: openedUnreadIds } : {}),
+    // Claimed only when the override released something: like ofw_get_message
+    // and ofw_list_messages, a sync whose read/sent bodies needed no override
+    // reports none and leaves nothing to audit.
+    ...(overriding && openedUnreadIds.length > 0
+      ? { readOverride: true as const, readOverrideNote: READ_OVERRIDE_NOTE, readOverrideMessageIds: openedUnreadIds }
+      : {}),
     note,
     markedRead,
     newMessages: newMessages.slice(0, NEW_MESSAGES_CAP),

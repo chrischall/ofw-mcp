@@ -7556,6 +7556,15 @@ describe('overrideNoReadDay', () => {
   describe('ofw_sync_messages', () => {
     const overridden = { ...emptySync, readOverride: true, readOverrideNote: NOTE, readOverrideMessageIds: [5] };
 
+    it('an override that opened nothing is neither reported nor audited', async () => {
+      const spy = vi.spyOn(syncModule, 'syncAll').mockResolvedValue(structuredClone(emptySync) as never);
+      setup(new OFWClient());
+      const parsed = JSON.parse((await handlers.get('ofw_sync_messages')!({ overrideNoReadDay: true })).content[0].text);
+      expect(parsed.readOverride).toBeUndefined();
+      expect(audits()).toEqual([]);
+      spy.mockRestore();
+    });
+
     it('passes the override through, reports it and audits the fetched ids', async () => {
       const spy = vi.spyOn(syncModule, 'syncAll').mockResolvedValue(overridden as never);
       setup(new OFWClient());
@@ -7609,7 +7618,9 @@ describe('overrideNoReadDay', () => {
     it('OFW_CONFIRM_MARK_READ asks first, then opens and audits the approved set', async () => {
       process.env.OFW_CONFIRM_MARK_READ = 'true';
       upsertMessage(unread(961));
-      const spy = vi.spyOn(syncModule, 'syncAll').mockImplementation(async () => structuredClone({ ...overridden, readOverrideMessageIds: [] }) as never);
+      // The sync itself opened nothing, so it claims no override; the tool
+      // must still flag and audit what the confirmed open released.
+      const spy = vi.spyOn(syncModule, 'syncAll').mockImplementation(async () => structuredClone(emptySync) as never);
       const client = new OFWClient();
       const req = vi.spyOn(client, 'request').mockResolvedValue(detail(961));
       setup(client);
@@ -7622,8 +7633,8 @@ describe('overrideNoReadDay', () => {
 
       const done = JSON.parse((await handler({ ...args, confirmToken }, NO_ELICIT_CTX)).content[0].text);
       expect(req).toHaveBeenCalledWith('GET', '/pub/v3/messages/961');
-      expect(done.readOverrideMessageIds).toEqual([961]);
-      expect(audits().at(-1)).toMatchObject({ tool: 'ofw_sync_messages', messageIds: [961] });
+      expect(done).toMatchObject({ readOverride: true, readOverrideNote: NOTE, readOverrideMessageIds: [961] });
+      expect(audits()).toEqual([expect.objectContaining({ tool: 'ofw_sync_messages', messageIds: [961] })]);
       spy.mockRestore();
     });
 
