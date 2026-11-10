@@ -329,14 +329,11 @@ async function walkPages(
     stopAtCachedPage: boolean;
     fetchUnreadBodies: boolean;
     /**
-     * False on a no-read day (see read-days.ts): make NO detail request for any
-     * message, read or unread. A detail GET downloads the body even when we
-     * throw it away, and that is the content the day forbids. Rows are cached
-     * from the list payload alone (body null), and the next sync on a reading
-     * day fills the bodies in — see the heal path below.
+     * Called for each UNREAD inbox message whose body this walk fetched (only
+     * ever under fetchUnreadBodies) — the fetches that mark a message read,
+     * and so the ones an overrideNoReadDay audit must name.
      */
-    fetchBodies: boolean;
-    onBodyFetched?: (id: number) => void;
+    onUnreadBodyFetched?: (id: number) => void;
     budget: Budget;
   },
   store: CacheStore,
@@ -414,17 +411,18 @@ async function walkPages(
       const listRead = scrapeSaysRead(folder, item);
       const isInboxUnread = folder === 'inbox' && !listRead;
       if (existing) {
-        // Heal a row cached without its body — typically one listed on a
-        // no-read day — once fetching it can stamp nothing: a sent message, or
-        // an inbox message OFW's list reports as read. An unread inbox body
-        // stays the caller's explicit choice (ofw_get_message), as before.
-        if (opts.fetchBodies && existing.body === null && !isInboxUnread) {
+        // Heal a row cached without its body — typically an inbox message
+        // first seen unread and read since — once fetching it can stamp
+        // nothing: a sent message, or an inbox message OFW's list reports as
+        // read. An unread inbox body stays the caller's explicit choice
+        // (ofw_get_message), as before. A no-read day does not stop this: it
+        // protects only unread inbox messages (read-days.ts).
+        if (existing.body === null && !isInboxUnread) {
           if (!budget.take()) { pageBudgetHit = true; break; }
           const detail = await fetchDetail(
             item, { subject: existing.subject, sentAt: existing.sentAt, from: senderOf(existing) },
             'GET /pub/v3/messages/{id} (body backfill)', false,
           );
-          opts.onBodyFetched?.(item.id);
           toUpsert.push({
             ...existing,
             body: detail.body ?? '',
@@ -448,7 +446,7 @@ async function walkPages(
         // on the detail endpoint. So when a sent message has flipped to read
         // and we don't yet hold a real viewed time, re-fetch detail to capture
         // it (no body re-fetch — only the recipient view fields can change).
-        if (opts.fetchBodies && folder === 'sent' && item.showNeverViewed === false && !hasRealView(existing.recipients)) {
+        if (folder === 'sent' && item.showNeverViewed === false && !hasRealView(existing.recipients)) {
           if (!budget.take()) { pageBudgetHit = true; break; }
           const detail = parseLenient(
             DetailResponseSchema,
@@ -462,7 +460,7 @@ async function walkPages(
       }
       pageHadNewItem = true;
 
-      const shouldFetchBody = opts.fetchBodies && (!isInboxUnread || opts.fetchUnreadBodies);
+      const shouldFetchBody = !isInboxUnread || opts.fetchUnreadBodies;
 
       let body: string | null = null;
       let fetchedBodyAt: string | null = null;
@@ -494,7 +492,7 @@ async function walkPages(
         if (!budget.take()) { pageBudgetHit = true; break; }
         // Reached for an unread inbox message only under fetchUnreadBodies.
         const detail = await fetchDetail(item, { subject: row.subject, sentAt: row.sentAt, from }, 'GET /pub/v3/messages/{id} (sync)', isInboxUnread);
-        opts.onBodyFetched?.(item.id);
+        if (isInboxUnread) opts.onUnreadBodyFetched?.(item.id);
         body = detail.body ?? '';
         fetchedBodyAt = new Date().toISOString();
         detailRecipients = detail.recipients;
@@ -571,10 +569,9 @@ export async function syncMessageFolder(
   client: OFWClient,
   folder: 'inbox' | 'sent',
   folderId: string,
-  opts: { fetchUnreadBodies: boolean; fetchBodies?: boolean; onBodyFetched?: (id: number) => void; deep?: boolean; budget?: Budget },
+  opts: { fetchUnreadBodies: boolean; onUnreadBodyFetched?: (id: number) => void; deep?: boolean; budget?: Budget },
   store: CacheStore,
 ): Promise<MessageSyncResult> {
-  const fetchBodies = opts.fetchBodies ?? true;
   // No budget → unbounded (local stdio): every take() succeeds, so an ordinary
   // sync is byte-for-byte the original unbounded walk (forward pass only).
   const budget = opts.budget ?? makeBudget(Number.POSITIVE_INFINITY);
@@ -585,8 +582,7 @@ export async function syncMessageFolder(
     startPage: 1,
     stopAtCachedPage: true,
     fetchUnreadBodies: opts.fetchUnreadBodies,
-    fetchBodies,
-    onBodyFetched: opts.onBodyFetched,
+    onUnreadBodyFetched: opts.onUnreadBodyFetched,
     budget,
   }, store);
 
@@ -637,8 +633,7 @@ export async function syncMessageFolder(
       startPage: savedResume ?? fwd.nextPage,
       stopAtCachedPage: false,
       fetchUnreadBodies: opts.fetchUnreadBodies,
-      fetchBodies,
-    onBodyFetched: opts.onBodyFetched,
+      onUnreadBodyFetched: opts.onUnreadBodyFetched,
       budget,
     }, store);
     synced += bf.synced;
@@ -914,7 +909,11 @@ export interface SyncAllOptions {
   folders?: FolderName[];
   fetchUnreadBodies?: boolean;
   deep?: boolean;
-  /** Fetch bodies on a no-read day, as if it were a reading day (read-days.ts). */
+  /**
+   * Lift a no-read day (read-days.ts) for this call, so fetchUnreadBodies may
+   * open unread inbox messages as on a reading day. Sent and already-read
+   * bodies need no override: a no-read day never withholds them.
+   */
   overrideNoReadDay?: boolean;
   /**
    * Max OFW requests this whole invocation may make (resolveFolderIds + list
@@ -956,12 +955,10 @@ export interface SyncAllResult {
    * carry no `synced` count.
    */
   notRefreshed: FolderName[];
-  /** Present (true) when today is a no-read day and no message body was fetched. */
-  bodiesWithheld?: true;
   /** Present only when overrideNoReadDay actually lifted a no-read day. */
   readOverride?: true;
   readOverrideNote?: string;
-  /** Every message whose body this call fetched under the override. */
+  /** Every unread inbox message this call opened under the override. */
   readOverrideMessageIds?: number[];
   note?: string;
   /** Inbox messages this call marked read on OFW. Omitted when none. */
@@ -1062,11 +1059,13 @@ export async function syncAll(client: OFWClient, opts: SyncAllOptions, store: Ca
   const budget = makeBudget(opts.maxRequests ?? Number.POSITIVE_INFINITY);
   // Decided HERE, not by each caller, so every path into a sync — the tool,
   // a read's autoRefresh, ofw_status — honours a no-read day (read-days.ts).
+  // The day protects only unread inbox messages: it refuses fetchUnreadBodies
+  // and nothing else, so sent and already-read bodies sync as on any day.
   const noReadDay = readingBlockedToday() !== null;
   const overriding = noReadDay && opts.overrideNoReadDay === true;
   const readingBlocked = noReadDay && !overriding;
-  const bodyFetchedIds: number[] = [];
-  const onBodyFetched = (id: number): void => { bodyFetchedIds.push(id); };
+  const openedUnreadIds: number[] = [];
+  const onUnreadBodyFetched = (id: number): void => { openedUnreadIds.push(id); };
   // resolveFolderIds always makes exactly one request; the tool guarantees
   // maxRequests >= 1, so this unit is always available (result intentionally
   // ignored — we account for it without a branch that can't be reached).
@@ -1098,8 +1097,7 @@ export async function syncAll(client: OFWClient, opts: SyncAllOptions, store: Ca
     if (folder === 'inbox') {
       const r = await syncMessageFolder(client, 'inbox', ids.inbox, {
         fetchUnreadBodies: !readingBlocked && (opts.fetchUnreadBodies ?? false),
-        fetchBodies: !readingBlocked,
-        onBodyFetched,
+        onUnreadBodyFetched,
         deep: opts.deep ?? false,
         budget,
       }, store);
@@ -1111,8 +1109,6 @@ export async function syncAll(client: OFWClient, opts: SyncAllOptions, store: Ca
     } else if (folder === 'sent') {
       const r = await syncMessageFolder(client, 'sent', ids.sent, {
         fetchUnreadBodies: false,
-        fetchBodies: !readingBlocked,
-        onBodyFetched,
         deep: opts.deep ?? false,
         budget,
       }, store);
@@ -1135,8 +1131,8 @@ export async function syncAll(client: OFWClient, opts: SyncAllOptions, store: Ca
   }
 
   const notes: string[] = [];
-  if (readingBlocked) {
-    notes.push('Today is a no-read day (OFW_READ_DAYS / OFW_NO_READ_DAYS): new inbox and sent messages were cached from the list only — sender, date and subject — and no message body was downloaded. The first sync on a reading day fills in bodies that can be fetched without marking anything read.');
+  if (readingBlocked && opts.fetchUnreadBodies === true) {
+    notes.push('Today is a no-read day (OFW_READ_DAYS / OFW_NO_READ_DAYS), so fetchUnreadBodies was not honoured: unread inbox messages were cached from the list only — sender, date and subject — and none was marked read. Sent and already-read messages synced as usual.');
   }
   if (draftsUnverified) {
     notes.push('The drafts folder was NOT checked against OurFamilyWizard on this call (the request budget ran out first), so no drafts count is reported and the cached drafts are marked "unverified". Cached draft bodies may be behind the server. Call ofw_sync_messages again — or ofw_sync_messages with folders:["drafts"] — before editing or deleting a draft.');
@@ -1164,8 +1160,7 @@ export async function syncAll(client: OFWClient, opts: SyncAllOptions, store: Ca
     syncComplete: done,
     refreshed,
     notRefreshed,
-    ...(readingBlocked ? { bodiesWithheld: true as const } : {}),
-    ...(overriding ? { readOverride: true as const, readOverrideNote: READ_OVERRIDE_NOTE, readOverrideMessageIds: bodyFetchedIds } : {}),
+    ...(overriding ? { readOverride: true as const, readOverrideNote: READ_OVERRIDE_NOTE, readOverrideMessageIds: openedUnreadIds } : {}),
     note,
     markedRead,
     newMessages: newMessages.slice(0, NEW_MESSAGES_CAP),

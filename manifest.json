@@ -137,13 +137,13 @@
     "ofw_read_days": {
       "type": "string",
       "title": "Message-reading days (allow list)",
-      "description": "Only read message content on these days, e.g. \"mon, thu\". Weekday names, YYYY-MM-DD dates, or YYYY-MM-DD..YYYY-MM-DD ranges, in your display time zone. On other days you still see that messages arrived (sender, date, subject), but bodies and attachments are withheld and nothing is marked read. Leave blank to read on any day.",
+      "description": "Only read message content on these days, e.g. \"mon, thu\". Weekday names, YYYY-MM-DD dates, or YYYY-MM-DD..YYYY-MM-DD ranges, in your display time zone. On other days an unread inbox message shows only that it arrived (sender, date, subject); its body and attachments are withheld and it is never marked read. Sent messages and messages you have already read stay readable. Leave blank to read on any day.",
       "required": false
     },
     "ofw_no_read_days": {
       "type": "string",
       "title": "No-reading days (deny list)",
-      "description": "Never read message content on these days (same format as the allow list). Wins over the allow list. Leave blank for none.",
+      "description": "Never open unread inbox messages on these days (same format as the allow list). Wins over the allow list. Leave blank for none.",
       "required": false
     },
     "ofw_expense_only": {

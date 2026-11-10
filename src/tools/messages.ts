@@ -46,7 +46,7 @@ import { compactSentMessage, compactWrittenDraft, MESSAGE_VIEWS, senderOf, viewD
 const WRITE_VIEW_NOTE = 'compact omits OurFamilyWizard\'s raw `listData` echo (which repeats the body, subject, recipients and a date block) and replaces the body you just wrote with `bodyLength` + `bodySha256` (the first 16 hex characters of its SHA-256) to confirm what landed. Pass "full" for both.';
 import { resolveView, viewParam } from '@chrischall/mcp-utils';
 import { displayTimeZone, formatInstant, normalizeTimestampsInValue, nowNaiveWallClock, toNaiveWallClock } from '../timestamps.js';
-import { READ_OVERRIDE_NOTE, auditReadOverride, readingBlockedToday } from '../read-days.js';
+import { READ_OVERRIDE_NOTE, UNREAD_ON_NO_READ_DAY, auditReadOverride, readingBlockedToday } from '../read-days.js';
 import type { ReadingBlocked } from '../read-days.js';
 
 /** Why a draft has no draftKey — said instead of a bare null. */
@@ -323,7 +323,7 @@ function markReadCeiling(overrideDay: boolean): { gate: 'OFW_ALLOW_MARK_READ' | 
   if (blocked !== null && !overrideDay) {
     return {
       gate: 'OFW_READ_DAYS',
-      reason: 'Today is a no-read day (OFW_READ_DAYS / OFW_NO_READ_DAYS), so no message body was fetched. readingBlocked says when reading resumes.',
+      reason: 'Today is a no-read day (OFW_READ_DAYS / OFW_NO_READ_DAYS), so no unread inbox body was fetched; sent and already-read messages synced as usual. readingBlocked says when reading resumes.',
       readingBlocked: blocked,
     };
   }
@@ -438,18 +438,29 @@ async function confirmMarkRead(
 }
 
 /**
- * A message row with its content removed, for a no-read day. The body goes,
- * and so do the copies of it OFW's list payload carries (`preview`, `body`) —
- * otherwise `view:"full"` would hand back the first lines anyway. Everything
- * that says a message ARRIVED (subject, sender, dates, read state) stays.
+ * True for the one kind of message a no-read day protects: an INBOX message
+ * not yet read. Its body is what fetching would mark read (stamping a
+ * co-parent-visible "First Viewed" time), so it is withheld on those days.
+ * A sent message, an already-read inbox message and a draft are not.
  */
-function withholdBody<T extends MessageRow>(row: T): T & { bodyWithheld: true } {
+function isUnreadInbox(row: MessageRow): boolean {
+  return row.folder === 'inbox' && !deriveRead(row);
+}
+
+/**
+ * An unread inbox row with its content removed, for a no-read day. The body
+ * goes, and so do the copies of it OFW's list payload carries (`preview`,
+ * `body`) — otherwise `view:"full"` would hand back the first lines anyway.
+ * Everything that says a message ARRIVED (subject, sender, dates, read state)
+ * stays, and `withheldReason` says why this one body is absent.
+ */
+function withholdBody<T extends MessageRow>(row: T): T & { bodyWithheld: true; withheldReason: typeof UNREAD_ON_NO_READ_DAY } {
   let listData = row.listData;
   if (listData !== null && typeof listData === 'object' && !Array.isArray(listData)) {
     const { preview: _preview, body: _body, ...rest } = listData as Record<string, unknown>;
     listData = rest;
   }
-  return { ...row, body: null, listData, bodyWithheld: true };
+  return { ...row, body: null, listData, bodyWithheld: true, withheldReason: UNREAD_ON_NO_READ_DAY };
 }
 
 /**
@@ -571,7 +582,7 @@ export function registerMessageTools(
       when: { start: 'since', end: 'until' },
       aliases: ['messages', 'inbox', 'co-parent', 'ofw', 'ourfamilywizard', 'new messages'],
     }),
-    description: 'List messages from the local OurFamilyWizard cache. Supports filtering by folder, date range, and a substring query on subject+body. Pagination is offset-based (1-based `page`) but if you know what you want (a date range, a topic), prefer the filters over walking pages — the cache may have 1000+ messages. Results are newest-first by default; `sort:"oldest"` starts at the old end of a range instead of paging to it. Returns an explicit `complete` boolean describing the RESULT SET: true means "this is every message on OurFamilyWizard matching these filters as of freshness.asOf" — check it before asserting a count. An empty result from a cache that is not verified-fresh is REFUSED (result:"UNVERIFIED_EMPTY") rather than reported as an absence; pass autoRefresh:true to sync and answer instead. On a server-configured no-read day bodies are withheld and q matches subjects only.' + OVERRIDE_DESCRIPTION,
+    description: 'List messages from the local OurFamilyWizard cache. Supports filtering by folder, date range, and a substring query on subject+body. Pagination is offset-based (1-based `page`) but if you know what you want (a date range, a topic), prefer the filters over walking pages — the cache may have 1000+ messages. Results are newest-first by default; `sort:"oldest"` starts at the old end of a range instead of paging to it. Returns an explicit `complete` boolean describing the RESULT SET: true means "this is every message on OurFamilyWizard matching these filters as of freshness.asOf" — check it before asserting a count. An empty result from a cache that is not verified-fresh is REFUSED (result:"UNVERIFIED_EMPTY") rather than reported as an absence; pass autoRefresh:true to sync and answer instead. On a server-configured no-read day (OFW_READ_DAYS / OFW_NO_READ_DAYS) only unread inbox messages are protected: each keeps its sender, subject and time but carries body:null, bodyWithheld:true, withheldReason:"UNREAD_ON_NO_READ_DAY", and q matches it by subject only (bodySearchSkipped counts those); readingBlocked, ahead of the messages, appears only when something was withheld and says when reading resumes. Sent messages and inbox messages already read are returned and searched in full, exactly as on a reading day.' + OVERRIDE_DESCRIPTION,
     // Read-only even with autoRefresh: guardedCacheRead's sync never fetches
     // unread inbox bodies, so a list call cannot stamp "First Viewed".
     annotations: { readOnlyHint: true, openWorldHint: true },
@@ -636,12 +647,14 @@ export function registerMessageTools(
 
     const cache = cacheProvider();
     const folders: FolderName[] = folder === undefined ? ['inbox', 'sent'] : [folder];
-    // On a no-read day `q` matches subjects only: a body match would tell the
-    // caller what a message says without ever returning it.
+    // On a no-read day only UNREAD INBOX messages are protected: `q` matches
+    // their subject alone (a body match would tell the caller what one says
+    // without returning it), and their bodies are withheld below. Sent and
+    // already-read messages are searched and returned in full.
     const noReadDay = readingBlockedToday();
     const overriding = noReadDay !== null && args.overrideNoReadDay === true;
     const blocked = overriding ? null : noReadDay;
-    const filter = { folder, since: bounds.since, until: bounds.until, q: args.q, qSubjectOnly: blocked !== null };
+    const filter = { folder, since: bounds.since, until: bounds.until, q: args.q, qBodyReadOnly: blocked !== null };
 
     const { value, refreshed, unverifiedEmpty } = await guardedCacheRead({
       client,
@@ -729,13 +742,33 @@ export function registerMessageTools(
     if (refreshed) {
       payload.autoRefreshed = true;
     }
-    if (blocked !== null) {
-      // Ahead of `messages`, for the same reason the paging state is: a reader
-      // that stops early must still learn that every body below is withheld.
-      payload.readingBlocked = blocked;
+    // Per message, not a blanket refusal: only unread inbox rows are withheld.
+    const withheld = blocked === null ? 0 : messages.filter(isUnreadInbox).length;
+    // Unread inbox messages in this folder/date scope whose body `q` did not
+    // search. Counted in the SAME terms the filter used (never opened), and
+    // then narrowed by deriveRead, so a message read on the web app but never
+    // fetched here is not reported as one the day hid.
+    let bodySearchSkipped = 0;
+    if (blocked !== null && args.q !== undefined && args.q.length > 0 && folder !== 'sent') {
+      const unopened = await cache.listMessages({
+        folder: 'inbox', since: bounds.since, until: bounds.until, unopenedInboxOnly: true, page: 1, size: 100_000,
+      });
+      bodySearchSkipped = unopened.filter(isUnreadInbox).length;
     }
-    if (overriding) {
-      Object.assign(payload, readOverrideFields('ofw_list_messages', messages.filter((m) => m.body !== null).map((m) => m.id)));
+    if (bodySearchSkipped > 0) {
+      payload.bodySearchSkipped = bodySearchSkipped;
+      payload.bodySearchSkippedNote = `Today is a no-read day: ${bodySearchSkipped} unread inbox message${bodySearchSkipped === 1 ? ' was' : 's were'} matched against the subject only, never the body. Sent and already-read messages were searched in full.`;
+    }
+    if (blocked !== null && (withheld > 0 || bodySearchSkipped > 0)) {
+      // Ahead of `messages`, for the same reason the paging state is: a reader
+      // that stops early must still learn that some bodies below are withheld.
+      payload.readingBlocked = { ...blocked, withheld };
+    }
+    // The override released something only if a returned unread inbox row had
+    // a body to release; a read or sent body needed no override.
+    const released = overriding ? messages.filter((m) => m.body !== null && isUnreadInbox(m)).map((m) => m.id) : [];
+    if (released.length > 0) {
+      Object.assign(payload, readOverrideFields('ofw_list_messages', released));
     }
     payload.freshness = freshness;
 
@@ -743,14 +776,14 @@ export function registerMessageTools(
     // and every note above are computed from the rows themselves — a
     // projection must never be able to change what the response claims about
     // its own contents.
-    payload.messages = viewMessages(view, blocked === null ? messages : messages.map(withholdBody));
+    payload.messages = viewMessages(view, blocked === null ? messages : messages.map((m) => (isUnreadInbox(m) ? withholdBody(m) : m)));
 
     return jsonResponse(payload);
   });
 
   server.registerTool('ofw_get_message', {
     _meta: familyMeta('lookup'),
-    description: 'Get a single OurFamilyWizard message OR draft by ID. Reads from local cache when available; otherwise fetches from OFW — and for an UNREAD INBOX message that fetch marks it read and stamps a "First Viewed" time the co-parent can see, which is part of the record and cannot be undone. Pass allowMarkRead:false to refuse such a fetch instead (cached bodies, sent messages and already-read messages are unaffected, because none of them stamp anything). For ids that match a draft (in the drafts cache), the response carries folder="drafts" and the body/subject/recipients reflect the drafts cache (which ofw_sync_messages keeps fresh) — drafts have no `fromUser`, and `sentAt`/`fetchedBodyAt` mirror the draft\'s `modifiedAt`. For inbox/sent messages, folder is "inbox" or "sent" as before. On a server-configured no-read day (OFW_READ_DAYS / OFW_NO_READ_DAYS) inbox/sent bodies are withheld (body:null, bodyWithheld:true, readingBlocked says when reading resumes) and OFW is never contacted. When the server runs with OFW_CONFIRM_MARK_READ=true, opening an unread inbox message first shows its subject, sender and sent time and asks the user to confirm marking it read: a confirmation prompt where the client supports one; otherwise the first call fetches NOTHING and returns that preview plus a confirmToken, and only a repeat call with that token opens the message (see MCP_CONFIRM_MODE). Show the user the preview and wait for their yes before repeating the call.' + OVERRIDE_DESCRIPTION,
+    description: 'Get a single OurFamilyWizard message OR draft by ID. Reads from local cache when available; otherwise fetches from OFW — and for an UNREAD INBOX message that fetch marks it read and stamps a "First Viewed" time the co-parent can see, which is part of the record and cannot be undone. Pass allowMarkRead:false to refuse such a fetch instead (cached bodies, sent messages and already-read messages are unaffected, because none of them stamp anything). For ids that match a draft (in the drafts cache), the response carries folder="drafts" and the body/subject/recipients reflect the drafts cache (which ofw_sync_messages keeps fresh) — drafts have no `fromUser`, and `sentAt`/`fetchedBodyAt` mirror the draft\'s `modifiedAt`. For inbox/sent messages, folder is "inbox" or "sent" as before. On a server-configured no-read day (OFW_READ_DAYS / OFW_NO_READ_DAYS) only an UNREAD inbox message is protected: its body is withheld (body:null, bodyWithheld:true, withheldReason:"UNREAD_ON_NO_READ_DAY", readingBlocked says when reading resumes) and OFW is never contacted for it; an id not in the cache is refused, since fetching it could mark it read. Sent messages and inbox messages already read are returned exactly as on a reading day. When the server runs with OFW_CONFIRM_MARK_READ=true, opening an unread inbox message first shows its subject, sender and sent time and asks the user to confirm marking it read: a confirmation prompt where the client supports one; otherwise the first call fetches NOTHING and returns that preview plus a confirmToken, and only a repeat call with that token opens the message (see MCP_CONFIRM_MODE). Show the user the preview and wait for their yes before repeating the call.' + OVERRIDE_DESCRIPTION,
     annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
     inputSchema: z.object({
       messageId: z.string().describe('Message ID (also accepts draft IDs — drafts are routed via the drafts cache)'),
@@ -827,17 +860,22 @@ export function registerMessageTools(
 
     const cached = await cache.getMessage(id);
 
-    // No-read day: answer from the cache with the body withheld, and never
-    // touch OFW — any detail GET here could mark an unread message read.
+    // No-read day: protect an UNREAD INBOX message — answer from the cache
+    // with its body withheld and never touch OFW, since its detail GET would
+    // mark it read. An uncached id is refused: whether it is one is exactly
+    // what cannot be known without that GET. Sent and already-read messages
+    // fall through and are served as on any other day.
     const noReadDay = readingBlockedToday();
-    const overriding = noReadDay !== null && args.overrideNoReadDay === true;
-    const blocked = overriding ? null : noReadDay;
+    const protectedToday = noReadDay !== null && (cached === null || isUnreadInbox(cached));
+    // The override is "used" only when it lifts the day for THIS message.
+    const overriding = protectedToday && args.overrideNoReadDay === true;
+    const blocked = protectedToday && !overriding ? noReadDay : null;
     if (blocked !== null) {
       if (cached === null) {
         return jsonErrorResponse({
           ...blocked,
           messageId: id,
-          hint: 'This id is not in the cache. Run ofw_sync_messages (it walks list pages, not bodies, and marks nothing read) to see its subject, sender and date.',
+          hint: 'This id is not in the cache, so whether it is an unread inbox message cannot be told without the request that would mark it read. Run ofw_sync_messages (it never opens an unread inbox message) to see its subject, sender and date — and, if it is sent or already read, its body.',
         });
       }
       const attachments = await cache.listAttachmentsForMessage(id);
@@ -2180,7 +2218,7 @@ Up to ${MAX_FILES_PER_CALL} files per call; each must be non-empty and at most 2
     // Destructive: force:true replaces an existing file in the attachments
     // directory (which is also the default upload directory), and nothing
     // here restores what it replaced. The default refuses to overwrite.
-    description: 'Download an OFW message attachment by fileId and return content you can actually read. Inline delivery walks a ladder and returns the first rung that works: (1) host-renderable images (PNG/JPEG/GIF/WEBP) come back as ImageContent; (2) .xlsx/.csv/.tsv, .pdf, .docx, .pptx and text files come back as EXTRACTED CONTENT — per-sheet CSV, per-page/slide text, document text — in the response JSON under `extracted`; (3) anything else comes back as an EmbeddedResource blob of the raw bytes. Images and raw bytes are only returned inline up to 10 MiB; a larger file fails with a tool error that says how to get it instead (extracted text is unaffected — it is bounded by maxChars). The meta block names the rung as `deliveredVia` and, when it falls through to bytes, lists what was tried in `deliveryAttempts`. Reported mime types are always normalized to a bare media type (no charset/name parameters). In disk mode the bytes are saved to ~/Downloads/ofw-mcp/ and the response carries the absolute path; pass extract:true to ALSO get the extracted content in that response. The default for `inline` can be flipped server-side via the OFW_INLINE_ATTACHMENTS env var. On a hosted deployment with no filesystem, disk mode is unavailable, so inline is forced (forcedInline:true) rather than failing — a saveTo path never costs you the content. fileId comes from attachments[].fileId on ofw_get_message. Override disk destination with OFW_ATTACHMENTS_DIR or saveTo; saveTo must stay inside the attachments directory, and an existing file is never overwritten unless force:true. Re-downloading to the same path is a no-op (disk mode only).',
+    description: 'Download an OFW message attachment by fileId and return content you can actually read. Inline delivery walks a ladder and returns the first rung that works: (1) host-renderable images (PNG/JPEG/GIF/WEBP) come back as ImageContent; (2) .xlsx/.csv/.tsv, .pdf, .docx, .pptx and text files come back as EXTRACTED CONTENT — per-sheet CSV, per-page/slide text, document text — in the response JSON under `extracted`; (3) anything else comes back as an EmbeddedResource blob of the raw bytes. Images and raw bytes are only returned inline up to 10 MiB; a larger file fails with a tool error that says how to get it instead (extracted text is unaffected — it is bounded by maxChars). The meta block names the rung as `deliveredVia` and, when it falls through to bytes, lists what was tried in `deliveryAttempts`. Reported mime types are always normalized to a bare media type (no charset/name parameters). In disk mode the bytes are saved to ~/Downloads/ofw-mcp/ and the response carries the absolute path; pass extract:true to ALSO get the extracted content in that response. The default for `inline` can be flipped server-side via the OFW_INLINE_ATTACHMENTS env var. On a hosted deployment with no filesystem, disk mode is unavailable, so inline is forced (forcedInline:true) rather than failing — a saveTo path never costs you the content. fileId comes from attachments[].fileId on ofw_get_message. Override disk destination with OFW_ATTACHMENTS_DIR or saveTo; saveTo must stay inside the attachments directory, and an existing file is never overwritten unless force:true. Re-downloading to the same path is a no-op (disk mode only). On a server-configured no-read day (OFW_READ_DAYS / OFW_NO_READ_DAYS) only attachments of unread inbox messages are withheld (READING_BLOCKED, with nextReadableDay), along with files the cache cannot place; attachments of sent, already-read and draft messages download as on any day.',
     annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
     inputSchema: z.object({
       fileId: z.number().describe('Attachment file id (from ofw_get_message → attachments[].fileId)'),
@@ -2216,23 +2254,27 @@ Up to ${MAX_FILES_PER_CALL} files per call; each must be non-empty and at most 2
     const deliveryOptions = { extract: args.extract, maxChars: args.maxChars, parts: args.parts };
     let cached = await cache.getAttachment(fileId);
 
-    // No-read day: an attachment is message content. Only a file the cache
-    // knows belongs to the account holder's own DRAFTS is released; anything
-    // linked to an inbox/sent message — or that the cache cannot place at all
-    // — is refused before any request is made.
+    // No-read day: an unread inbox message's attachment is its content, so it
+    // is withheld with the body. A file is released only when the cache can
+    // place it AND every message it is linked to is readable today — a draft,
+    // a sent message, or an inbox message already read. A file on an unread
+    // inbox message, or one the cache cannot place, is refused before any
+    // request is made.
     const blocked = readingBlockedToday();
     if (blocked !== null) {
       const linked = (cached?.messageIds ?? []).filter((mid) => mid !== 0);
-      let draftOnly = linked.length > 0;
+      let readable = linked.length > 0;
       for (const mid of linked) {
-        if ((await cache.getDraft(mid)) === null) draftOnly = false;
+        if ((await cache.getDraft(mid)) !== null) continue;
+        const message = await cache.getMessage(mid);
+        if (message === null || isUnreadInbox(message)) readable = false;
       }
-      if (!draftOnly) {
+      if (!readable) {
         return jsonErrorResponse({
           ...blocked,
           fileId,
           ...(cached ? { fileName: cached.fileName } : {}),
-          hint: 'Attachments on received or sent messages (or files this cache cannot place) are withheld on a no-read day. Download it on the next reading day.',
+          hint: 'Attachments of unread inbox messages (and files this cache cannot place) are withheld on a no-read day. Attachments of sent, already-read and draft messages are not. Download it on the next reading day.',
         });
       }
     }
@@ -2363,7 +2405,7 @@ Up to ${MAX_FILES_PER_CALL} files per call; each must be non-empty and at most 2
     _meta: familyMeta('other'),
     // Destructive: fetchUnreadBodies:true stamps a co-parent-visible "First
     // Viewed" time on every unread inbox message it touches — irreversible.
-    description: 'Sync messages from OurFamilyWizard into the local cache. A sync NEVER marks a message read unless fetchUnreadBodies is set: a new inbox message that OFW does not list as read is cached from the list (sender, date, subject) WITHOUT its body, because fetching the body is what stamps a co-parent-visible "First Viewed" time. Every response says what arrived: newMessages lists each message first cached by THIS call — inbox and sent, newest first, with read (its state before the sync) and bodyFetched; newMessagesTotal and newMessagesTruncated give the full count when more than ' + NEW_MESSAGES_CAP + ' arrived (ofw_list_messages pages through the rest). unreadInbox lists the new inbox messages that were unread when the sync began; bodyFetched:false means still unread on OFW — call ofw_get_message(id) to read one, which marks it read. If this call DID mark anything read (fetchUnreadBodies, or a stamp it detected but did not intend), the response LEADS with a warning and lists each in markedRead with reason "fetchUnreadBodies" or "unexpected"; markedRead is omitted when nothing was marked, and markedReadCount is always present. Returns counts per folder too. EVERY call re-checks the newest page first, so new messages are picked up promptly even while an old-history backfill is still running; only then does it spend what is left of its budget advancing that backfill. Pass deep:true to walk all OFW pages instead of stopping at the first all-cached page (use to backfill suspected gaps). Sync is BOUNDED and RESUMABLE: on hosted deployments a per-call OFW-request budget (env OFW_SYNC_MAX_REQUESTS, or the maxRequests argument) caps how far one call walks; when the budget is hit the response reports done:false with a note — call again with the SAME arguments to resume. done:false means older history is still being backfilled; it does NOT mean recent messages are missing. Local installs are unbounded by default (done is always true). On a server-configured no-read day (OFW_READ_DAYS / OFW_NO_READ_DAYS) no inbox or sent message body is downloaded at all — new messages are cached from the list (sender, date, subject) and the response carries bodiesWithheld:true; the first sync on a reading day fills in those bodies, except unread inbox ones. Under overrideNoReadDay a sync fetches bodies as on a reading day; it still marks nothing read without fetchUnreadBodies:true.' + OVERRIDE_DESCRIPTION,
+    description: 'Sync messages from OurFamilyWizard into the local cache. A sync NEVER marks a message read unless fetchUnreadBodies is set: a new inbox message that OFW does not list as read is cached from the list (sender, date, subject) WITHOUT its body, because fetching the body is what stamps a co-parent-visible "First Viewed" time. Every response says what arrived: newMessages lists each message first cached by THIS call — inbox and sent, newest first, with read (its state before the sync) and bodyFetched; newMessagesTotal and newMessagesTruncated give the full count when more than ' + NEW_MESSAGES_CAP + ' arrived (ofw_list_messages pages through the rest). unreadInbox lists the new inbox messages that were unread when the sync began; bodyFetched:false means still unread on OFW — call ofw_get_message(id) to read one, which marks it read. If this call DID mark anything read (fetchUnreadBodies, or a stamp it detected but did not intend), the response LEADS with a warning and lists each in markedRead with reason "fetchUnreadBodies" or "unexpected"; markedRead is omitted when nothing was marked, and markedReadCount is always present. Returns counts per folder too. EVERY call re-checks the newest page first, so new messages are picked up promptly even while an old-history backfill is still running; only then does it spend what is left of its budget advancing that backfill. Pass deep:true to walk all OFW pages instead of stopping at the first all-cached page (use to backfill suspected gaps). Sync is BOUNDED and RESUMABLE: on hosted deployments a per-call OFW-request budget (env OFW_SYNC_MAX_REQUESTS, or the maxRequests argument) caps how far one call walks; when the budget is hit the response reports done:false with a note — call again with the SAME arguments to resume. done:false means older history is still being backfilled; it does NOT mean recent messages are missing. Local installs are unbounded by default (done is always true). On a server-configured no-read day (OFW_READ_DAYS / OFW_NO_READ_DAYS) a sync only protects unread inbox messages: it keeps syncing and fetching bodies for sent and already-read messages as on any day, and fetchUnreadBodies (argument or OFW_FETCH_UNREAD_BODIES) is refused, reported in unreadBodies.gate. Under overrideNoReadDay, fetchUnreadBodies:true on this call opens unread inbox messages as on a reading day; the env default alone does not.' + OVERRIDE_DESCRIPTION,
     annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
     inputSchema: z.object({
       folders: z.array(z.enum(['inbox', 'sent', 'drafts'])).min(1).describe('Folders to sync (default: all three). Must be non-empty if given — an empty list would sync nothing while reporting success.').optional(),
