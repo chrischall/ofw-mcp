@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.28.1](https://github.com/chrischall/ofw-mcp/compare/v2.28.0...v2.28.1) (2026-11-10)
+
+
+### Bug Fixes
+
+* **messages:** no-read days withhold only unread inbox messages ([#439](https://github.com/chrischall/ofw-mcp/issues/439)) ([c085309](https://github.com/chrischall/ofw-mcp/commit/c085309e18f4f79fd2e7af104938aebfe8f80dbd))
+* **sync:** report overrideNoReadDay only when it opened an unread message ([#442](https://github.com/chrischall/ofw-mcp/issues/442)) ([b27af57](https://github.com/chrischall/ofw-mcp/commit/b27af579579af74543511e36d74f722fa0305e85))
+
 ## [2.28.0](https://github.com/chrischall/ofw-mcp/compare/v2.27.5...v2.28.0) (2026-11-09)
 
 
