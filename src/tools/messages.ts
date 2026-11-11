@@ -1174,7 +1174,7 @@ export function registerMessageTools(
         : {}),
       subject,
       body,
-      ...(prepared?.conversion ? { bodyConversion: prepared.conversion.changes } : {}),
+      ...(prepared?.conversion ? { bodyConversion: prepared.conversion } : {}),
       replyTo: resolvedReplyTo === null
         ? null
         : { messageId: resolvedReplyTo, subject: replyParent?.subject ?? null, from: replyParent?.fromUser || null },
