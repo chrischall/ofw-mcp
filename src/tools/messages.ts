@@ -48,6 +48,7 @@ import { resolveView, viewParam } from '@chrischall/mcp-utils';
 import { displayTimeZone, formatInstant, normalizeTimestampsInValue, nowNaiveWallClock, toNaiveWallClock } from '../timestamps.js';
 import { READ_OVERRIDE_NOTE, UNREAD_ON_NO_READ_DAY, auditReadOverride, readingBlockedToday } from '../read-days.js';
 import type { ReadingBlocked } from '../read-days.js';
+import { BODY_FORMAT_DESCRIPTION, prepareBody } from './plain-text.js';
 
 /** Why a draft has no draftKey — said instead of a bare null. */
 export const DRAFT_KEY_NULL_REASON =
@@ -1018,6 +1019,7 @@ export function registerMessageTools(
     inputSchema: z.object({
       subject: z.string().describe('Message subject. Required unless draftId/messageId is given (then it overrides the server draft\'s subject).').optional(),
       body: z.string().describe('Message body text. Required unless draftId/messageId is given (then it overrides the server draft\'s body — omit it to send exactly what is on OurFamilyWizard).').optional(),
+      bodyFormat: z.enum(['markdown', 'plain']).describe(`${BODY_FORMAT_DESCRIPTION} Applies only to a body passed here: a draft sent by id goes out exactly as it is on OurFamilyWizard.`).optional(),
       recipientIds: z.array(z.number()).describe('Array of recipient user IDs (get from ofw_get_profile). Usually required even when sending a draft: OurFamilyWizard does not persist recipients on drafts.').optional(),
       replyToId: z.number().describe('ID of the message being replied to. Defaults to the draft\'s stored reply target when sending by draftId.').optional(),
       draftId: z.number().describe('ID of an existing draft to send. The draft is re-read from OurFamilyWizard and its SERVER content is sent; missing subject/body default from it. Guarded: a draft that changed since you read it, or that was already sent/deleted, refuses rather than sending blind.').optional(),
@@ -1048,7 +1050,10 @@ export function registerMessageTools(
     );
 
     let subject = args.subject;
-    let body = args.body;
+    // Only a body the CALLER supplies is converted. A draft sent by id goes
+    // out as it is on OFW — the artifact sent is the artifact on the server.
+    const prepared = args.body === undefined ? null : prepareBody(args.body, args.bodyFormat);
+    let body = prepared?.body;
     let recipientIds = args.recipientIds;
     let draftReplyToId: number | null = null;
     let guardNote: string | null = null;
@@ -1169,6 +1174,7 @@ export function registerMessageTools(
         : {}),
       subject,
       body,
+      ...(prepared?.conversion ? { bodyConversion: prepared.conversion.changes } : {}),
       replyTo: resolvedReplyTo === null
         ? null
         : { messageId: resolvedReplyTo, subject: replyParent?.subject ?? null, from: replyParent?.fromUser || null },
@@ -1410,9 +1416,10 @@ export function registerMessageTools(
         ...(attachmentCheck !== null ? { attachments: attachmentCheck } : {}),
         ...(newFiles.length > 0 ? { attachmentsUploaded: newFiles } : {}),
         ...(uploadWarnings.length > 0 ? { warnings: uploadWarnings } : {}),
+        ...(prepared?.conversion ? { bodyConversion: prepared.conversion } : {}),
       };
     return notedJsonResponse(
-      [guardNote, rewriteNote, verifyNote, threadNote, attachmentNote, unconfirmedNote, retainNote],
+      [guardNote, rewriteNote, prepared?.noteLine ?? null, verifyNote, threadNote, attachmentNote, unconfirmedNote, retainNote],
       responseObj,
       'Message sent successfully.',
     );
@@ -1665,6 +1672,7 @@ export function registerMessageTools(
     inputSchema: z.object({
       subject: z.string().describe('Message subject'),
       body: z.string().describe('Message body text'),
+      bodyFormat: z.enum(['markdown', 'plain']).describe(BODY_FORMAT_DESCRIPTION).optional(),
       recipientIds: z.array(z.number()).describe('Array of recipient user IDs (optional for drafts)').optional(),
       messageId: z.number().describe('ID of an existing draft to replace (the new draft will have a new id; the old is deleted)').optional(),
       replyToId: z.number().nullable().describe('ID of the message this draft replies to. When replacing a draft (messageId), omit it to keep the draft\'s own reply target, or pass null to make the draft a new top-level message.').optional(),
@@ -1679,6 +1687,7 @@ export function registerMessageTools(
   }, async (args) => {
     const cache = cacheProvider();
     const view = resolveView(args.view, MESSAGE_VIEWS);
+    const prepared = prepareBody(args.body, args.bodyFormat);
     // New attachments are validated before ANYTHING happens, so a bad entry
     // fails the call with nothing uploaded and nothing saved.
     const blobStore = args.blobKeys?.length ? blobStoreFromEnv() : undefined;
@@ -1748,7 +1757,7 @@ export function registerMessageTools(
     // messageId, we delete the old draft afterward (the "replace" path).
     const payload: Record<string, unknown> = {
       subject: args.subject,
-      body: args.body,
+      body: prepared.body,
       recipientIds: args.recipientIds ?? serverRecipientIds ?? [],
       attachments: { myFileIDs },
       draft: true,
@@ -1774,7 +1783,7 @@ export function registerMessageTools(
     const warnings: string[] = [...uploadWarnings];
 
     if (newId !== null) {
-      verifyNote = verifyWriteLanded('draft', { subject: args.subject, body: args.body }, detail);
+      verifyNote = verifyWriteLanded('draft', { subject: args.subject, body: prepared.body }, detail);
       // Trust the re-fetched server detail as the source of truth for the stored
       // replyToId — NOT `resolvedReplyTo` (what we intended to post). OFW
       // normalizes/drops threading after a save, and masking that with our own
@@ -1937,13 +1946,14 @@ export function registerMessageTools(
         ...(newFiles.length > 0 ? { attachmentsUploaded: newFiles } : {}),
         ...(warnings.length > 0 ? { warnings } : {}),
         ...(recipientsNote !== null ? { recipientsNote } : {}),
+        ...(prepared.conversion !== null ? { bodyConversion: prepared.conversion } : {}),
       }
       : raw;
     const warnNote = warnings.length > 0
       ? `WARNING: ${warnings.join('\n\n')}`
       : null;
     return notedJsonResponse(
-      [forceNote, rewriteNote, verifyNote, warnNote, recipientsNote, replaceNote],
+      [forceNote, rewriteNote, prepared.noteLine, verifyNote, warnNote, recipientsNote, replaceNote],
       responseObj,
       'Draft saved.',
     );

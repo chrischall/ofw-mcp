@@ -72,6 +72,7 @@ src/
     index.ts        extractAttachment(): format detection, part selection, char budget
   tools/
     _shared.ts      recipient mapping, response helpers, path expansion
+    plain-text.ts   markdownToPlainText()/prepareBody(): the write tools' Markdown → plain-text body conversion (`bodyFormat`)
     _confirm.ts     confirmWrite(): the mcp-utils 2.6 confirm gate (requireConfirmationWithFallback + confirmationFromEnv) every co-parent-visible write goes through; CONFIRM_NOTE, stateRevision
     delivery.ts     the attachment delivery ladder (image → extracted → raw bytes)
     uploads.ts      upload sources a remote caller can use: inline base64, blob-store upload slots (mint → caller PUT → consume), the My Files POST, and the one-step attachment plan for save_draft/send. Filename/MIME/base64/slot-key rules are delegated to @chrischall/mcp-utils/export (≥3.6, lifted from here); only the 25 MiB cap, the tool-named key error and the offset-bearing expiresAt are local
@@ -196,6 +197,18 @@ survive byte-for-byte, which `JSON.stringify` gives for free and a text-level
 minifier would destroy. Tests pin it here and in mcp-utils.
 
 Together: **135.1 KB → 41.1 KB, −70%.**
+
+## Message bodies are plain text (`tools/plain-text.ts`)
+
+OFW never renders Markdown or HTML. Verified in the web app 2026-11-11: the read view HTML-escapes the body (`&` arrives as `&amp;`), wraps https URLs, emails and phone numbers in links, and shows it in a `white-space: pre-wrap` span — so newlines, blank lines and leading spaces survive and nothing else formats. The compose box is a plain `<textarea>`.
+
+So `ofw_save_draft` and `ofw_send_message` convert Markdown to plain text before posting (`bodyFormat`, default `"markdown"`; `"plain"` posts byte-for-byte): emphasis markers and `#` heading markers dropped, `[text](url)` → `text (url)`, lists normalized to `-` / renumbered `1.` (Markdown's `1. 1. 1.` means 1, 2, 3; a non-1 start is kept), the second level lettered `a.`, 4 spaces per level, markers right-padded so text aligns past 9. Code spans, fences, URLs and `~~strike~~` (stripping would invert its meaning) are left alone. Rules that matter:
+
+- **Convert before the confirm gate.** The preview and the bound payload carry the converted text, so the human approves the bytes that are sent. `verifyWriteLanded` compares against the converted text too, or every conversion would warn "did not land".
+- **Only a caller-supplied body.** A draft sent by id goes out exactly as it is on OFW.
+- **Idempotent** — re-saving a converted draft changes nothing — and **unchanged input is returned byte-for-byte**, CRLF included. Tests pin both.
+- **Conservative.** A numbered list may start after a prose line only at `1.`; letters are list markers only when nested; word-internal `_`/`*` and spaced `*` are not emphasis.
+- **Padding is ASCII spaces, deliberately.** In OFW's font (Open Sans 14px) a digit is 8px and a space 3.64px, so `9.␣␣` is ~4px short of `10.␣`. A figure space (U+2007) aligns exactly but would put an invisible non-ASCII character into the court record.
 
 ## Timestamps
 
