@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.29.0](https://github.com/chrischall/ofw-mcp/compare/v2.28.1...v2.29.0) (2026-11-11)
+
+
+### Features
+
+* **messages:** convert Markdown in message bodies to plain text ([#443](https://github.com/chrischall/ofw-mcp/issues/443)) ([0e629c3](https://github.com/chrischall/ofw-mcp/commit/0e629c3765825e6b4dc4ac4f4b0a05f9f931c7d0))
+
+
+### Bug Fixes
+
+* **messages:** give the send preview's bodyConversion the same shape as the results ([#446](https://github.com/chrischall/ofw-mcp/issues/446)) ([6fede5d](https://github.com/chrischall/ofw-mcp/commit/6fede5dfcc5b705de43f37c4d652e36b0190650e))
+
 ## [2.28.1](https://github.com/chrischall/ofw-mcp/compare/v2.28.0...v2.28.1) (2026-11-10)
 
 
