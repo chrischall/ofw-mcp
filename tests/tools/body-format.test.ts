@@ -94,15 +94,18 @@ describe('ofw_send_message body conversion', () => {
 
     const phase1 = await callPreview(handlers.get('ofw_send_message')!, { subject: 'S', body: MD, recipientIds: [1] });
     expect(phase1.preview.body).toBe(PLAIN);
-    expect(phase1.preview.bodyConversion).toEqual(['headings', 'bold/italic', 'list numbering']);
+    // One shape for the field everywhere it appears: preview, send result, save result.
+    expect(phase1.preview.bodyConversion).toEqual({
+      changes: ['headings', 'bold/italic', 'list numbering'],
+      note: expect.stringContaining('bodyFormat:"plain"'),
+    });
 
     const res = await callConfirmed(handlers.get('ofw_send_message')!, { subject: 'S', body: MD, recipientIds: [1] });
     const text = res.content[0].text;
     expect(postedBody(spy)).toBe(PLAIN);
     expect(text).not.toContain('WARNING');
     expect(text).toContain('NOTE: the body was converted from Markdown to plain text');
-    expect(JSON.parse(text.slice(text.indexOf('{'))).bodyConversion.changes)
-      .toEqual(['headings', 'bold/italic', 'list numbering']);
+    expect(JSON.parse(text.slice(text.indexOf('{'))).bodyConversion).toEqual(phase1.preview.bodyConversion);
   });
 
   it('bodyFormat:"plain" sends the body exactly as written', async () => {
