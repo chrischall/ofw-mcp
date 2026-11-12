@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.29.1](https://github.com/chrischall/ofw-mcp/compare/v2.29.0...v2.29.1) (2026-11-12)
+
+
+### Bug Fixes
+
+* **messages:** label where each First Viewed time came from, and never erase one ([#449](https://github.com/chrischall/ofw-mcp/issues/449)) ([f532956](https://github.com/chrischall/ofw-mcp/commit/f53295656e4af083d2915165751fe0c1a744bbec))
+
 ## [2.29.0](https://github.com/chrischall/ofw-mcp/compare/v2.28.1...v2.29.0) (2026-11-11)
 
 
