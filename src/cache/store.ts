@@ -11,6 +11,21 @@ export interface Recipient {
   userId: number;
   name: string;
   viewedAt: string | null;
+  /**
+   * Where `viewedAt` came from (issue #448). `detail` = OFW's message detail,
+   * the only endpoint that carries a real "First Viewed" time, so a null here
+   * means "not viewed as of `viewedAtCheckedAt`". `list` = the list endpoint,
+   * which only ever sends a placeholder, so a null here means UNKNOWN. Absent
+   * on rows cached before provenance was recorded.
+   */
+  viewedAtSource?: 'detail' | 'list';
+  /** UTC instant the detail that supplied `viewedAt` was read. `detail` only. */
+  viewedAtCheckedAt?: string;
+  /**
+   * OFW's epoch-zero placeholder (`1970-01-01T00:00:00`), kept verbatim as raw
+   * source data. It is NEVER a view time — that is why it is not in `viewedAt`.
+   */
+  viewedPlaceholder?: string;
 }
 
 export interface MessageRow {

@@ -34,7 +34,7 @@ import {
 } from '../config.js';
 import { basename, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { ApiRecipientSchema, deriveRead, draftReplyTarget, hasRealView, jsonErrorResponse, jsonResponse, jsonText, mapRecipients, notedJsonResponse, postMessageAndRefetch, reportsThreaded, UnconfirmedWriteError, reportsUnthreaded, threadedReplyTo, verifyWriteLanded, withReadState } from './_shared.js';
+import { ApiRecipientSchema, deriveRead, detailRecipients, mergeRecipients, withViewOrigin, draftReplyTarget, hasRealView, jsonErrorResponse, jsonResponse, jsonText, mapRecipients, notedJsonResponse, postMessageAndRefetch, reportsThreaded, UnconfirmedWriteError, reportsUnthreaded, threadedReplyTo, verifyWriteLanded, withReadState } from './_shared.js';
 import type { ReplyToSource } from './_shared.js';
 import { parseLenient } from '@chrischall/mcp-utils';
 import { pageState } from './pagination.js';
@@ -370,11 +370,12 @@ async function openUnreadBody(client: OFWClient, cache: CacheStore, cached: Mess
     await client.request('GET', `/pub/v3/messages/${cached.id}`),
     { label: 'ofw-mcp', context: 'GET /pub/v3/messages/{id} (sync, confirmed mark-read)' },
   );
+  const checkedAt = new Date().toISOString();
   await cache.upsertMessage({
     ...cached,
-    recipients: detail.recipients ? mapRecipients(detail.recipients) : cached.recipients,
+    recipients: mergeRecipients(cached.recipients, detailRecipients(detail.recipients, checkedAt)),
     body: detail.body ?? '',
-    fetchedBodyAt: new Date().toISOString(),
+    fetchedBodyAt: checkedAt,
   });
   if (Array.isArray(detail.files) && detail.files.length > 0) {
     await fetchAttachmentMetaForMessage(client, cached.id, detail.files, cache);
@@ -600,6 +601,10 @@ export function registerMessageTools(
       view: LIST_MESSAGES_VIEW,
     }),
   }, async (args) => {
+    // The instant this call began: a recipient view time read from OFW's detail
+    // at or after it is labelled `detail-this-call`, anything older came from
+    // the cache (withViewOrigin, issue #448).
+    const callStartedAt = Date.now();
     const page = args.page ?? 1;
     const size = args.size ?? 50;
     const sort = args.sort ?? 'newest';
@@ -669,7 +674,7 @@ export function registerMessageTools(
         // can be stale (a message read after it was first scraped), so `read`
         // is derived from the record's own `viewedAt`/`fetchedBodyAt` and
         // `listData` is forced to agree — see withReadState.
-        const messages = (await cache.listMessages({ ...filter, page, size, sort })).map((m) => withReadState(m));
+        const messages = (await cache.listMessages({ ...filter, page, size, sort })).map((m) => withViewOrigin(withReadState(m), callStartedAt));
         // Served from the local cache, so the result must say how old it is and
         // whether anything vouches for it — a caller cannot state current state
         // from this payload without either re-reading or surfacing the caveat.
@@ -784,7 +789,7 @@ export function registerMessageTools(
 
   server.registerTool('ofw_get_message', {
     _meta: familyMeta('lookup'),
-    description: 'Get a single OurFamilyWizard message OR draft by ID. Reads from local cache when available; otherwise fetches from OFW — and for an UNREAD INBOX message that fetch marks it read and stamps a "First Viewed" time the co-parent can see, which is part of the record and cannot be undone. Pass allowMarkRead:false to refuse such a fetch instead (cached bodies, sent messages and already-read messages are unaffected, because none of them stamp anything). For ids that match a draft (in the drafts cache), the response carries folder="drafts" and the body/subject/recipients reflect the drafts cache (which ofw_sync_messages keeps fresh) — drafts have no `fromUser`, and `sentAt`/`fetchedBodyAt` mirror the draft\'s `modifiedAt`. For inbox/sent messages, folder is "inbox" or "sent" as before. On a server-configured no-read day (OFW_READ_DAYS / OFW_NO_READ_DAYS) only an UNREAD inbox message is protected: its body is withheld (body:null, bodyWithheld:true, withheldReason:"UNREAD_ON_NO_READ_DAY", readingBlocked says when reading resumes) and OFW is never contacted for it; an id not in the cache is refused, since fetching it could mark it read. Sent messages and inbox messages already read are returned exactly as on a reading day. When the server runs with OFW_CONFIRM_MARK_READ=true, opening an unread inbox message first shows its subject, sender and sent time and asks the user to confirm marking it read: a confirmation prompt where the client supports one; otherwise the first call fetches NOTHING and returns that preview plus a confirmToken, and only a repeat call with that token opens the message (see MCP_CONFIRM_MODE). Show the user the preview and wait for their yes before repeating the call.' + OVERRIDE_DESCRIPTION,
+    description: 'Get a single OurFamilyWizard message OR draft by ID. Reads from local cache when available; otherwise fetches from OFW — and for an UNREAD INBOX message that fetch marks it read and stamps a "First Viewed" time the co-parent can see, which is part of the record and cannot be undone. Pass allowMarkRead:false to refuse such a fetch instead (cached bodies, sent messages and already-read messages are unaffected, because none of them stamp anything). For ids that match a draft (in the drafts cache), the response carries folder="drafts" and the body/subject/recipients reflect the drafts cache (which ofw_sync_messages keeps fresh) — drafts have no `fromUser`, and `sentAt`/`fetchedBodyAt` mirror the draft\'s `modifiedAt`. For inbox/sent messages, folder is "inbox" or "sent" as before. On a server-configured no-read day (OFW_READ_DAYS / OFW_NO_READ_DAYS) only an UNREAD inbox message is protected: its body is withheld (body:null, bodyWithheld:true, withheldReason:"UNREAD_ON_NO_READ_DAY", readingBlocked says when reading resumes) and OFW is never contacted for it; an id not in the cache is refused, since fetching it could mark it read. Sent messages and inbox messages already read are returned exactly as on a reading day. When the server runs with OFW_CONFIRM_MARK_READ=true, opening an unread inbox message first shows its subject, sender and sent time and asks the user to confirm marking it read: a confirmation prompt where the client supports one; otherwise the first call fetches NOTHING and returns that preview plus a confirmToken, and only a repeat call with that token opens the message (see MCP_CONFIRM_MODE). Show the user the preview and wait for their yes before repeating the call. Each recipient\'s `viewedAt` carries its provenance: `viewedAtOrigin` is "detail-this-call" (read from OurFamilyWizard during this call), "detail-cached" (from an earlier read — see `viewedAtCheckedAt`), "list" (only the list was seen, so a null `viewedAt` means UNKNOWN, not unviewed) or "unrecorded". `viewedPlaceholder` is OurFamilyWizard\'s raw 1970 placeholder, kept as source data — it is never a view time.' + OVERRIDE_DESCRIPTION,
     annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
     inputSchema: z.object({
       messageId: z.string().describe('Message ID (also accepts draft IDs — drafts are routed via the drafts cache)'),
@@ -796,6 +801,10 @@ export function registerMessageTools(
       confirmToken: confirmTokenParam,
     }),
   }, async (args, ctx) => {
+    // The instant this call began: a recipient view time read from OFW's detail
+    // at or after it is labelled `detail-this-call`, anything older came from
+    // the cache (withViewOrigin, issue #448).
+    const callStartedAt = Date.now();
     const id = Number(args.messageId);
     const view = resolveView(args.view, MESSAGE_VIEWS);
     const cache = cacheProvider();
@@ -883,7 +892,7 @@ export function registerMessageTools(
       const freshness = await buildFreshness(cache, { source: 'cache', folders: [cached.folder] });
       return jsonResponse({
         readingBlocked: blocked,
-        ...viewOne(view, withholdBody(withReadState(cached))),
+        ...viewOne(view, withholdBody(withViewOrigin(withReadState(cached), callStartedAt))),
         attachments,
         freshness,
       });
@@ -905,7 +914,7 @@ export function registerMessageTools(
             await client.request('GET', `/pub/v3/messages/${id}`),
             { label: 'ofw-mcp', context: 'GET /pub/v3/messages/{id} (view-status refresh)' },
           );
-          const recipients = mapRecipients(detail.recipients);
+          const recipients = mergeRecipients(cached.recipients, detailRecipients(detail.recipients, new Date().toISOString()));
           // Keep the raw listData read-flag in step with the refreshed
           // recipients so `showNeverViewed` can't contradict `viewedAt`.
           // (Spreading a null/absent listData is a no-op, so no guard needed.)
@@ -948,7 +957,7 @@ export function registerMessageTools(
       const freshness = await buildFreshness(cache, { source: 'cache', folders: [row.folder] });
       return jsonResponse({
         ...(overriding ? readOverrideFields('ofw_get_message', [row.id]) : {}),
-        ...viewOne(view, withReadState(row)),
+        ...viewOne(view, withViewOrigin(withReadState(row), callStartedAt)),
         attachments,
         freshness,
       });
@@ -984,15 +993,16 @@ export function registerMessageTools(
         folder = 'sent';
       }
     }
+    const fetchedBodyAt = new Date().toISOString();
     const row: MessageRow = {
       id: detail.id,
       folder,
       subject: detail.subject,
       fromUser: detail.from?.name ?? '',
       sentAt: detail.date?.dateTime ?? nowNaiveWallClock(),
-      recipients: mapRecipients(detail.recipients),
+      recipients: mergeRecipients(cached?.recipients, detailRecipients(detail.recipients, fetchedBodyAt)),
       body: detail.body ?? '',
-      fetchedBodyAt: new Date().toISOString(),
+      fetchedBodyAt,
       replyToId: cached?.replyToId ?? null,
       chainRootId: cached?.chainRootId ?? null,
       listData: cached?.listData ?? detail,
@@ -1006,7 +1016,7 @@ export function registerMessageTools(
     const freshness = await buildFreshness(cache, { source: 'live', folders: [folder] });
     return jsonResponse({
       ...(overriding ? readOverrideFields('ofw_get_message', [row.id]) : {}),
-      ...viewOne(view, withReadState(row)),
+      ...viewOne(view, withViewOrigin(withReadState(row), callStartedAt)),
       attachments,
       freshness,
     });
@@ -1297,7 +1307,7 @@ export function registerMessageTools(
       // omitted or empty recipients array is "not echoed" (OFW routinely
       // echoes [] the way it does on drafts), and crying wolf on it would
       // retain the draft after every ordinary send.
-      const storedRecipients = mapRecipients(detail.recipients);
+      const storedRecipients = mapRecipients(detail.recipients, { source: 'detail', checkedAt: new Date().toISOString() });
       if (Array.isArray(detail.recipients) && detail.recipients.length > 0) {
         const landed = new Set(storedRecipients.map((r) => r.userId));
         const missingRecipients = recipientIds.filter((rid) => !landed.has(rid));

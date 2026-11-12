@@ -5,7 +5,7 @@ import type {
   MessageRow, DraftRow, FolderName,
 } from './cache/store.js';
 import { z } from 'zod';
-import { ApiRecipientSchema, draftReplyTarget, hasRealView, mapRecipients, scrapeSaysRead } from './tools/_shared.js';
+import { ApiRecipientSchema, detailRecipients, draftReplyTarget, hasRealView, mapRecipients, mergeRecipients, scrapeSaysRead } from './tools/_shared.js';
 import type { ReplyToSource } from './tools/_shared.js';
 import { clearReplyToSource, setReplyToSource } from './tools/reply-source.js';
 import { senderOf } from './tools/project.js';
@@ -423,11 +423,15 @@ async function walkPages(
             item, { subject: existing.subject, sentAt: existing.sentAt, from: senderOf(existing) },
             'GET /pub/v3/messages/{id} (body backfill)', false,
           );
+          const checkedAt = new Date().toISOString();
           toUpsert.push({
             ...existing,
             body: detail.body ?? '',
-            fetchedBodyAt: new Date().toISOString(),
-            recipients: mapRecipients(detail.recipients ?? item.recipients),
+            fetchedBodyAt: checkedAt,
+            // A detail that omits recipients (or a view time) must not erase
+            // what the cache already recorded — and the LIST's recipients
+            // carry only a placeholder, so they are never a substitute.
+            recipients: mergeRecipients(existing.recipients, detailRecipients(detail.recipients, checkedAt)),
             listData: item,
           });
           synced++;
@@ -453,7 +457,8 @@ async function walkPages(
             await client.request('GET', `/pub/v3/messages/${item.id}`),
             { label: 'ofw-mcp', context: 'GET /pub/v3/messages/{id} (view-status refresh)' },
           );
-          toUpsert.push({ ...existing, recipients: mapRecipients(detail.recipients), listData: item });
+          const recipients = mergeRecipients(existing.recipients, detailRecipients(detail.recipients, new Date().toISOString()));
+          toUpsert.push({ ...existing, recipients, listData: item });
           synced++;
         }
         continue;
@@ -471,7 +476,7 @@ async function walkPages(
       // the row from the list would cache viewedAt:null for a message that was
       // already read by the time we first saw it — reporting "never viewed" for
       // a message OFW shows as read, until a later sync's refresh healed it.
-      let detailRecipients: ListItem['recipients'];
+      let detailRecipientsRaw: ListItem['recipients'];
       // The row as the list describes it; the detail (if fetched) fills in
       // body and real view times below.
       const row: MessageRow = {
@@ -480,7 +485,7 @@ async function walkPages(
         subject: item.subject ?? '(no subject)',
         fromUser: item.from?.name ?? '',
         sentAt: item.date?.dateTime ?? nowNaiveWallClock(),
-        recipients: mapRecipients(item.recipients),
+        recipients: mapRecipients(item.recipients, { source: 'list' }),
         body: null,
         fetchedBodyAt: null,
         replyToId: null,
@@ -495,7 +500,7 @@ async function walkPages(
         if (isInboxUnread) opts.onUnreadBodyFetched?.(item.id);
         body = detail.body ?? '';
         fetchedBodyAt = new Date().toISOString();
-        detailRecipients = detail.recipients;
+        detailRecipientsRaw = detail.recipients;
         if (Array.isArray(detail.files) && detail.files.length > 0) {
           detailFileIds = detail.files;
         }
@@ -517,7 +522,7 @@ async function walkPages(
 
       row.body = body;
       row.fetchedBodyAt = fetchedBodyAt;
-      if (detailRecipients) row.recipients = mapRecipients(detailRecipients);
+      if (detailRecipientsRaw) row.recipients = mergeRecipients(row.recipients, detailRecipients(detailRecipientsRaw, fetchedBodyAt!));
       toUpsert.push(row);
       synced++;
       if (detailFileIds.length > 0) {
