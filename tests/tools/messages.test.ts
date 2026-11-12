@@ -4884,6 +4884,89 @@ describe('response validation (issue #83)', () => {
   });
 });
 
+describe('recipient view-time provenance (issue #448)', () => {
+  it('labels a view time read from the detail on THIS call, with when it was read', async () => {
+    upsertMessage({
+      id: 700, folder: 'sent', subject: 'Sent', fromUser: '',
+      sentAt: '2026-06-15T00:00:00Z',
+      recipients: [{ userId: 1, name: 'Co-parent', viewedAt: null, viewedAtSource: 'list', viewedPlaceholder: '1970-01-01T00:00:00' }],
+      body: 'sent-body', fetchedBodyAt: '2026-06-15T00:01:00Z',
+      replyToId: null, chainRootId: null, listData: {},
+    });
+    const client = new OFWClient();
+    vi.spyOn(client, 'request').mockResolvedValueOnce({
+      id: 700, subject: 'Sent', body: 'sent-body', date: { dateTime: '2026-06-15T00:00:00Z' },
+      recipients: [{ user: { userId: 1, name: 'Co-parent' }, viewed: { dateTime: '2026-06-16T15:49:20' } }],
+    });
+    setup(client);
+    const parsed = JSON.parse((await handlers.get('ofw_get_message')!({ messageId: '700' })).content[0].text);
+    const r = parsed.recipients[0];
+    expect(r.viewedAt).toBe('2026-06-16T15:49:20-04:00');
+    expect(r.viewedAtSource).toBe('detail');
+    expect(r.viewedAtOrigin).toBe('detail-this-call');
+    // A UTC instant we stamped, emitted with an offset like every other one.
+    expect(r.viewedAtCheckedAt).toMatch(/[+-]\d{2}:\d{2}$/);
+    expect(r.viewedPlaceholder).toBeUndefined();
+  });
+
+  it('labels a view time served from the cache as carried forward, not re-read', async () => {
+    upsertMessage({
+      id: 701, folder: 'sent', subject: 'Sent', fromUser: '',
+      sentAt: '2026-06-15T00:00:00Z',
+      recipients: [{ userId: 1, name: 'Co-parent', viewedAt: '2026-06-16T15:49:20', viewedAtSource: 'detail', viewedAtCheckedAt: '2026-06-17T00:00:00.000Z' }],
+      body: 'sent-body', fetchedBodyAt: '2026-06-15T00:01:00Z',
+      replyToId: null, chainRootId: null, listData: {},
+    });
+    const client = new OFWClient();
+    const spy = vi.spyOn(client, 'request');
+    setup(client);
+    const parsed = JSON.parse((await handlers.get('ofw_get_message')!({ messageId: '701' })).content[0].text);
+    expect(spy).not.toHaveBeenCalled();
+    expect(parsed.recipients[0].viewedAtOrigin).toBe('detail-cached');
+    expect(parsed.recipients[0].viewedAtCheckedAt).toBe('2026-06-16T20:00:00-04:00');
+  });
+
+  it('keeps a recorded First Viewed when a live detail omits the view time', async () => {
+    // Sent row whose body was never cached: get_message takes the live path.
+    upsertMessage({
+      id: 702, folder: 'sent', subject: 'Sent', fromUser: '',
+      sentAt: '2026-06-15T00:00:00Z',
+      recipients: [{ userId: 1, name: 'Co-parent', viewedAt: '2026-06-16T15:49:20', viewedAtSource: 'detail', viewedAtCheckedAt: '2026-06-17T00:00:00.000Z' }],
+      body: null, fetchedBodyAt: null,
+      replyToId: null, chainRootId: null, listData: {},
+    });
+    const client = new OFWClient();
+    vi.spyOn(client, 'request').mockResolvedValueOnce({
+      id: 702, subject: 'Sent', body: 'sent-body', date: { dateTime: '2026-06-15T00:00:00Z' },
+      recipients: [{ user: { userId: 1, name: 'Co-parent' } }],
+    });
+    setup(client);
+    const parsed = JSON.parse((await handlers.get('ofw_get_message')!({ messageId: '702' })).content[0].text);
+    expect(parsed.body).toBe('sent-body');
+    expect(parsed.recipients[0].viewedAt).toBe('2026-06-16T15:49:20-04:00');
+    expect(parsed.recipients[0].viewedAtOrigin).toBe('detail-cached');
+    expect(getMessage(702)?.recipients[0].viewedAt).toBe('2026-06-16T15:49:20');
+  });
+
+  it('list_messages keeps the list placeholder verbatim and labels the row list-sourced', async () => {
+    upsertMessage({
+      id: 703, folder: 'inbox', subject: 'In', fromUser: '',
+      sentAt: '2026-06-15T00:00:00Z',
+      recipients: [{ userId: 1, name: 'Me', viewedAt: null, viewedAtSource: 'list', viewedPlaceholder: '1970-01-01T00:00:00' }],
+      body: null, fetchedBodyAt: null,
+      replyToId: null, chainRootId: null, listData: { read: false },
+    });
+    setMeta('folder_verified_at:inbox', new Date().toISOString());
+    setMeta('folder_verified_at:sent', new Date().toISOString());
+    setup(new OFWClient());
+    const parsed = JSON.parse((await handlers.get('ofw_list_messages')!({ folder: 'inbox' })).content[0].text);
+    const r = parsed.messages[0].recipients[0];
+    expect(r.viewedAt).toBeNull();
+    expect(r.viewedPlaceholder).toBe('1970-01-01T00:00:00');
+    expect(r.viewedAtOrigin).toBe('list');
+  });
+});
+
 describe('ofw_get_message — sent view-status refresh', () => {
   it('refreshes view status for a cached sent message the recipient has since read', async () => {
     upsertMessage({

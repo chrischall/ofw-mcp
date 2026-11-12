@@ -96,12 +96,95 @@ export type ApiRecipient = z.infer<typeof ApiRecipientSchema>;
 // for sent; see scrapeSaysRead — not the timestamp). So treat
 // the epoch placeholder as "no real view time" — otherwise a list-sourced row
 // reports a bogus 1970 read time. A detail re-fetch is what fills in the truth.
-export function mapRecipients(items: ApiRecipient[] | undefined | null): Recipient[] {
+//
+// `origin` records provenance on each recipient (issue #448): which endpoint
+// the value came from, when a detail was read, and the raw placeholder itself,
+// kept in its own clearly named field rather than discarded. Omit it where no
+// view time is meaningful (drafts) and the row stays three fields.
+export interface RecipientOrigin {
+  source: 'detail' | 'list';
+  /** UTC ISO instant the detail was read; required for `detail`. */
+  checkedAt?: string;
+}
+export function mapRecipients(items: ApiRecipient[] | undefined | null, origin?: RecipientOrigin): Recipient[] {
   return (items ?? []).map((r) => {
     const dt = r.viewed?.dateTime;
-    const viewedAt = typeof dt === 'string' && !dt.startsWith('1970-01-01') ? dt : null;
-    return { userId: r.user?.userId ?? r.user?.id ?? 0, name: r.user?.name ?? '', viewedAt };
+    const placeholder = typeof dt === 'string' && dt.startsWith('1970-01-01');
+    const viewedAt = typeof dt === 'string' && !placeholder ? dt : null;
+    const out: Recipient = { userId: r.user?.userId ?? r.user?.id ?? 0, name: r.user?.name ?? '', viewedAt };
+    if (origin) {
+      out.viewedAtSource = origin.source;
+      if (origin.source === 'detail' && origin.checkedAt !== undefined) out.viewedAtCheckedAt = origin.checkedAt;
+      if (placeholder) out.viewedPlaceholder = dt;
+    }
+    return out;
   });
+}
+
+/**
+ * A detail payload's recipients, labelled as read from the detail at
+ * `checkedAt` — or null when the payload reported none (absent or empty), so
+ * {@link mergeRecipients} keeps what the cache already knew.
+ */
+export function detailRecipients(items: ApiRecipient[] | undefined | null, checkedAt: string): Recipient[] | null {
+  return items && items.length > 0 ? mapRecipients(items, { source: 'detail', checkedAt }) : null;
+}
+
+function sameRecipient(a: Recipient, b: Recipient): boolean {
+  if (a.userId !== 0 && b.userId !== 0) return a.userId === b.userId;
+  return a.name !== '' && a.name === b.name;
+}
+
+/**
+ * Combine freshly fetched recipients with what the cache already held, so an
+ * INCOMPLETE OFW response can never erase evidence (issue #448).
+ *
+ * - No recipients reported (absent or `[]`) → the cached set stands; a message
+ *   always has recipients, so an empty array is "not echoed", not "none".
+ * - A recipient the fresh payload gives no real view time, where the cache
+ *   holds one → the cached time is carried forward WITH its original
+ *   provenance (`viewedAtSource`/`viewedAtCheckedAt`), so a reader can tell it
+ *   was not re-observed by this fetch. "First Viewed" cannot be withdrawn, so
+ *   a payload that omits it is incomplete, not a correction.
+ *
+ * Membership otherwise follows the fresh payload.
+ */
+export function mergeRecipients(prior: Recipient[] | null | undefined, fresh: Recipient[] | null): Recipient[] {
+  if (fresh === null || fresh.length === 0) return prior ?? [];
+  const priorList = prior ?? [];
+  return fresh.map((r) => {
+    if (hasRealView([r])) return r;
+    const match = priorList.find((p) => sameRecipient(p, r) && hasRealView([p]));
+    if (!match) return r;
+    const carried: Recipient = { userId: r.userId, name: r.name, viewedAt: match.viewedAt };
+    if (match.viewedAtSource !== undefined) carried.viewedAtSource = match.viewedAtSource;
+    if (match.viewedAtCheckedAt !== undefined) carried.viewedAtCheckedAt = match.viewedAtCheckedAt;
+    return carried;
+  });
+}
+
+/**
+ * Where each recipient's `viewedAt` in THIS response came from (issue #448):
+ * - `detail-this-call` — read from OFW's message detail during this call;
+ * - `detail-cached`    — from a detail read on an earlier call (see
+ *                        `viewedAtCheckedAt`), carried forward from the cache;
+ * - `list`             — only the list endpoint has been seen, which sends a
+ *                        placeholder, so a null `viewedAt` means UNKNOWN;
+ * - `unrecorded`       — cached before provenance was recorded.
+ */
+export type ViewedAtOrigin = 'detail-this-call' | 'detail-cached' | 'list' | 'unrecorded';
+export function withViewOrigin<T extends MessageRow>(row: T, callStartedAtMs: number): T {
+  const recipients = row.recipients.map((r) => {
+    let viewedAtOrigin: ViewedAtOrigin;
+    if (r.viewedAtSource === 'detail') {
+      const at = r.viewedAtCheckedAt === undefined ? NaN : Date.parse(r.viewedAtCheckedAt);
+      viewedAtOrigin = at >= callStartedAtMs ? 'detail-this-call' : 'detail-cached';
+    } else {
+      viewedAtOrigin = r.viewedAtSource ?? 'unrecorded';
+    }
+    return { ...r, viewedAtOrigin };
+  });
+  return { ...row, recipients };
 }
 
 // True if any recipient has a *real* "First Viewed" time — i.e. present and

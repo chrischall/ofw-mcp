@@ -192,6 +192,10 @@ const TIMESTAMP_KEYS = new Set([
   // OFW: UTC instants we stamp ourselves.
   'fetchedBodyAt',
   'fetchedAt',
+  // When the detail behind a recipient's `viewedAt` was read (issue #448).
+  // NOT `viewedPlaceholder`: that is OFW's raw epoch-zero placeholder, kept
+  // verbatim precisely so it can never be rendered as a real time.
+  'viewedAtCheckedAt',
   'syncedAt',
   'downloadedAt',
   'recordedAt',

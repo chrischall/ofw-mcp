@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { isAbsolute } from 'node:path';
 import { z } from 'zod';
 import { OFWClient } from '../../src/client.js';
-import { deriveRead, draftReplyTarget, expandPath, hasRealView, jsonResponse, mapRecipients, postMessageAndRefetch, textResponse, UnconfirmedWriteError, verifyWriteLanded, withReadState } from '../../src/tools/_shared.js';
+import { deriveRead, draftReplyTarget, expandPath, hasRealView, jsonResponse, mapRecipients, mergeRecipients, postMessageAndRefetch, textResponse, UnconfirmedWriteError, verifyWriteLanded, withReadState, withViewOrigin } from '../../src/tools/_shared.js';
 import { sampleMessageRow } from '../_fixtures.js';
 
 describe('jsonResponse', () => {
@@ -79,6 +79,98 @@ describe('mapRecipients', () => {
       { userId: 0, name: '', viewedAt: '2026-05-01T00:00:00Z' },
       { userId: 0, name: '', viewedAt: null },
       { userId: 0, name: '', viewedAt: null },
+    ]);
+  });
+});
+
+describe('mapRecipients provenance (issue #448)', () => {
+  const CHECKED = '2026-11-12T15:00:00.000Z';
+
+  it('labels a DETAIL view time with its source and the moment the detail was read', () => {
+    expect(mapRecipients(
+      [{ user: { userId: 7, name: 'Pat' }, viewed: { dateTime: '2026-07-17T08:37:57' } }],
+      { source: 'detail', checkedAt: CHECKED },
+    )).toEqual([
+      { userId: 7, name: 'Pat', viewedAt: '2026-07-17T08:37:57', viewedAtSource: 'detail', viewedAtCheckedAt: CHECKED },
+    ]);
+  });
+
+  it('keeps the LIST placeholder verbatim in viewedPlaceholder, never in viewedAt', () => {
+    expect(mapRecipients(
+      [{ user: { userId: 7, name: 'Pat' }, viewed: { dateTime: '1970-01-01T00:00:00' } }],
+      { source: 'list' },
+    )).toEqual([
+      { userId: 7, name: 'Pat', viewedAt: null, viewedAtSource: 'list', viewedPlaceholder: '1970-01-01T00:00:00' },
+    ]);
+  });
+
+  it('a detail that reports no view says "not viewed as of checkedAt", with no placeholder when none was sent', () => {
+    expect(mapRecipients(
+      [{ user: { userId: 7, name: 'Pat' }, viewed: null }],
+      { source: 'detail', checkedAt: CHECKED },
+    )).toEqual([
+      { userId: 7, name: 'Pat', viewedAt: null, viewedAtSource: 'detail', viewedAtCheckedAt: CHECKED },
+    ]);
+  });
+
+  it('adds no provenance keys when no source is given (drafts carry no view times)', () => {
+    expect(mapRecipients([{ user: { userId: 7, name: 'Pat' }, viewed: { dateTime: '1970-01-01T00:00:00' } }]))
+      .toEqual([{ userId: 7, name: 'Pat', viewedAt: null }]);
+  });
+});
+
+describe('mergeRecipients (issue #448)', () => {
+  const old = { userId: 7, name: 'Pat', viewedAt: '2026-07-17T08:37:57', viewedAtSource: 'detail' as const, viewedAtCheckedAt: '2026-11-01T00:00:00.000Z' };
+
+  it('keeps the cached recipients when the detail reported none (absent or empty)', () => {
+    expect(mergeRecipients([old], null)).toEqual([old]);
+    expect(mergeRecipients([old], [])).toEqual([old]);
+    expect(mergeRecipients(undefined, null)).toEqual([]);
+    const only = [{ userId: 7, name: 'Pat', viewedAt: null }];
+    expect(mergeRecipients(undefined, only)).toEqual(only);
+  });
+
+  it('never lets a payload that omits the view time erase a recorded First Viewed', () => {
+    const fresh = [{ userId: 7, name: 'Pat', viewedAt: null, viewedAtSource: 'detail' as const, viewedAtCheckedAt: '2026-11-12T00:00:00.000Z' }];
+    // Carried forward with its ORIGINAL provenance — not relabelled as this fetch.
+    expect(mergeRecipients([old], fresh)).toEqual([old]);
+  });
+
+  it('carries a legacy (unlabelled) view time forward without inventing a source', () => {
+    const legacy = { userId: 0, name: 'Pat', viewedAt: '2026-07-17T08:37:57' };
+    const fresh = [{ userId: 7, name: 'Pat', viewedAt: null, viewedAtSource: 'list' as const, viewedPlaceholder: '1970-01-01T00:00:00' }];
+    expect(mergeRecipients([legacy], fresh)).toEqual([{ userId: 7, name: 'Pat', viewedAt: '2026-07-17T08:37:57' }]);
+  });
+
+  it('takes the fresh value when it carries a real view time, and ignores a cached 1970 literal', () => {
+    const fresh = [{ userId: 7, name: 'Pat', viewedAt: '2026-08-01T10:00:00', viewedAtSource: 'detail' as const, viewedAtCheckedAt: 'x' }];
+    expect(mergeRecipients([old], fresh)).toEqual(fresh);
+    const fresh2 = [{ userId: 7, name: 'Pat', viewedAt: null }];
+    expect(mergeRecipients([{ userId: 7, name: 'Pat', viewedAt: '1970-01-01T00:00:00' }], fresh2)).toEqual(fresh2);
+  });
+
+  it('does not match recipients on an unknown id or empty name', () => {
+    const fresh = [{ userId: 0, name: '', viewedAt: null }];
+    expect(mergeRecipients([{ userId: 0, name: '', viewedAt: '2026-07-17T08:37:57' }], fresh)).toEqual(fresh);
+    expect(mergeRecipients([{ userId: 8, name: 'Sam', viewedAt: '2026-07-17T08:37:57' }], [{ userId: 7, name: 'Pat', viewedAt: null }]))
+      .toEqual([{ userId: 7, name: 'Pat', viewedAt: null }]);
+  });
+});
+
+describe('withViewOrigin (issue #448)', () => {
+  const start = Date.parse('2026-11-12T15:00:00.000Z');
+  const row = (recipients: unknown[]) => ({ ...sampleMessageRow(), recipients } as never);
+
+  it('labels each recipient: detail this call, detail from cache, list, or unrecorded', () => {
+    const out = withViewOrigin(row([
+      { userId: 1, name: 'a', viewedAt: '2026-11-12T10:00:00', viewedAtSource: 'detail', viewedAtCheckedAt: '2026-11-12T15:00:01.000Z' },
+      { userId: 2, name: 'b', viewedAt: '2026-11-01T10:00:00', viewedAtSource: 'detail', viewedAtCheckedAt: '2026-11-02T00:00:00.000Z' },
+      { userId: 3, name: 'c', viewedAt: null, viewedAtSource: 'list', viewedPlaceholder: '1970-01-01T00:00:00' },
+      { userId: 4, name: 'd', viewedAt: '2026-11-01T10:00:00' },
+      { userId: 5, name: 'e', viewedAt: null, viewedAtSource: 'detail' },
+    ]), start) as unknown as { recipients: { viewedAtOrigin: string }[] };
+    expect(out.recipients.map((r) => r.viewedAtOrigin)).toEqual([
+      'detail-this-call', 'detail-cached', 'list', 'unrecorded', 'detail-cached',
     ]);
   });
 });

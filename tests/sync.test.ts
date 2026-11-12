@@ -1271,7 +1271,29 @@ describe('syncMessageFolder — bounded + resumable (budget)', () => {
 
     expect(result.done).toBe(true);
     expect(getMessage(999)?.recipients).toEqual([
-      { userId: 1, name: 'Bob', viewedAt: '2026-07-16T20:40:18' },
+      // Labelled as read from the detail, and when (issue #448).
+      { userId: 1, name: 'Bob', viewedAt: '2026-07-16T20:40:18', viewedAtSource: 'detail', viewedAtCheckedAt: expect.any(String) },
+    ]);
+  });
+
+  it('a body backfill whose detail omits recipients keeps the recorded First Viewed (issue #448)', async () => {
+    upsertMessage({
+      id: 1, folder: 'sent', subject: 'Subject 1', fromUser: 'Me', sentAt: '2026-05-04T12:00:00Z',
+      recipients: [{ userId: 1, name: 'Bob', viewedAt: '2026-05-05T09:00:00', viewedAtSource: 'detail', viewedAtCheckedAt: '2026-05-06T00:00:00.000Z' }],
+      body: null, fetchedBodyAt: null, replyToId: null, chainRootId: null, listData: {},
+    });
+    const client = new OFWClient();
+    vi.spyOn(client, 'request')
+      .mockResolvedValueOnce(listResponse([{ id: 1 }]))
+      .mockResolvedValueOnce({ body: 'body-1' })         // detail carries no recipients
+      .mockResolvedValueOnce(listResponse([]));
+
+    await syncMessageFolder(client, 'sent', '222', { fetchUnreadBodies: false }, store());
+
+    expect(getMessage(1)?.body).toBe('body-1');
+    // Not replaced by the LIST's recipients, whose view time is never real.
+    expect(getMessage(1)?.recipients).toEqual([
+      { userId: 1, name: 'Bob', viewedAt: '2026-05-05T09:00:00', viewedAtSource: 'detail', viewedAtCheckedAt: '2026-05-06T00:00:00.000Z' },
     ]);
   });
 
@@ -1285,7 +1307,8 @@ describe('syncMessageFolder — bounded + resumable (budget)', () => {
     await syncMessageFolder(client, 'sent', '222', { fetchUnreadBodies: false }, store());
 
     expect(getMessage(1)?.recipients).toEqual([
-      { userId: 1, name: 'Bob', viewedAt: '2026-05-04T13:00:00Z' },
+      // Labelled as LIST-sourced: nothing on this row was read from a detail.
+      { userId: 1, name: 'Bob', viewedAt: '2026-05-04T13:00:00Z', viewedAtSource: 'list' },
     ]);
   });
 
