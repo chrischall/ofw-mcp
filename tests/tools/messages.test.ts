@@ -5234,6 +5234,45 @@ describe('ofw_check_freshness', () => {
     setMeta('drafts_folder_id', '3');
   });
 
+  it('classifies by the live folder map when OFW sends NUMERIC folder ids', async () => {
+    // No persisted map, so the probe resolves it live. OFW sends numeric ids;
+    // before they were coerced to strings the map held numbers, never equal to
+    // String(detail.folder.id), and a folder whose NAME the fallback does not
+    // know classified as "unknown" instead of "sent".
+    cache.core.deleteMeta('inbox_folder_id');
+    cache.core.deleteMeta('sent_folder_id');
+    cache.core.deleteMeta('drafts_folder_id');
+    upsertDraft(draft);
+    const client = new OFWClient();
+    vi.spyOn(client, 'request').mockImplementation(async (_m: string, path: string) => (
+      path.startsWith('/pub/v1/messageFolders')
+        ? { systemFolders: [{ id: 1, folderType: 'INBOX' }, { id: 2, folderType: 'SENT_MESSAGES' }, { id: 3, folderType: 'DRAFTS' }] }
+        : serverDraft({ folder: { id: 2, name: 'Outbox (renamed)' } })
+    ));
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    setup(client);
+
+    const parsed = JSON.parse(
+      (await handlers.get('ofw_check_freshness')!({ messageIds: [500] })).content[0].text,
+    );
+    expect(JSON.stringify(parsed)).toContain('"state":"sent"');
+    expect(err.mock.calls.map((c) => String(c[0])).filter((l) => l.includes('messageFolders'))).toEqual([]);
+    err.mockRestore();
+  });
+
+  it('reads folder counts without a shape warning when OFW sends numeric ids', async () => {
+    const client = new OFWClient();
+    vi.spyOn(client, 'request').mockResolvedValue({
+      systemFolders: [{ id: 1, folderType: 'INBOX', totalCount: 10 }, { id: 2, folderType: 'SENT_MESSAGES' }, { id: 3, folderType: 'DRAFTS' }],
+    });
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    setup(client);
+    await handlers.get('ofw_check_freshness')!({ folders: ['inbox'] });
+    expect(err.mock.calls.map((c) => String(c[0])).filter((l) => l.includes('WARNING'))).toEqual([]);
+    expect(cache.core.getMeta('inbox_folder_id')).toBe('1');
+    err.mockRestore();
+  });
+
   it('confirms a cached draft is still on the server and unchanged', async () => {
     upsertDraft(draft);
     const client = new OFWClient();

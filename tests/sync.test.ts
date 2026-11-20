@@ -57,6 +57,28 @@ describe('resolveFolderIds', () => {
     expect(spy).toHaveBeenCalledTimes(1);
   });
 
+  it('accepts the NUMERIC ids OFW actually sends, returns them as strings, and warns about nothing', async () => {
+    // Live shape (verified 2026-11-19): ids are numbers. The schema used to
+    // demand strings, so every sync logged an "unexpected shape" warning and
+    // handed back numbers typed as strings — which then never matched the
+    // String(detail.folder.id) comparisons in lifecycle.ts.
+    const client = new OFWClient();
+    vi.spyOn(client, 'request').mockResolvedValue({
+      systemFolders: [
+        { id: 111, folderType: 'INBOX', name: 'Inbox' },
+        { id: 222, folderType: 'SENT_MESSAGES', name: 'Sent' },
+        { id: 333, folderType: 'DRAFTS', name: 'Drafts' },
+      ],
+      userFolders: [],
+    });
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const ids = await resolveFolderIds(client, store());
+
+    expect(ids).toEqual({ inbox: '111', sent: '222', drafts: '333' });
+    expect(err.mock.calls.map((c) => String(c[0])).filter((l) => l.includes('WARNING'))).toEqual([]);
+  });
+
   it('persists the drafts folder id into meta', async () => {
     const client = new OFWClient();
     vi.spyOn(client, 'request').mockResolvedValue({
