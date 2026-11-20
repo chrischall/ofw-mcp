@@ -8494,7 +8494,9 @@ describe('ofw_get_message for messages seen in a live folder listing', () => {
     const parsed = JSON.parse((await handlers.get('ofw_get_message')!({ messageId: '6002' })).content[0].text);
     expect(spy).toHaveBeenCalledWith('GET', '/pub/v3/messages/6002');
     expect(parsed.body).toBe('live body');
-    expect(parsed).toMatchObject({ folder: 'other', folderId: '201', folderName: 'School', read: null });
+    expect(parsed).toMatchObject({ folder: 'other', folderId: '201', folderName: 'School' });
+    // No read verdict at all — omitted like a draft's, never a new null type.
+    expect(parsed).not.toHaveProperty('read');
     // Not cached as an inbox message: it is not in the inbox.
     expect(getMessage(6002)).toBeNull();
     expect(parsed.freshness.source).toBe('live');
@@ -8572,10 +8574,13 @@ describe('ofw_get_message for messages seen in a live folder listing', () => {
       .mockResolvedValueOnce(detail(6008, { id: 105 }));
     setup(c);
     const a = JSON.parse((await handlers.get('ofw_get_message')!({ messageId: '6007' })).content[0].text);
-    expect(a).toMatchObject({ folder: 'other', folderId: '105', folderName: 'Archived', read: null });
+    expect(a).toMatchObject({ folder: 'other', folderId: '105', folderName: 'Archived' });
+    expect(a).not.toHaveProperty('read');
     expect(a.otherFolderNote).toMatch(/not cached/);
     const b = JSON.parse((await handlers.get('ofw_get_message')!({ messageId: '6008', view: 'full' })).content[0].text);
     expect(b).toMatchObject({ folder: 'other', folderId: '105', folderName: null });
+    expect(b).not.toHaveProperty('read');
+    expect(b.listData).toBeDefined();
     expect(getMessage(6007)).toBeNull();
     expect(getMessage(6008)).toBeNull();
   });
