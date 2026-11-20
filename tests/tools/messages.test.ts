@@ -283,15 +283,177 @@ describe('ofw_list_messages (cache-backed)', () => {
     expect(parsed.remedy).toMatch(/ofw_sync_messages/);
   });
 
-  it('rejects numeric folder ids as an error, not as an empty result', async () => {
-    const client = new OFWClient();
+  // Issue #453: every OFW folder, not just inbox/sent. Placeholder ids/names.
+  const LIVE_FOLDERS = {
+    systemFolders: [
+      { id: 101, name: 'Inbox', folderType: 'INBOX' },
+      { id: 103, name: 'Drafts', folderType: 'DRAFTS' },
+      { id: 104, name: 'Sent', folderType: 'SENT_MESSAGES' },
+      { id: 105, name: 'Archived', folderType: 'TRASH' },
+    ],
+    userFolders: [{ id: 201, name: 'School' }, { id: 202 }],
+  };
+  const folderItem = (id: number, over: Record<string, unknown> = {}) => ({
+    id, subject: `Subject ${id}`, date: { dateTime: '2026-11-02T18:30:00' }, author: { name: 'Parent A' },
+    showNeverViewed: false, read: false, preview: 'body text that must not appear', recipients: [], ...over,
+  });
+  function folderClient(...pages: unknown[]): OFWClient {
+    const c = new OFWClient();
+    const spy = vi.spyOn(c, 'request').mockResolvedValueOnce(LIVE_FOLDERS);
+    for (const p of pages) spy.mockResolvedValueOnce(p);
+    return c;
+  }
+
+  it('rejects a folder id OFW does not have as an error, not as an empty result', async () => {
+    const client = folderClient();
     setup(client);
     const result = await handlers.get('ofw_list_messages')!({ folderId: '42' });
     const parsed = JSON.parse(result.content[0].text);
     expect(result.isError).toBe(true);
     expect(parsed.result).toBe('INVALID_FOLDER');
-    expect(parsed.reason).toMatch(/inbox.*sent/);
+    expect(parsed.reason).toMatch(/no OurFamilyWizard folder/);
+    expect(parsed.availableFolders).toContainEqual({ id: '201', name: 'School', folderType: null, user: true });
     expect(parsed.messages).toBeUndefined();
+    // Only the folder list was read; no message page was requested.
+    expect(client.request).toHaveBeenCalledTimes(1);
+  });
+
+  it('names the tie when two folders share the requested name', async () => {
+    const c = new OFWClient();
+    vi.spyOn(c, 'request').mockResolvedValueOnce({ userFolders: [{ id: 1, name: 'Dup' }, { id: 2, name: 'Dup' }] });
+    setup(c);
+    const parsed = JSON.parse((await handlers.get('ofw_list_messages')!({ folderId: 'dup' })).content[0].text);
+    expect(parsed.result).toBe('INVALID_FOLDER');
+    expect(parsed.reason).toMatch(/2 folders are named/);
+    expect(parsed.availableFolders.map((f: { id: string }) => f.id)).toEqual(['1', '2']);
+  });
+
+  it('points the drafts folder at ofw_list_drafts', async () => {
+    setup(folderClient());
+    const result = await handlers.get('ofw_list_messages')!({ folderId: '103' });
+    const parsed = JSON.parse(result.content[0].text);
+    expect(result.isError).toBe(true);
+    expect(parsed.result).toBe('INVALID_FOLDER');
+    expect(parsed.remedy).toMatch(/ofw_list_drafts/);
+  });
+
+  it('answers the inbox folder id from the cache, exactly like folderId:"inbox"', async () => {
+    upsertMessage({ ...sampleMessageRow({ id: 7, folder: 'inbox', subject: 'Cached inbox' }) });
+    upsertMessage({ ...sampleMessageRow({ id: 8, folder: 'sent', subject: 'Cached sent' }) });
+    const client = folderClient();
+    setup(client);
+    const parsed = JSON.parse((await handlers.get('ofw_list_messages')!({ folderId: '101', autoRefresh: false })).content[0].text);
+    expect(parsed.messages.map((m: { id: number }) => m.id)).toEqual([7]);
+    expect(parsed.freshness.source).toBe('cache');
+  });
+
+  it('reads a user folder LIVE: one list page, no bodies, paging first', async () => {
+    const client = folderClient({ data: [folderItem(5001), folderItem(5002, { read: true })] });
+    setup(client);
+    const result = await handlers.get('ofw_list_messages')!({ folderId: 'school', size: 2 });
+    expect(result.isError).toBeUndefined();
+    const text = result.content[0].text;
+    const parsed = JSON.parse(text);
+    expect(client.request).toHaveBeenCalledTimes(2);
+    expect(client.request).toHaveBeenLastCalledWith('GET', '/pub/v3/messages?folders=201&page=1&size=2&sort=date&sortDirection=desc');
+    expect(parsed.folder).toEqual({ id: '201', name: 'School', folderType: null, user: true });
+    expect(parsed.complete).toBe(false);
+    expect(parsed.hasMore).toBe(true);
+    expect(parsed.nextPage).toBe(2);
+    expect(parsed.returned).toBe(2);
+    expect(parsed.freshness.source).toBe('live');
+    expect(parsed.messages.map((m: { id: number; read: boolean }) => [m.id, m.read])).toEqual([[5001, false], [5002, true]]);
+    expect(parsed.messages[0].sentAt).toBe('2026-11-02T18:30:00-05:00');
+    expect(parsed.messages[0].folderName).toBe('School');
+    expect(parsed.messages[0]).not.toHaveProperty('body');
+    expect(text).not.toContain('must not appear');
+    expect(parsed.note).toMatch(/ofw_get_message/);
+    // State before bulk: every paging key precedes the array.
+    expect(text.indexOf('"nextPage"')).toBeLessThan(text.indexOf('"messages"'));
+    expect(text.indexOf('"freshness"')).toBeLessThan(text.indexOf('"messages"'));
+    // A live folder read caches nothing.
+    expect(getMessage(5001)).toBeNull();
+  });
+
+  it('calls a single short page complete and says so', async () => {
+    setup(folderClient({ data: [folderItem(1)] }));
+    const parsed = JSON.parse((await handlers.get('ofw_list_messages')!({ folderId: '105' })).content[0].text);
+    expect(parsed.complete).toBe(true);
+    expect(parsed.hasMore).toBe(false);
+    expect(parsed.nextPage).toBeNull();
+    expect(parsed.completeNote).toBeUndefined();
+    expect(parsed.folder.name).toBe('Archived');
+  });
+
+  it('says an empty live folder is empty, verified live', async () => {
+    setup(folderClient({ data: [], metadata: { last: true } }));
+    const parsed = JSON.parse((await handlers.get('ofw_list_messages')!({ folderId: '201' })).content[0].text);
+    expect(parsed.complete).toBe(true);
+    expect(parsed.returned).toBe(0);
+    expect(parsed.note).toMatch(/holds no messages/);
+  });
+
+  it('a later page is never complete, and a skipped item is reported', async () => {
+    setup(folderClient({ data: [folderItem(3), { id: 'bad' }], metadata: { last: true, totalElements: 3 } }));
+    const parsed = JSON.parse((await handlers.get('ofw_list_messages')!({ folderId: '201', page: 2, size: 2, sort: 'oldest' })).content[0].text);
+    expect(parsed.complete).toBe(false);
+    expect(parsed.total).toBe(3);
+    expect(parsed.skipped).toBe(1);
+    expect(parsed.completeNote).toMatch(/page 2/);
+    expect(parsed.completeNote).toMatch(/1 list item/);
+  });
+
+  it('caps a live page at 50, the size OFW is known to honour', async () => {
+    const client = folderClient({ data: [] });
+    setup(client);
+    const parsed = JSON.parse((await handlers.get('ofw_list_messages')!({ folderId: '201', size: 500 })).content[0].text);
+    expect(client.request).toHaveBeenLastCalledWith('GET', '/pub/v3/messages?folders=201&page=1&size=50&sort=date&sortDirection=desc');
+    expect(parsed.size).toBe(50);
+  });
+
+  it('refuses since/until/q on a live folder rather than ignoring them', async () => {
+    const client = folderClient();
+    setup(client);
+    const result = await handlers.get('ofw_list_messages')!({ folderId: '201', q: 'trip', since: '2026-01-01' });
+    const parsed = JSON.parse(result.content[0].text);
+    expect(result.isError).toBe(true);
+    expect(parsed.result).toBe('UNSUPPORTED_FILTER');
+    expect(parsed.reason).toMatch(/since, q/);
+    expect(client.request).toHaveBeenCalledTimes(1);
+  });
+
+  it('names an unnamed folder by id and a single filter in the singular', async () => {
+    setup(folderClient());
+    const parsed = JSON.parse((await handlers.get('ofw_list_messages')!({ folderId: '202', until: '2026-01-01' })).content[0].text);
+    expect(parsed.reason).toMatch(/^until is not supported for the "202" folder/);
+  });
+
+  it('labels an unnamed folder by id and counts several skipped items', async () => {
+    setup(folderClient({ data: [{ id: 'x' }, { id: 'y' }] }));
+    const parsed = JSON.parse((await handlers.get('ofw_list_messages')!({ folderId: '202' })).content[0].text);
+    expect(parsed.completeNote).toMatch(/2 list items carried no message id and were left out/);
+    expect(parsed.note).toMatch(/"202" folder/);
+  });
+
+  it('a brief slice says it is one, with or without a total', async () => {
+    const two = [folderItem(1), folderItem(2)];
+    setup(folderClient({ data: two }));
+    let parsed = JSON.parse((await handlers.get('ofw_list_messages')!({ folderId: '201', size: 2, view: 'brief' })).content[0].text);
+    expect(parsed.data.at(-1)).toBe('-- 2 shown, more on page 2');
+    setup(folderClient({ data: two, metadata: { totalElements: 5 } }));
+    parsed = JSON.parse((await handlers.get('ofw_list_messages')!({ folderId: '201', size: 2, view: 'brief' })).content[0].text);
+    expect(parsed.data.at(-1)).toBe('-- 2 of 5 shown');
+  });
+
+  it('answers a live folder as brief lines and full echoes without bodies', async () => {
+    setup(folderClient({ data: [folderItem(5001)] }));
+    const brief = JSON.parse((await handlers.get('ofw_list_messages')!({ folderId: '201', view: 'brief' })).content[0].text);
+    expect(brief.data).toEqual(['Parent A: Subject 5001 — 2026-11-02T18:30:00-05:00 — unread']);
+
+    setup(folderClient({ data: [folderItem(5001)] }));
+    const fullText = (await handlers.get('ofw_list_messages')!({ folderId: '201', view: 'full' })).content[0].text;
+    expect(JSON.parse(fullText).messages[0].listData.subject).toBe('Subject 5001');
+    expect(fullText).not.toContain('must not appear');
   });
 
   it('filters by date range (since + until)', async () => {
@@ -5400,7 +5562,7 @@ describe('freshness contract across read tools', () => {
     expect(result.isError).toBe(true);
     expect(parsed.messages).toBeUndefined();
     expect(parsed.complete).toBe(false);
-    expect(parsed.note).toMatch(/says NOTHING about what is in the cache/);
+    expect(parsed.note).toMatch(/says NOTHING about what is in any folder/);
   });
 
   it('ofw_get_message carries freshness on the cache, live and draft paths', async () => {

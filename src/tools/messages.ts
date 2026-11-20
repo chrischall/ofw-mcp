@@ -38,6 +38,8 @@ import { ApiRecipientSchema, deriveRead, detailRecipients, mergeRecipients, with
 import type { ReplyToSource } from './_shared.js';
 import { parseLenient } from '@chrischall/mcp-utils';
 import { pageState } from './pagination.js';
+import { fetchFolderPage, folderMessageBrief, LIVE_FOLDER_MAX_PAGE, resolveMessageFolder } from './folder-messages.js';
+import type { LiveFolder } from './folder-messages.js';
 import { compactSentMessage, compactWrittenDraft, MESSAGE_VIEWS, senderOf, viewDrafts, viewMessages, viewOne } from './project.js';
 
 // The `view` note on the two write tools. Their echo is what the caller just
@@ -570,7 +572,7 @@ export function registerMessageTools(
 
   server.registerTool('ofw_list_message_folders', {
     _meta: familyMeta('lookup'),
-    description: 'List OurFamilyWizard message folders (inbox, sent, etc.) and their unread counts. Fetched LIVE from OFW, so the counts are current. Returns folder IDs needed to call ofw_list_messages. Does NOT return message content.',
+    description: 'List OurFamilyWizard message folders — system folders (Inbox, Sent, Archived, Action Items, …) and folders the user created — with their unread counts. Fetched LIVE from OFW, so the counts are current. Pass a folder\'s id or name to ofw_list_messages(folderId) to list the messages in it. Does NOT return message content.',
     annotations: { readOnlyHint: true, openWorldHint: true },
   }, async () => {
     const data = await client.request('GET', '/pub/v1/messageFolders?includeFolderCounts=true');
@@ -584,12 +586,12 @@ export function registerMessageTools(
       when: { start: 'since', end: 'until' },
       aliases: ['messages', 'inbox', 'co-parent', 'ofw', 'ourfamilywizard', 'new messages'],
     }),
-    description: 'List messages from the local OurFamilyWizard cache. Supports filtering by folder, date range, and a substring query on subject+body. Pagination is offset-based (1-based `page`) but if you know what you want (a date range, a topic), prefer the filters over walking pages — the cache may have 1000+ messages. Results are newest-first by default; `sort:"oldest"` starts at the old end of a range instead of paging to it. Returns an explicit `complete` boolean describing the RESULT SET: true means "this is every message on OurFamilyWizard matching these filters as of freshness.asOf" — check it before asserting a count. An empty result from a cache that is not verified-fresh is REFUSED (result:"UNVERIFIED_EMPTY") rather than reported as an absence; pass autoRefresh:true to sync and answer instead. On a server-configured no-read day (OFW_READ_DAYS / OFW_NO_READ_DAYS) only unread inbox messages are protected: each keeps its sender, subject and time but carries body:null, bodyWithheld:true, withheldReason:"UNREAD_ON_NO_READ_DAY", and q matches it by subject only (bodySearchSkipped counts those); readingBlocked, ahead of the messages, appears only when something was withheld and says when reading resumes. Sent messages and inbox messages already read are returned and searched in full, exactly as on a reading day.' + OVERRIDE_DESCRIPTION,
+    description: 'List messages from the local OurFamilyWizard cache. Supports filtering by folder, date range, and a substring query on subject+body. Pagination is offset-based (1-based `page`) but if you know what you want (a date range, a topic), prefer the filters over walking pages — the cache may have 1000+ messages. Results are newest-first by default; `sort:"oldest"` starts at the old end of a range instead of paging to it. Returns an explicit `complete` boolean describing the RESULT SET: true means "this is every message on OurFamilyWizard matching these filters as of freshness.asOf" — check it before asserting a count. An empty result from a cache that is not verified-fresh is REFUSED (result:"UNVERIFIED_EMPTY") rather than reported as an absence; pass autoRefresh:true to sync and answer instead. On a server-configured no-read day (OFW_READ_DAYS / OFW_NO_READ_DAYS) only unread inbox messages are protected: each keeps its sender, subject and time but carries body:null, bodyWithheld:true, withheldReason:"UNREAD_ON_NO_READ_DAY", and q matches it by subject only (bodySearchSkipped counts those); readingBlocked, ahead of the messages, appears only when something was withheld and says when reading resumes. Sent messages and inbox messages already read are returned and searched in full, exactly as on a reading day. folderId may also name any other OurFamilyWizard folder (a user-created folder, Archived, Action Items, …) by id or name: that folder is not cached, so it is read live, one list page per call (at most 50), returning `folder` and each message\'s subject, sender, sentAt, recipients and OurFamilyWizard\'s own `read` flag — never a body, so it marks nothing read. since/until/q are refused there (UNSUPPORTED_FILTER); a folder id or name OurFamilyWizard does not have is refused as INVALID_FOLDER with `availableFolders`. Read a body with ofw_get_message(messageId).' + OVERRIDE_DESCRIPTION,
     // Read-only even with autoRefresh: guardedCacheRead's sync never fetches
     // unread inbox bodies, so a list call cannot stamp "First Viewed".
     annotations: { readOnlyHint: true, openWorldHint: true },
     inputSchema: z.object({
-      folderId: z.string().describe('Folder name: "inbox", "sent", or "both" (default "both")').optional(),
+      folderId: z.string().describe('"inbox", "sent", or "both" (default "both") read the local cache. Any other OurFamilyWizard folder — one the user created, or Archived, Action Items, etc. — by its id or name from ofw_list_message_folders: read LIVE, one page at a time, with subjects/senders/dates but no bodies, and without since/until/q.').optional(),
       page: z.number().int().min(1).describe('Page number (default 1)').optional(),
       size: z.number().int().min(1).describe('Messages per page (default 50)').optional(),
       since: z.string().describe('ISO date or datetime — only messages with sent_at >= since (inclusive). A value with an offset or Z is compared as that instant; a naive value is read as the account\'s local time (DISPLAY_TZ)').optional(),
@@ -612,21 +614,114 @@ export function registerMessageTools(
     const view = resolveView(brief ? undefined : args.view, MESSAGE_VIEWS);
     const folderArg = args.folderId ?? 'both';
 
+    /**
+     * A folder the cache does not hold, read LIVE (issue #453). One list page,
+     * no detail GETs: the list carries no body, so this marks nothing read and
+     * a no-read day has nothing to withhold. Nothing is cached.
+     */
+    const listLiveFolder = async (liveFolder: LiveFolder) => {
+      // The cache filters run in SQL over cached rows; OFW's list endpoint has
+      // no equivalent, so a filter here would be silently ignored — and an
+      // unfiltered page read as a filtered one is a wrong answer, not a slow one.
+      const unsupported = (['since', 'until', 'q'] as const).filter((k) => args[k] !== undefined);
+      if (unsupported.length > 0) {
+        return jsonErrorResponse({
+          result: 'UNSUPPORTED_FILTER',
+          reason: `${unsupported.join(', ')} ${unsupported.length === 1 ? 'is' : 'are'} not supported for the "${liveFolder.name ?? liveFolder.id}" folder: it is read live from OurFamilyWizard, not from the cache, and OurFamilyWizard's folder listing cannot filter.`,
+          remedy: 'Re-call without since/until/q and page through the folder (newest first, or sort:"oldest").',
+          complete: false,
+          note: 'No messages were looked up.',
+        });
+      }
+      // 50 is the page size the sync walks with, so OFW is known to honour it.
+      // A larger request that OFW silently capped would come back short and
+      // read as the LAST page, hiding every page after it.
+      const liveSize = Math.min(size, LIVE_FOLDER_MAX_PAGE);
+      const result = await fetchFolderPage(client, liveFolder, {
+        page, size: liveSize, sort, checkedAt: new Date(callStartedAt).toISOString(), full: args.view === 'full',
+      });
+      const freshness = await buildFreshness(cacheProvider(), { source: 'live', folders: [] });
+      if (brief) {
+        const lines = result.messages.map((m) => folderMessageBrief(m, displayTimeZone()));
+        // OFW rarely reports a folder total, so "-- N of M shown" is not
+        // always available; a slice still has to say it is one.
+        return briefResult(
+          result.hasMore && result.total === null
+            ? [...lines, `-- ${result.returned} shown, more on page ${result.nextPage}`]
+            : briefPage(lines, result.hasMore ? { shown: result.returned, total: result.total! } : undefined),
+          'Message subjects and sender names are written by your co-parent and other OurFamilyWizard users.',
+        );
+      }
+      const complete = page === 1 && !result.hasMore && result.skipped === 0;
+      const label = liveFolder.name ?? liveFolder.id;
+      // Same key order as the cached path: paging state, notes and freshness
+      // ahead of `messages`, so a reader that stops early still learns it holds
+      // a slice.
+      const payload: Record<string, unknown> = {
+        complete,
+        hasMore: result.hasMore,
+        nextPage: result.nextPage,
+        returned: result.returned,
+        ...(result.total !== null ? { total: result.total } : {}),
+        page,
+        size: liveSize,
+        sort,
+        folder: liveFolder,
+      };
+      if (result.skipped > 0) payload.skipped = result.skipped;
+      if (!complete) {
+        payload.completeNote = [
+          page !== 1 ? `this is page ${page}; earlier pages are not in this response` : null,
+          result.hasMore ? `more messages remain in "${label}" — call again with page:${result.nextPage}` : null,
+          result.skipped > 0 ? `${result.skipped} list item${result.skipped === 1 ? '' : 's'} carried no message id and ${result.skipped === 1 ? 'was' : 'were'} left out` : null,
+        ].filter((r): r is string => r !== null)
+          .join('; ')
+          .concat('. Do not state a total or an absence from this result without resolving that first.');
+      }
+      payload.note = result.returned === 0 && complete
+        ? `The "${label}" folder holds no messages on OurFamilyWizard (read live just now).`
+        : `Read live from the "${label}" folder on OurFamilyWizard: subjects, senders and dates only — this folder is not cached, so no body is included and since/until/q do not apply. Fetch one with ofw_get_message(messageId); like any first read, that marks an unread message read on OurFamilyWizard. \`read\` is OurFamilyWizard's own list flag (null when it sent none).`;
+      payload.freshness = freshness;
+      payload.messages = result.messages;
+      return jsonResponse(payload);
+    };
+
     let folder: 'inbox' | 'sent' | undefined;
     if (folderArg === 'inbox') folder = 'inbox';
     else if (folderArg === 'sent') folder = 'sent';
     else if (folderArg === 'both') folder = undefined;
     else {
-      // A rejected argument is an ERROR, not a result. Returning `messages: []`
-      // here — even with a note attached — hands back the one shape this whole
-      // mechanism exists to eliminate: an empty list that looks like an answer.
-      return jsonErrorResponse({
-        result: 'INVALID_FOLDER',
-        reason: `folderId must be "inbox", "sent", or "both" (got ${JSON.stringify(folderArg)}). Numeric OFW folder IDs are not supported by the cache.`,
-        remedy: 'Re-call with folderId omitted (searches both) or set to one of the three accepted names.',
-        complete: false,
-        note: 'No lookup was performed. This says NOTHING about what is in the cache — do not read it as "no messages".',
-      });
+      // Any other value names an OurFamilyWizard folder by id or name (issue
+      // #453). Inbox and sent still answer from the cache; anything else is
+      // read live, one list page at a time.
+      const resolved = await resolveMessageFolder(client, folderArg);
+      if (resolved.kind === 'cached') folder = resolved.folder;
+      else if (resolved.kind === 'drafts') {
+        return jsonErrorResponse({
+          result: 'INVALID_FOLDER',
+          reason: `${JSON.stringify(folderArg)} is the Drafts folder, which ofw_list_messages does not list.`,
+          remedy: 'Call ofw_list_drafts instead: it verifies drafts against OurFamilyWizard and carries each draft\'s revision and draftKey.',
+          complete: false,
+          note: 'No messages were looked up. This says NOTHING about what is in the folder.',
+        });
+      } else if (resolved.kind === 'unknown') {
+        // A rejected argument is an ERROR, not a result. Returning
+        // `messages: []` here — even with a note attached — hands back the one
+        // shape this whole mechanism exists to eliminate: an empty list that
+        // looks like an answer.
+        return jsonErrorResponse({
+          result: 'INVALID_FOLDER',
+          reason: resolved.ambiguous
+            ? `${resolved.available.length} folders are named ${JSON.stringify(folderArg.trim())}; pass one of their ids instead.`
+            : `There is no OurFamilyWizard folder with the id or name ${JSON.stringify(folderArg)}.`,
+          remedy: 'Re-call with folderId "inbox", "sent", "both", or the id or name of one of availableFolders (ofw_list_message_folders lists them with counts).',
+          availableFolders: resolved.available,
+          complete: false,
+          note: 'No messages were looked up. This says NOTHING about what is in any folder — do not read it as "no messages".',
+        });
+      } else {
+        return listLiveFolder(resolved.folder);
+      }
     }
 
     // sent_at is stored as OFW's naive local wall clock, so the bounds are
