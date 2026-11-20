@@ -8433,3 +8433,170 @@ describe('draft revision and reply target agree across save, list, get and check
     expect(saved).not.toHaveProperty('bodySha256');
   });
 });
+
+// Messages in folders the cache does not hold (issue #453 follow-up): a live
+// folder listing leaves a sighting that ofw_get_message's gates can judge.
+describe('ofw_get_message for messages seen in a live folder listing', () => {
+  const KEYS = ['OFW_READ_DAYS', 'OFW_NO_READ_DAYS', 'OFW_ALLOW_MARK_READ', 'OFW_CONFIRM_MARK_READ'] as const;
+  const prev: Record<string, string | undefined> = {};
+  let err: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    for (const k of KEYS) { prev[k] = process.env[k]; delete process.env[k]; }
+    err = vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+  afterEach(() => {
+    for (const k of KEYS) {
+      if (prev[k] === undefined) delete process.env[k];
+      else process.env[k] = prev[k];
+    }
+    err.mockRestore();
+  });
+
+  const FOLDERS = { systemFolders: [{ id: 101, name: 'Inbox', folderType: 'INBOX' }], userFolders: [{ id: 201, name: 'School' }] };
+  const listItem = (id: number, read: boolean) => ({
+    id, subject: `Subject ${id}`, date: { dateTime: '2026-11-02T18:30:00' }, author: { name: 'Parent A' },
+    showNeverViewed: false, read, recipients: [],
+  });
+  const detail = (id: number, folder: Record<string, unknown> | undefined = { id: 201, name: 'School' }) => ({
+    id, subject: `Subject ${id}`, body: 'live body', date: { dateTime: '2026-11-02T18:30:00' },
+    from: { name: 'Parent A' }, recipients: [{ user: { userId: 2000001, name: 'Me' }, viewed: { dateTime: '2026-11-19T10:00:00' } }],
+    ...(folder ? { folder } : {}),
+  });
+
+  /** List the School folder once (one folder lookup + one page), which records the sightings. */
+  async function listSchool(...items: unknown[]): Promise<void> {
+    const c = new OFWClient();
+    vi.spyOn(c, 'request').mockResolvedValueOnce(FOLDERS).mockResolvedValueOnce({ data: items });
+    setup(c);
+    await handlers.get('ofw_list_messages')!({ folderId: 'School' });
+  }
+
+  function mapFolders(): void {
+    setMeta('inbox_folder_id', '101');
+    setMeta('sent_folder_id', '104');
+    setMeta('drafts_folder_id', '103');
+  }
+
+  it('the live listing records a sighting per message', async () => {
+    await listSchool(listItem(6001, false));
+    expect(JSON.parse(cache.core.getMeta('folder_sighting:6001')!)).toMatchObject({
+      folderId: '201', folderName: 'School', subject: 'Subject 6001', from: 'Parent A', read: false,
+    });
+  });
+
+  it('OFW_ALLOW_MARK_READ=false opens a message the listing saw as READ', async () => {
+    mapFolders();
+    await listSchool(listItem(6002, true));
+    process.env.OFW_ALLOW_MARK_READ = 'false';
+    const c = new OFWClient();
+    const spy = vi.spyOn(c, 'request').mockResolvedValueOnce(detail(6002));
+    setup(c);
+    const parsed = JSON.parse((await handlers.get('ofw_get_message')!({ messageId: '6002' })).content[0].text);
+    expect(spy).toHaveBeenCalledWith('GET', '/pub/v3/messages/6002');
+    expect(parsed.body).toBe('live body');
+    expect(parsed).toMatchObject({ folder: 'other', folderId: '201', folderName: 'School', read: null });
+    // Not cached as an inbox message: it is not in the inbox.
+    expect(getMessage(6002)).toBeNull();
+    expect(parsed.freshness.source).toBe('live');
+  });
+
+  it('OFW_ALLOW_MARK_READ=false refuses one the listing saw as UNREAD, naming it, without a request', async () => {
+    await listSchool(listItem(6003, false));
+    process.env.OFW_ALLOW_MARK_READ = 'false';
+    const c = new OFWClient();
+    const spy = vi.spyOn(c, 'request');
+    setup(c);
+    const result = await handlers.get('ofw_get_message')!({ messageId: '6003' });
+    const parsed = JSON.parse(result.content[0].text);
+    expect(result.isError).toBe(true);
+    expect(parsed).toMatchObject({ error: 'MARK_READ_BLOCKED', messageId: 6003, subject: 'Subject 6003' });
+    expect(parsed.reason).toMatch(/unread message in the "School" folder/);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('OFW_CONFIRM_MARK_READ previews an unread sighted message instead of refusing it', async () => {
+    await listSchool(listItem(6004, false));
+    process.env.OFW_CONFIRM_MARK_READ = 'true';
+    const c = new OFWClient();
+    const spy = vi.spyOn(c, 'request');
+    setup(c);
+    const preview = await callPreview(handlers.get('ofw_get_message')!, { messageId: '6004' });
+    expect(preview.preview).toMatchObject({ messageId: 6004, subject: 'Subject 6004', from: 'Parent A', sentAt: '2026-11-02T18:30:00-05:00' });
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('a no-read day withholds an unread sighted message by name, and serves a read one', async () => {
+    mapFolders();
+    await listSchool(listItem(6005, false), listItem(6006, true));
+    process.env.OFW_NO_READ_DAYS = 'sun mon tue wed thu fri sat';
+    const c = new OFWClient();
+    const spy = vi.spyOn(c, 'request').mockResolvedValueOnce(detail(6006));
+    setup(c);
+    const blocked = await handlers.get('ofw_get_message')!({ messageId: '6005' });
+    const parsed = JSON.parse(blocked.content[0].text);
+    expect(blocked.isError).toBe(true);
+    expect(parsed).toMatchObject({ error: 'READING_BLOCKED', messageId: 6005, subject: 'Subject 6005', folderName: 'School' });
+    expect(spy).not.toHaveBeenCalled();
+    const served = JSON.parse((await handlers.get('ofw_get_message')!({ messageId: '6006' })).content[0].text);
+    expect(served.body).toBe('live body');
+  });
+
+  it('a no-read refusal names an unnamed folder by its id', async () => {
+    setMeta('folder_sighting:6011', JSON.stringify({ folderId: '777', folderName: null, subject: 'S', read: false }));
+    process.env.OFW_NO_READ_DAYS = 'sun mon tue wed thu fri sat';
+    setup(new OFWClient());
+    const parsed = JSON.parse((await handlers.get('ofw_get_message')!({ messageId: '6011' })).content[0].text);
+    expect(parsed.hint).toMatch(/"777" folder/);
+  });
+
+  it('the uncached-id refusals point at listing the folder, not only at a sync', async () => {
+    process.env.OFW_ALLOW_MARK_READ = 'false';
+    setup(new OFWClient());
+    let parsed = JSON.parse((await handlers.get('ofw_get_message')!({ messageId: '6100' })).content[0].text);
+    expect(parsed.hint).toMatch(/ofw_list_messages\(folderId/);
+    delete process.env.OFW_ALLOW_MARK_READ;
+    process.env.OFW_CONFIRM_MARK_READ = 'true';
+    parsed = JSON.parse((await handlers.get('ofw_get_message')!({ messageId: '6100' }, NO_ELICIT_CTX)).content[0].text);
+    expect(parsed.hint).toMatch(/ofw_list_messages\(folderId/);
+    delete process.env.OFW_CONFIRM_MARK_READ;
+    process.env.OFW_NO_READ_DAYS = 'sun mon tue wed thu fri sat';
+    parsed = JSON.parse((await handlers.get('ofw_get_message')!({ messageId: '6100' })).content[0].text);
+    expect(parsed.hint).toMatch(/ofw_list_messages\(folderId/);
+  });
+
+  it('never caches a live-fetched message from another folder as inbox, sighted or not', async () => {
+    mapFolders();
+    const c = new OFWClient();
+    vi.spyOn(c, 'request')
+      .mockResolvedValueOnce(detail(6007, { id: 105, name: 'Archived' }))
+      .mockResolvedValueOnce(detail(6008, { id: 105 }));
+    setup(c);
+    const a = JSON.parse((await handlers.get('ofw_get_message')!({ messageId: '6007' })).content[0].text);
+    expect(a).toMatchObject({ folder: 'other', folderId: '105', folderName: 'Archived', read: null });
+    expect(a.otherFolderNote).toMatch(/not cached/);
+    const b = JSON.parse((await handlers.get('ofw_get_message')!({ messageId: '6008', view: 'full' })).content[0].text);
+    expect(b).toMatchObject({ folder: 'other', folderId: '105', folderName: null });
+    expect(getMessage(6007)).toBeNull();
+    expect(getMessage(6008)).toBeNull();
+  });
+
+  it('falls back to the sighting for the folder name when the detail gives none', async () => {
+    mapFolders();
+    await listSchool(listItem(6009, true));
+    const c = new OFWClient();
+    vi.spyOn(c, 'request').mockResolvedValueOnce(detail(6009, { id: 201 }));
+    setup(c);
+    const parsed = JSON.parse((await handlers.get('ofw_get_message')!({ messageId: '6009' })).content[0].text);
+    expect(parsed.folderName).toBe('School');
+  });
+
+  it('keeps the inbox/sent labelling when the folder map is incomplete', async () => {
+    setMeta('sent_folder_id', '104');
+    const c = new OFWClient();
+    vi.spyOn(c, 'request').mockResolvedValueOnce(detail(6010, { id: 105, name: 'Archived' }));
+    setup(c);
+    const parsed = JSON.parse((await handlers.get('ofw_get_message')!({ messageId: '6010' })).content[0].text);
+    expect(parsed.folder).toBe('inbox');
+    expect(getMessage(6010)?.folder).toBe('inbox');
+  });
+});

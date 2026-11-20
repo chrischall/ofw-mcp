@@ -1,6 +1,8 @@
 import { describe, it, expect, vi } from 'vitest';
 import { OFWClient } from '../../src/client.js';
-import { fetchFolderPage, folderMessageBrief, resolveMessageFolder } from '../../src/tools/folder-messages.js';
+import { fetchFolderPage, folderMessageBrief, getFolderSighting, recordFolderSightings, resolveMessageFolder, sightingGateRow } from '../../src/tools/folder-messages.js';
+import { OFWCache } from '../../src/cache/node.js';
+import { deriveRead } from '../../src/tools/_shared.js';
 
 // The live /pub/v1/messageFolders shape (verified 2026-11-19): numeric ids,
 // `systemFolders` + `userFolders`. Placeholder ids and names only.
@@ -200,5 +202,50 @@ describe('folderMessageBrief', () => {
       .toBe('Hi — no date — read state unknown');
     expect(folderMessageBrief({ id: 1, folderId: '201', folderName: null, subject: 'Hi', from: null, sentAt: null, recipients: [], read: true }, 'America/New_York'))
       .toBe('Hi — no date — read');
+  });
+});
+
+describe('folder sightings', () => {
+  const msg = (id: number, read: boolean | null) => ({
+    id, folderId: '201', folderName: 'School', subject: `S${id}`, from: 'Parent A', sentAt: '2026-11-02T18:30:00', recipients: [], read,
+  });
+
+  it('records what a live folder page showed, per id, and reads it back', async () => {
+    const store = OFWCache.open(':memory:');
+    await recordFolderSightings(store, [msg(1, true), msg(2, false)], '2026-11-19T00:00:00.000Z');
+    expect(await getFolderSighting(store, 2)).toEqual({
+      folderId: '201', folderName: 'School', subject: 'S2', from: 'Parent A', sentAt: '2026-11-02T18:30:00', read: false,
+      seenAt: '2026-11-19T00:00:00.000Z',
+    });
+    expect(await getFolderSighting(store, 3)).toBeNull();
+  });
+
+  it('treats a corrupt or foreign record as no sighting', async () => {
+    const store = OFWCache.open(':memory:');
+    await store.setMeta('folder_sighting:4', 'not json');
+    await store.setMeta('folder_sighting:5', JSON.stringify({ folderId: 7 }));
+    await store.setMeta('folder_sighting:6', JSON.stringify(null));
+    expect(await getFolderSighting(store, 4)).toBeNull();
+    expect(await getFolderSighting(store, 5)).toBeNull();
+    expect(await getFolderSighting(store, 6)).toBeNull();
+  });
+
+  it('reads back a sighting with unknown name, sender, date and read flag', async () => {
+    const store = OFWCache.open(':memory:');
+    await store.setMeta('folder_sighting:8', JSON.stringify({ folderId: '201', subject: 'x', read: 'maybe' }));
+    expect(await getFolderSighting(store, 8)).toEqual({
+      folderId: '201', folderName: null, subject: 'x', from: null, sentAt: null, read: null, seenAt: null,
+    });
+  });
+
+  it('gates as read ONLY when OFW said read:true — anything else fails closed to unread', () => {
+    const s = { folderId: '201', folderName: 'School', subject: 'x', from: 'A', sentAt: '2026-11-02T18:30:00', seenAt: null };
+    const readRow = sightingGateRow(9, { ...s, read: true });
+    expect(readRow).toMatchObject({ id: 9, subject: 'x', fromUser: 'A', sentAt: '2026-11-02T18:30:00', body: null });
+    expect(deriveRead(readRow)).toBe(true);
+    expect(deriveRead(sightingGateRow(9, { ...s, read: false }))).toBe(false);
+    expect(deriveRead(sightingGateRow(9, { ...s, read: null, from: null, sentAt: null }))).toBe(false);
+    expect(sightingGateRow(9, { ...s, read: null, from: null, sentAt: null })).toMatchObject({ fromUser: '', sentAt: '(time unknown)' });
+    expect(sightingGateRow(9, { ...s, read: false, folderName: null }).listData).toEqual({ read: false, sightedInFolder: '201' });
   });
 });

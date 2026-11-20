@@ -10,7 +10,7 @@ import {
   DraftFreshnessError, checkDraftFreshness, draftRevision, fetchServerDraft, staleDraftPayload,
 } from './draft-freshness.js';
 import type { DraftContent } from './draft-freshness.js';
-import { FOLDER_TYPE, newDraftKey, persistFolderIds, probeIds, resolveDraftKey } from './lifecycle.js';
+import { FOLDER_TYPE, newDraftKey, persistFolderIds, probeIds, readFolderIdMap, resolveDraftKey } from './lifecycle.js';
 import type { LifecycleItem } from './lifecycle.js';
 import type { CacheStore, MessageRow, DraftRow, FolderName, Recipient } from '../cache/store.js';
 import { CONFIRM_NOTE, confirmTokenParam, confirmWrite } from './_confirm.js';
@@ -38,7 +38,7 @@ import { ApiRecipientSchema, deriveRead, detailRecipients, mergeRecipients, with
 import type { ReplyToSource } from './_shared.js';
 import { parseLenient } from '@chrischall/mcp-utils';
 import { pageState } from './pagination.js';
-import { fetchFolderPage, folderMessageBrief, LIVE_FOLDER_MAX_PAGE, resolveMessageFolder } from './folder-messages.js';
+import { fetchFolderPage, folderMessageBrief, getFolderSighting, LIVE_FOLDER_MAX_PAGE, recordFolderSightings, resolveMessageFolder, sightingGateRow } from './folder-messages.js';
 import type { LiveFolder } from './folder-messages.js';
 import { compactSentMessage, compactWrittenDraft, MESSAGE_VIEWS, senderOf, viewDrafts, viewMessages, viewOne } from './project.js';
 
@@ -389,6 +389,13 @@ async function openUnreadBody(client: OFWClient, cache: CacheStore, cached: Mess
 }
 
 /**
+ * What to do about an id the cache has never seen. A sync covers inbox, sent
+ * and drafts; a message in any other folder is only ever seen by listing that
+ * folder, which records a sighting the mark-read gates can judge.
+ */
+const UNSEEN_ID_HINT = 'Run ofw_sync_messages first: it walks list pages, not bodies, so it learns an inbox or sent message\'s subject, sender and read state without marking anything read. If the message is in another folder (Archived, Action Items, a folder you created), list that folder instead with ofw_list_messages(folderId: <its id or name>) — that reads its list page without opening anything. Then call ofw_get_message again.';
+
+/**
  * OFW_CONFIRM_MARK_READ: before `ofw_get_message` fetches a body that would
  * mark an unread inbox message read, show the user which message it is and
  * ask. Called only after markReadVerdict let the fetch through, so the
@@ -413,7 +420,7 @@ async function confirmMarkRead(
       error: 'MARK_READ_CONFIRMATION_UNAVAILABLE',
       messageId: Number(args.messageId),
       reason: 'This server asks before opening an unread message (OFW_CONFIRM_MARK_READ), but this id is not in the cache, so there is no subject or time to show — and fetching them is the request that would mark it read.',
-      hint: 'Run ofw_sync_messages first: it walks list pages, not bodies, so it learns the subject and sent time without marking anything read. Then call ofw_get_message again.',
+      hint: UNSEEN_ID_HINT,
     });
   }
   // The preview never passes through jsonResponse, so normalize here: sentAt
@@ -486,6 +493,12 @@ function withholdBody<T extends MessageRow>(row: T): T & { bodyWithheld: true; w
  * we cannot know without making the request that stamps it. Syncing first
  * (which reads list pages, not bodies) resolves it.
  */
+/** The folder a gate row was SIGHTED in (sightingGateRow), or null for a cached row. */
+function sightedIn(row: MessageRow): string | null {
+  const where = (row.listData as { sightedInFolder?: unknown } | null)?.sightedInFolder;
+  return typeof where === 'string' ? where : null;
+}
+
 export function markReadVerdict(
   cached: MessageRow | null,
   requested: boolean | undefined,
@@ -505,10 +518,12 @@ export function markReadVerdict(
     messageId: cached?.id ?? null,
     reason: cached === null
       ? 'This id is not in the cache, so whether reading it would mark it read is unknowable without making the request that would.'
-      : 'This is an unread inbox message; fetching its body would mark it read on OurFamilyWizard.',
+      : sightedIn(cached) !== null
+        ? `This is an unread message in the "${sightedIn(cached)}" folder (per OurFamilyWizard's folder listing); fetching its body would mark it read on OurFamilyWizard.`
+        : 'This is an unread inbox message; fetching its body would mark it read on OurFamilyWizard.',
     note: `Refused because ${because}. Reading a message for the first time stamps a "First Viewed" timestamp that your co-parent can see and that forms part of the record — it cannot be undone. To read it anyway, call again with allowMarkRead:true${ceiling ? '' : ' (which this deployment does not permit — clear OFW_ALLOW_MARK_READ to re-enable)'}.`,
     ...(cached === null
-      ? { hint: 'Run ofw_sync_messages first: it walks list pages, not bodies, so it can tell you what this id is without stamping anything.' }
+      ? { hint: UNSEEN_ID_HINT }
       : { subject: cached.subject, fromUser: cached.fromUser, sentAt: cached.sentAt }),
   });
 }
@@ -640,6 +655,10 @@ export function registerMessageTools(
       const result = await fetchFolderPage(client, liveFolder, {
         page, size: liveSize, sort, checkedAt: new Date(callStartedAt).toISOString(), full: args.view === 'full',
       });
+      // Remember what the listing showed (subject, sender, time, OFW's read
+      // flag) so ofw_get_message's mark-read gates can judge these ids — the
+      // sync never walks this folder, so nothing else ever would.
+      await recordFolderSightings(cacheProvider(), result.messages, new Date(callStartedAt).toISOString());
       const freshness = await buildFreshness(cacheProvider(), { source: 'live', folders: [] });
       if (brief) {
         const lines = result.messages.map((m) => folderMessageBrief(m, displayTimeZone()));
@@ -884,7 +903,7 @@ export function registerMessageTools(
 
   server.registerTool('ofw_get_message', {
     _meta: familyMeta('lookup'),
-    description: 'Get a single OurFamilyWizard message OR draft by ID. Reads from local cache when available; otherwise fetches from OFW — and for an UNREAD INBOX message that fetch marks it read and stamps a "First Viewed" time the co-parent can see, which is part of the record and cannot be undone. Pass allowMarkRead:false to refuse such a fetch instead (cached bodies, sent messages and already-read messages are unaffected, because none of them stamp anything). For ids that match a draft (in the drafts cache), the response carries folder="drafts" and the body/subject/recipients reflect the drafts cache (which ofw_sync_messages keeps fresh) — drafts have no `fromUser`, and `sentAt`/`fetchedBodyAt` mirror the draft\'s `modifiedAt`. For inbox/sent messages, folder is "inbox" or "sent" as before. On a server-configured no-read day (OFW_READ_DAYS / OFW_NO_READ_DAYS) only an UNREAD inbox message is protected: its body is withheld (body:null, bodyWithheld:true, withheldReason:"UNREAD_ON_NO_READ_DAY", readingBlocked says when reading resumes) and OFW is never contacted for it; an id not in the cache is refused, since fetching it could mark it read. Sent messages and inbox messages already read are returned exactly as on a reading day. When the server runs with OFW_CONFIRM_MARK_READ=true, opening an unread inbox message first shows its subject, sender and sent time and asks the user to confirm marking it read: a confirmation prompt where the client supports one; otherwise the first call fetches NOTHING and returns that preview plus a confirmToken, and only a repeat call with that token opens the message (see MCP_CONFIRM_MODE). Show the user the preview and wait for their yes before repeating the call. Each recipient\'s `viewedAt` carries its provenance: `viewedAtOrigin` is "detail-this-call" (read from OurFamilyWizard during this call), "detail-cached" (from an earlier read — see `viewedAtCheckedAt`), "list" (only the list was seen, so a null `viewedAt` means UNKNOWN, not unviewed) or "unrecorded". `viewedPlaceholder` is OurFamilyWizard\'s raw 1970 placeholder, kept as source data — it is never a view time.' + OVERRIDE_DESCRIPTION,
+    description: 'Get a single OurFamilyWizard message OR draft by ID. Reads from local cache when available; otherwise fetches from OFW — and for an UNREAD INBOX message that fetch marks it read and stamps a "First Viewed" time the co-parent can see, which is part of the record and cannot be undone. Pass allowMarkRead:false to refuse such a fetch instead (cached bodies, sent messages and already-read messages are unaffected, because none of them stamp anything). For ids that match a draft (in the drafts cache), the response carries folder="drafts" and the body/subject/recipients reflect the drafts cache (which ofw_sync_messages keeps fresh) — drafts have no `fromUser`, and `sentAt`/`fetchedBodyAt` mirror the draft\'s `modifiedAt`. For inbox/sent messages, folder is "inbox" or "sent" as before. A message in any other folder (Archived, Action Items, a folder the user created) comes back with folder:"other", folderId, folderName and read:null, and is not cached (each read is live); after ofw_list_messages(folderId) has listed that folder, the mark-read safeguards below judge such a message by that listing\'s read flag, so it can be opened, confirmed or withheld like an inbox message instead of being refused as unknown. On a server-configured no-read day (OFW_READ_DAYS / OFW_NO_READ_DAYS) only an UNREAD inbox message is protected: its body is withheld (body:null, bodyWithheld:true, withheldReason:"UNREAD_ON_NO_READ_DAY", readingBlocked says when reading resumes) and OFW is never contacted for it; an id not in the cache is refused, since fetching it could mark it read. Sent messages and inbox messages already read are returned exactly as on a reading day. When the server runs with OFW_CONFIRM_MARK_READ=true, opening an unread inbox message first shows its subject, sender and sent time and asks the user to confirm marking it read: a confirmation prompt where the client supports one; otherwise the first call fetches NOTHING and returns that preview plus a confirmToken, and only a repeat call with that token opens the message (see MCP_CONFIRM_MODE). Show the user the preview and wait for their yes before repeating the call. Each recipient\'s `viewedAt` carries its provenance: `viewedAtOrigin` is "detail-this-call" (read from OurFamilyWizard during this call), "detail-cached" (from an earlier read — see `viewedAtCheckedAt`), "list" (only the list was seen, so a null `viewedAt` means UNKNOWN, not unviewed) or "unrecorded". `viewedPlaceholder` is OurFamilyWizard\'s raw 1970 placeholder, kept as source data — it is never a view time.' + OVERRIDE_DESCRIPTION,
     annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
     inputSchema: z.object({
       messageId: z.string().describe('Message ID (also accepts draft IDs — drafts are routed via the drafts cache)'),
@@ -964,6 +983,12 @@ export function registerMessageTools(
     }
 
     const cached = await cache.getMessage(id);
+    // A message in a folder the cache does not hold (Archived, a user folder)
+    // is known only from a live folder listing's sighting. It stands in for
+    // the cached row in every mark-read gate below — never stored, and never
+    // used as content: its body still comes from the live fetch.
+    const sighting = cached === null ? await getFolderSighting(cache, id) : null;
+    const gateRow = cached ?? (sighting === null ? null : sightingGateRow(id, sighting));
 
     // No-read day: protect an UNREAD INBOX message — answer from the cache
     // with its body withheld and never touch OFW, since its detail GET would
@@ -971,16 +996,29 @@ export function registerMessageTools(
     // what cannot be known without that GET. Sent and already-read messages
     // fall through and are served as on any other day.
     const noReadDay = readingBlockedToday();
-    const protectedToday = noReadDay !== null && (cached === null || isUnreadInbox(cached));
+    const protectedToday = noReadDay !== null && (gateRow === null || isUnreadInbox(gateRow));
     // The override is "used" only when it lifts the day for THIS message.
     const overriding = protectedToday && args.overrideNoReadDay === true;
     const blocked = protectedToday && !overriding ? noReadDay : null;
     if (blocked !== null) {
       if (cached === null) {
+        if (sighting !== null) {
+          // Seen in a folder listing as unread: say which message is being
+          // held back, as the cached path does, without a request.
+          return jsonErrorResponse({
+            ...blocked,
+            messageId: id,
+            subject: sighting.subject,
+            from: sighting.from,
+            sentAt: sighting.sentAt,
+            folderName: sighting.folderName,
+            hint: `OurFamilyWizard's listing of the "${sighting.folderName ?? sighting.folderId}" folder shows this message unread, and opening it would mark it read. Its body is withheld until reading resumes (or overrideNoReadDay:true, if the user explicitly asks).`,
+          });
+        }
         return jsonErrorResponse({
           ...blocked,
           messageId: id,
-          hint: 'This id is not in the cache, so whether it is an unread inbox message cannot be told without the request that would mark it read. Run ofw_sync_messages (it never opens an unread inbox message) to see its subject, sender and date — and, if it is sent or already read, its body.',
+          hint: 'This id is not in the cache, so whether it is an unread inbox message cannot be told without the request that would mark it read. Run ofw_sync_messages (it never opens an unread inbox message) to see its subject, sender and date — and, if it is sent or already read, its body. If it is in another folder (Archived, Action Items, a folder you created), list that folder with ofw_list_messages(folderId: <its id or name>) instead.',
         });
       }
       const attachments = await cache.listAttachmentsForMessage(id);
@@ -1063,9 +1101,9 @@ export function registerMessageTools(
     // unread INBOX message marks it read on OFW, stamping a "First Viewed"
     // time the co-parent can see. That is a court-visible, irreversible change
     // made as a side effect of an ordinary read, so it gets an explicit gate.
-    const markReadCheck = markReadVerdict(cached, args.allowMarkRead);
+    const markReadCheck = markReadVerdict(gateRow, args.allowMarkRead);
     if (markReadCheck !== null) return markReadCheck;
-    const confirmGate = await confirmMarkRead(ctx, cached, args, overriding);
+    const confirmGate = await confirmMarkRead(ctx, gateRow, args, overriding);
     if (confirmGate) return confirmGate;
 
     const detail = parseLenient(
@@ -1082,10 +1120,25 @@ export function registerMessageTools(
     // a sent-scoped ofw_list_messages). When that mapping isn't known yet (no
     // sync has run in this cache), fall back to 'inbox' as before.
     let folder: 'inbox' | 'sent' = cached?.folder ?? 'inbox';
+    // Set when the detail places the message in a folder the cache does not
+    // hold. Such a message is NOT cached: as 'inbox' it would appear in inbox
+    // listings and counts it is not in, and no sync would ever correct it.
+    let otherFolder: { id: string; name: string | null } | null = null;
     if (!cached) {
-      const sentFolderId = await cache.getMeta('sent_folder_id');
-      if (sentFolderId !== null && detail.folder?.id != null && String(detail.folder.id) === sentFolderId) {
+      const map = await readFolderIdMap(cache);
+      const detailFolderId = detail.folder?.id == null ? null : String(detail.folder.id);
+      if (map.sent !== null && detailFolderId === map.sent) {
         folder = 'sent';
+      } else if (detailFolderId !== null && map.inbox !== null && map.sent !== null && detailFolderId !== map.inbox) {
+        // Only when BOTH ids are known: with a partial map, "not the sent id"
+        // cannot tell the inbox from anything else, so the old labelling stands.
+        const detailName = (detail.folder as { name?: unknown }).name;
+        otherFolder = {
+          id: detailFolderId,
+          name: typeof detailName === 'string' && detailName !== ''
+            ? detailName
+            : sighting !== null && sighting.folderId === detailFolderId ? sighting.folderName : null,
+        };
       }
     }
     const fetchedBodyAt = new Date().toISOString();
@@ -1102,16 +1155,26 @@ export function registerMessageTools(
       chainRootId: cached?.chainRootId ?? null,
       listData: cached?.listData ?? detail,
     };
-    await cache.upsertMessage(row);
+    if (otherFolder === null) await cache.upsertMessage(row);
     if (Array.isArray(detail.files) && detail.files.length > 0) {
       await fetchAttachmentMetaForMessage(client, detail.id, detail.files, cache);
     }
     const attachments = await cache.listAttachmentsForMessage(detail.id);
     // Fetched live from OFW in this call — current by construction.
-    const freshness = await buildFreshness(cache, { source: 'live', folders: [folder] });
+    const freshness = await buildFreshness(cache, { source: 'live', folders: otherFolder === null ? [folder] : [] });
     return jsonResponse({
       ...(overriding ? readOverrideFields('ofw_get_message', [row.id]) : {}),
       ...viewOne(view, withViewOrigin(withReadState(row), callStartedAt)),
+      ...(otherFolder === null ? {} : {
+        folder: 'other',
+        folderId: otherFolder.id,
+        folderName: otherFolder.name,
+        // The read derivation is folder-aware (received vs sent), and a
+        // message in another folder could be either — so no verdict. The
+        // recipients' viewedAt, read from the detail just now, is the evidence.
+        read: null,
+        otherFolderNote: `This message is in the "${otherFolder.name ?? otherFolder.id}" folder, which this server does not sync, so it is not cached: every read of it is a live fetch. \`read\` is null because whether it was received or sent cannot be told from the folder; recipients[].viewedAt is OurFamilyWizard's own record.`,
+      }),
       attachments,
       freshness,
     });

@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { parseLenient, pruneUndefined } from '@chrischall/mcp-utils';
 import type { OFWClient } from '../client.js';
-import type { Recipient } from '../cache/store.js';
+import type { CacheStore, MessageRow, Recipient } from '../cache/store.js';
 import { ApiRecipientSchema, mapRecipients } from './_shared.js';
 import { briefDate, briefLine } from './hints.js';
 import { offsetState, readUpstreamPaging } from './pagination.js';
@@ -216,3 +216,87 @@ export function folderMessageBrief(m: FolderMessage, tz: string): string {
  * would come back short and read as the last page.
  */
 export const LIVE_FOLDER_MAX_PAGE = 50;
+
+/**
+ * What a live folder listing showed about one message — a SIGHTING, kept in
+ * `meta` (`folder_sighting:<id>`), never in the messages table.
+ *
+ * `ofw_get_message`'s gates decide "would fetching this stamp First Viewed?"
+ * from a cached row, and refuse an id they have never seen, because asking OFW
+ * is the request that stamps. The sync never walks these folders, so before
+ * sightings a message found in one could never be judged: on a deployment with
+ * OFW_ALLOW_MARK_READ=false, OFW_CONFIRM_MARK_READ or a no-read day it was
+ * unreadable, and the refusal's "run ofw_sync_messages first" could not help.
+ * The listing already carries OFW's own read flag, subject, sender and time —
+ * exactly what those gates need — so it is remembered here.
+ */
+export interface FolderSighting {
+  folderId: string;
+  folderName: string | null;
+  subject: string;
+  from: string | null;
+  sentAt: string | null;
+  /** OFW's list `read` flag when sighted; null when it sent none. */
+  read: boolean | null;
+  /** When the listing was read (UTC ISO), or null if unrecorded. */
+  seenAt: string | null;
+}
+
+const sightingKey = (id: number): string => `folder_sighting:${id}`;
+
+export async function recordFolderSightings(
+  store: CacheStore,
+  messages: FolderMessage[],
+  seenAt: string,
+): Promise<void> {
+  for (const m of messages) {
+    const sighting: FolderSighting = {
+      folderId: m.folderId, folderName: m.folderName, subject: m.subject, from: m.from, sentAt: m.sentAt, read: m.read, seenAt,
+    };
+    await store.setMeta(sightingKey(m.id), JSON.stringify(sighting));
+  }
+}
+
+/** The recorded sighting for an id, or null — including for a record that does not parse. */
+export async function getFolderSighting(store: CacheStore, id: number): Promise<FolderSighting | null> {
+  const raw = await store.getMeta(sightingKey(id));
+  if (raw === null) return null;
+  let value: unknown;
+  try { value = JSON.parse(raw); } catch { return null; }
+  const r = asRecord(value);
+  if (r === null || typeof r.folderId !== 'string' || typeof r.subject !== 'string') return null;
+  const str = (v: unknown): string | null => (typeof v === 'string' ? v : null);
+  return {
+    folderId: r.folderId,
+    folderName: str(r.folderName),
+    subject: r.subject,
+    from: str(r.from),
+    sentAt: str(r.sentAt),
+    read: typeof r.read === 'boolean' ? r.read : null,
+    seenAt: str(r.seenAt),
+  };
+}
+
+/**
+ * A sighting as a row the mark-read gates can judge — NEVER stored. It is
+ * shaped as an inbox row because that is the conservative reading: only OFW's
+ * explicit `read: true` counts as read (scrapeSaysRead), so a missing flag, or
+ * a sent message whose list flag means something else, fails closed to
+ * "would stamp" — a false unread costs a confirmation, a false read stamps
+ * the record.
+ */
+export function sightingGateRow(id: number, s: FolderSighting): MessageRow {
+  return {
+    id,
+    folder: 'inbox',
+    subject: s.subject,
+    fromUser: s.from ?? '',
+    sentAt: s.sentAt ?? '(time unknown)',
+    recipients: [],
+    body: null,
+    fetchedBodyAt: null,
+    replyToId: null,
+    chainRootId: null,
+    listData: { read: s.read === true, sightedInFolder: s.folderName ?? s.folderId },
+  };
+}
