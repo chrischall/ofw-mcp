@@ -1,7 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import type { OFWClient } from '../client.js';
-import { syncAll, fetchAttachmentMeta, fetchAttachmentMetaForMessage, getDraftsCacheStatus, latestViewedAt, NEW_MESSAGES_CAP, refreshReadReporting } from '../sync.js';
+import { FolderIdSchema, syncAll, fetchAttachmentMeta, fetchAttachmentMetaForMessage, getDraftsCacheStatus, latestViewedAt, NEW_MESSAGES_CAP, refreshReadReporting } from '../sync.js';
 import type { DraftsCacheStatus, MarkedReadHint } from '../sync.js';
 import { buildFreshness } from './freshness.js';
 import type { FreshnessBlock } from './freshness.js';
@@ -149,7 +149,7 @@ const DetailFilesSchema = z.looseObject({ files: z.array(z.number()).optional() 
 // guessing, since a wrong count would manufacture a false out-of-sync verdict.
 const FolderCountsSchema = z.looseObject({
   systemFolders: z.array(z.looseObject({
-    id: z.string(),
+    id: FolderIdSchema,
     folderType: z.string(),
     totalCount: z.number().optional(),
     messageCount: z.number().optional(),

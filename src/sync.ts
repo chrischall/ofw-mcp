@@ -123,8 +123,17 @@ export interface FolderIds {
   drafts: string;
 }
 
+/**
+ * A folder id as OFW sends it, normalised to the string every comparison in
+ * this server uses. The live /pub/v1/messageFolders payload carries NUMBERS
+ * (verified 2026-11-19); a string-only schema warned on every sync and passed
+ * the numbers through typed as strings, so `String(detail.folder.id) ===
+ * map.sent` in lifecycle.ts could never match a live-resolved map.
+ */
+export const FolderIdSchema = z.union([z.string(), z.number()]).transform(String);
+
 const FoldersSchema = z.looseObject({
-  systemFolders: z.array(z.looseObject({ id: z.string(), folderType: z.string() })).optional(),
+  systemFolders: z.array(z.looseObject({ id: FolderIdSchema, folderType: z.string() })).optional(),
 });
 
 export async function resolveFolderIds(client: OFWClient, store: CacheStore): Promise<FolderIds> {
