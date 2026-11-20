@@ -260,11 +260,11 @@
     },
     {
       "name": "ofw_list_message_folders",
-      "description": "List message folders and unread counts"
+      "description": "List message folders (system and user-created) and unread counts"
     },
     {
       "name": "ofw_list_messages",
-      "description": "List messages in a folder"
+      "description": "List messages in a folder: inbox/sent from the cache, any other folder live"
     },
     {
       "name": "ofw_get_message",

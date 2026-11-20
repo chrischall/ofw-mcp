@@ -90,6 +90,7 @@ src/
     expenses.ts     totals, list, create
     expense-reimbursement.ts  ofw_mark_expense_reimbursed — confirm-gated status PUT recording a reimbursement already settled outside OFW (never moves money); registered only in write mode all, not on the upload-only surface
     journal.ts      list, create entries
+    folder-messages.ts  ofw_list_messages for any folder the cache does not hold (user folders, Archived, Action Items): resolve by id/name against /pub/v1/messageFolders, then ONE live list page — never a body, never cached
 tests/              mirrors src/; mocks OFWClient.request via vi.spyOn; cache tests use OFW_CACHE_DIR + tmp dir
 ```
 

@@ -132,8 +132,8 @@ Read-only tools run automatically. Writes that reach your co-parent or the court
 |------|-------------|------------|------------|
 | `ofw_get_profile` | Your profile and co-parent info | Auto | any |
 | `ofw_get_notifications` | Dashboard counts (unread messages, upcoming events, outstanding expenses). Updates your co-parent-visible last-seen status, so it is not marked read-only | Confirm | any |
-| `ofw_list_message_folders` | Folders with unread counts — **get folder IDs here before listing messages** | Auto | any |
-| `ofw_list_messages` | Messages in a folder | Auto | any |
+| `ofw_list_message_folders` | Folders (system and your own) with unread counts — **get folder IDs here before listing messages** | Auto | any |
+| `ofw_list_messages` | Messages in a folder. Inbox and sent come from the local cache; any other folder (one you created, Archived, Action Items) is read live by id or name — subjects, senders and dates, no bodies | Auto | any |
 | `ofw_get_message` | Full content of a single message | Auto | any |
 | `ofw_sync_messages` | Sync messages into the local cache and list every new message (`newMessages`). Unread inbox bodies are left unfetched, so a sync never marks anything read unless you ask for it; if it ever does, the response says so (`warning`, `markedRead`) | Auto | any |
 | `ofw_get_unread_sent` | Sent messages a recipient hasn't read yet (from local cache) | Auto | any |
