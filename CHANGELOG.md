@@ -1,5 +1,20 @@
 # Changelog
 
+## [2.30.0](https://github.com/chrischall/ofw-mcp/compare/v2.29.1...v2.30.0) (2026-11-20)
+
+
+### Features
+
+* **messages:** list messages in any OFW folder, not just inbox/sent ([#454](https://github.com/chrischall/ofw-mcp/issues/454)) ([86118f0](https://github.com/chrischall/ofw-mcp/commit/86118f08d1e3954d50b4b4fbb9e08e3f3bc571c8))
+* **messages:** open messages from other folders under the mark-read safeguards ([#455](https://github.com/chrischall/ofw-mcp/issues/455)) ([83ff9c7](https://github.com/chrischall/ofw-mcp/commit/83ff9c7050cf9d67ca1c5d5e884597f80b8ca521))
+
+
+### Bug Fixes
+
+* **deps:** bump the production-dependencies group with 3 updates ([#451](https://github.com/chrischall/ofw-mcp/issues/451)) ([91a90db](https://github.com/chrischall/ofw-mcp/commit/91a90db21d1dc2070e42021792a1c1905f1280a6))
+* **messages:** omit read for a message from another folder instead of null ([#457](https://github.com/chrischall/ofw-mcp/issues/457)) ([e68de11](https://github.com/chrischall/ofw-mcp/commit/e68de11772370f5605c87840082935202cf67a39))
+* **sync:** accept OFW's numeric folder ids instead of warning on every sync ([#458](https://github.com/chrischall/ofw-mcp/issues/458)) ([a33a4c9](https://github.com/chrischall/ofw-mcp/commit/a33a4c97585e940abbe6f309f4d40c04ef2dec0d))
+
 ## [2.29.1](https://github.com/chrischall/ofw-mcp/compare/v2.29.0...v2.29.1) (2026-11-12)
 
 
